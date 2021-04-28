@@ -8,10 +8,12 @@ sudo apt install maven
 * build the maven project
 ```
 cd rdcm
+mvn dependency:copy-dependencies
 mvn package
 ```
-* run RDCM with a default `.config` file
+* Update the `run.config` file in `scripts` directory with your configurations and run HPC module using.
 ```
-java -cp target/rdcm-1.0-SNAPSHOT.jar com.metsr.hpc.RemoteDataClientManager ../scripts/run.config
+cd ../scripts
+python run_test.py run.config
 ```
 

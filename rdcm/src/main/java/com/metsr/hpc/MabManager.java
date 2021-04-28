@@ -16,9 +16,9 @@ public class MabManager{
 	private MabBus mabBus;
 	private HashMap<Integer, ArrayList<Double>> initialLinkSpeedLength;
 	private ConcurrentHashMap<Integer, Double> roadLengthMap; //July,2020
-	public String working_dir = System.getProperty("user.dir"); // find current working directory
+	public String data_dir;
 
-	public MabManager(){
+	public MabManager(String data_dir_loc){
 		HashMap<String, ArrayList<ArrayList<Integer>>> path_info = new HashMap<String, ArrayList<ArrayList<Integer>>>();
 		HashMap<String, ArrayList<Integer>> valid_path = new HashMap<String, ArrayList<Integer>>();
 		// July,2020
@@ -30,6 +30,7 @@ public class MabManager{
 		initialLinkSpeedLength = new HashMap<Integer, ArrayList<Double>>();
 		//July, 2020
 		roadLengthMap = new ConcurrentHashMap<Integer,Double>();
+		data_dir = data_dir_loc;
 	}
 
 	// it should be called every time tick.  [t1,t2]
@@ -87,7 +88,7 @@ public class MabManager{
 	public void initializeLinkEnergy1() {
 		try {
 			/* CSV file for data attribute */
-			String fileName1 = working_dir+"/data/NYC/background_traffic/background_traffic_NYC.csv";
+			String fileName1 = data_dir +"/NYC/background_traffic/background_traffic_NYC.csv";
 			BufferedReader br = new BufferedReader(new FileReader(fileName1));
 			//br.readLine();          //the first row is the title row
 			String line = null; 
@@ -117,7 +118,7 @@ public class MabManager{
 	public void initializeLinkEnergy2(){
 		try {
 			/* CSV file for data attribute */
-			String fileName2 = working_dir+"/data/NYC/background_traffic/background_traffic_NYC.csv";
+			String fileName2 = data_dir+"/NYC/background_traffic/background_traffic_NYC.csv";
 			BufferedReader br = new BufferedReader(new FileReader(fileName2));
 			br.readLine();          //the first row is the title row
 			String line = null; 

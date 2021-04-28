@@ -132,28 +132,35 @@ public class RemoteDataClientManager
 		@Override
 		public void run() {
 			// TODO Auto-generated method stub
+			
+				
 			try
 	        {
 	            client.start();
-
+	
 	            URI uri = new URI(this.addr);
-	           
-	            // wait until the server is live
-//	            System.out.println("Waiting until the server is up at : "+ this.addr);
-//	            while(!isServerListening(uri.getHost(), uri.getPort())); // ZL: This is always true, so the server would not wait wait
-//	            System.out.println("Server UP!");
-//	            Thread.sleep(500);
-	            ClientUpgradeRequest request = new ClientUpgradeRequest(); 
-	            System.out.printf("Connecting to : %s%n", uri);
-	            client.connect(socket, uri, request);
 	            
+	            
+	           
+	            ClientUpgradeRequest request = new ClientUpgradeRequest(); 
+	            
+	            System.out.printf("Client waiting until the server is up at %s%n", this.addr);
+	            while(!isServerListening(uri.getHost(), uri.getPort()));
+	            
+	            System.out.printf("Trying to connect to : %s%n", uri);
+	            client.connect(socket, uri, request);
+	            System.out.println("Connection successful!");
 	            // wait until the socket is closed
 	            this.socket.waitUntilClose();
 	        }
 	        catch (Throwable t)
 	        { 
+	            System.out.printf("Unable to connect to : %s%n", this.addr);
 	            t.printStackTrace();
 	        }
+				
+			
+			
 	        
             try
             {
@@ -210,21 +217,24 @@ public class RemoteDataClientManager
 		return destURIs;
 	}
 	
+	
+	
     public static void main(String[] args) throws InterruptedException{	
     	
     	// get the hpc config file from args
     	String config_fname =  "";
+    	String data_dir = "";
     	ArrayList<String> destURIs = new ArrayList<String>();
-    	if(args.length > 0) {
+    	if(args.length > 1) {
     		config_fname = args[0];
+    		data_dir = args[1];
     		// all IP:socket pairs for simulation instances we are tracking
             destURIs = ReadConfigFile(config_fname);
     	}
     	else {
-    		System.out.println("Please specify the location of run.config file relative to source root directory");
+    		System.out.println("java \"target/rdcm-1.0-SNAPSHOT.jar:target/dependency/*\"  com.metsr.hpc.RemoteDataClientManager "
+    				+ "../scripts/run.config <absolute path to EvacSim data directory>");
     		System.exit(-1);
-//    		System.out.println("Debug mode, using the configuration in data.properties.");
-//    		destURIs.add("ws://127.0.0.1:" + GlobalVariables.NETWORK_LISTEN_PORT);
     	}
     	
     	try{
@@ -247,39 +257,22 @@ public class RemoteDataClientManager
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(20);
         
         // xjw: Initialize the MabManager;
-        MabManager mabManager = new MabManager();
+        MabManager mabManager = new MabManager(data_dir);
         
         // This part is still problematic, ZL 20200626
         // for each instance initiate a data client
         for(String destURI : destURIs){
-        	URI uri;
-			try {
-				uri = new URI(destURI);
-				
-				// wait until the server is live
-	            System.out.println("Waiting until the server is up at -> "
-	            		+ "host : " + uri.getHost() + " port : "+ uri.getPort());
-	            while(!isServerListening(uri.getHost(), uri.getPort())); // ZL: This is always true, so the server would not wait wait
-	            System.out.println("Server UP!");
-			} catch (URISyntaxException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
-			Thread.sleep(100);
-        	// create new client
+
         	ClientExecuter client = new ClientExecuter(destURI);
         	
         	// execute the client in a thread
         	executor.execute(client);
         	
-        	// wait until all client has connected to simulation instance
-        	while(!client.socket.isConnected());
-        	
         	//  add to client list
         	clients.add(client);
         }
 
-        System.out.print("All Connected!");
+        System.out.println("All clients created!");
 
         // Initialize the RouteUCB;
         //client.printRouteUCBMap(); 

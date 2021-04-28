@@ -148,18 +148,14 @@ def run_rdcm(options, config_fname):
 
     # rdcm command
     rdcm_command = options.java_path + " " + \
-                   options.java_options + " " + \
                    "-classpath " + \
-                   get_classpath(options) + " " + \
-                   "evacSim.network.RemoteDataClientManager " + \
-                   "/test/" + config_fname
+                   "../rdcm/target/rdcm-1.0-SNAPSHOT.jar:../rdcm/target/dependency/*" + " " + \
+                   "com.metsr.hpc.RemoteDataClientManager " + \
+                   config_fname + " " + options.evacsim_dir + "/data/"
     
-    os.chdir("..")
     # run rdcm on a new terminal
     cwd = str(os.getcwd())
-    # os.system("konsole --hold --workdir " + cwd + " -e " + rdcm_command + " &")
-    os.system(rdcm_command + " > ./test/rdcm.log 2>&1  &")
-    os.chdir("test")
+    os.system(rdcm_command + " > rdcm.log 2>&1  &")
 
 def run_simulations(options):
     
