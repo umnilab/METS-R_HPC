@@ -11,7 +11,6 @@ from contextlib import closing
 
 # utilities
 
-
 def check_socket(host, port):
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         if sock.connect_ex((host, port)) == 0:
@@ -19,21 +18,13 @@ def check_socket(host, port):
         else:
             return False
 
-def str_to_int(int_str):
-    return int(int_str)
+def str_list_mapper_gen(func):
+    def str_list_mapper(str_list):
+        return [func(str) for str in str_list]
+    return str_list_mapper
 
-def str_list_to_int_list(str_list):
-    return [str_to_int(int_str) for int_str in str_list]
-# def test_connection(uri):
-#     async def test_client():
-#         try:
-#             async with websockets.connect(uri) as websocket:
-#                 return True
-
-#         except:
-#             return False
-
-#     return asyncio.new_event_loop().run_until_complete(test_client())
+str_list_to_int_list = str_list_mapper_gen(int)
+str_list_to_float_list = str_list_mapper_gen(float)
 
 
 class RDClient(threading.Thread):
@@ -62,49 +53,78 @@ class RDClient(threading.Thread):
                                          on_close=self.on_close)
 
     def on_message(self, ws, message):
-        print(f"{self.uri} : {message[0:self.msg_log_size]}")
+        # print(f"{self.uri} : {message[0:self.msg_log_size]}")
 
         # decode the json string
-        decoded_msg = json.loads(message)
-
-        assert "TYPE" not in decoded_msg.keys(),\
-            "received json object does not have TYPE field!"
-
-        if decoded_msg["TYPE"] == "OD_PAIR":
+        decoded_msg = json.loads(str(message))
+        
+        assert 'MSG_TYPE' in decoded_msg.keys(), "No MSG_TYPE field in received json string!"
+        
+        if decoded_msg['MSG_TYPE'] == "OD_PAIR":
             self.update_route_ucb(decoded_msg)
-        elif decoded_msg["TYPE"] == "BOD_PAIR":
+    
+        elif decoded_msg['MSG_TYPE'] == "BOD_PAIR":
             self.update_route_ucb_bus(decoded_msg)
-        elif decoded_msg["TYPE"] == "TICK_MSG":
+        
+        elif decoded_msg['MSG_TYPE'] == 'TICK_MSG':
             entries = decoded_msg["entries"]
+
             for entry in entries:
-                pass
+                if entry['TYPE'] == 'E':
+                    id = int(entry['ID'])
+                    values = map(str_list_to_float_list, entry['values'])
+                    self.update_link_ucb(id, values)
+            
+                elif entry['TYPE'] == 'BE':
+                    id = int(entry['ID'])
+                    values = map(str_list_to_float_list, entry['values'])
+                    self.update_link_ucb_bus(id, values)
+            
+                elif entry['TYPE'] == 'V':
+                    id = int(entry['ID'])
+                    values = map(str_list_to_float_list, entry['values'])
+                    self.update_speed_vehicle(id, values)
+            
+                else:
+                    print(f"unknown entry type in json mesage : {entry['TYPE']}")
+
+    def update_link_ucb(self, id, values):
+        if id not in self.link_ucb_received.keys():
+            self.link_ucb_received[id] = values
+    
+        else:
+            self.link_ucb_received[id].append(values)
+
+    def update_link_ucb_bus(self, id,  values):
+        if id not in self.link_ucb_bus_received.keys():
+            self.link_ucb_bus_received[id] = values
+        
+        else:
+            self.link_ucb_bus_received[id].append(values)
+
+    def update_speed_vehicle(self, id, values):
+        if id not in self.speed_vehicle_received.keys():
+            self.speed_vehicle_received[id] = values
+       
+        else:
+            self.speed_vehicle_received[id].append(values)
 
     def update_route_ucb(self, json_obj):
-        assert json_obj["OD"] in self.route_ucb_received.keys(), \
-            f"OD pair {json_obj['OD']} is already in the route_ucb_received map!"
+        assert json_obj['OD'] not in self.route_ucb_received.keys(), f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!"
 
-        def str_to_int(int_str):
-            return int(int_str)
-
-        def str_list_to_int_list(str_list):
-            return [str_to_int(int_str) for int_str in str_list]
-
-        self.route_ucb_received[json_obj["OD"]] = list(map(str_list_to_int_list, json_obj["road_lists"]))
+        # if json_obj['OD'] in self.route_ucb_received.keys():
+        #     print(f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!")
+        
+        self.route_ucb_received[json_obj['OD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
 
     def update_route_ucb_bus(self, json_obj):
-        assert json_obj["BOD"] in self.route_ucb_bus_received.keys(), \
-            f"OD pair {json_obj['BOD']} is already in the route_ucb_bus_received map!"
+        assert json_obj['BOD'] not in self.route_ucb_bus_received.keys(), f"WARNING : BOD pair {json_obj['BOD']} is already in the route_ucb_bus_received map!"
 
-        self.route_ucb_bus_received[json_obj["BOD"]] = list(map(str_list_to_int_list, json_obj["road_lists"]))
+        # if json_obj['BOD'] in self.route_ucb_bus_received.keys():
+        #     print(f"WARNING : BOD pair {json_obj['BOD']} is already in the route_ucb_bus_received map!")
 
-    def update_link_ucb_received(self, json_obj):
-        pass
-    
-    def update_link_ucb_bus_received(self, json_obj):
-        pass
+        self.route_ucb_bus_received[json_obj['BOD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
 
-    def update_speed_vehicle_received(self, json_obj):
-        pass
 
     def on_error(self, ws, error):
         print(error)
@@ -124,6 +144,21 @@ class RDClient(threading.Thread):
         self.ws.run_forever()
 
 
+    def __str__(self):
+        s = f"-----------\n" \
+            f"Client INFO\n" \
+            f"-----------\n" \
+            f"index :\n {self.index}\n" \
+            f"address :\n {self.uri}\n" \
+            f"route_ucb_received keys :\n {self.route_ucb_received.keys()}\n" \
+            f"route_ucb_bus_received keys :\n {self.route_ucb_bus_received.keys()}\n" \
+            f"link_ucb_received keys :\n {self.link_ucb_received.keys()}\n" \
+            f"link_ucb_bus_received keys :\n {self.link_ucb_bus_received.keys()}\n" \
+            f"speed_vehicle_received keys :\n {self.speed_vehicle_received.keys()}\n" \
+
+        return s
+
+
 if __name__ == "__main__":
 
     with open(sys.argv[1], "r") as f:
@@ -139,5 +174,16 @@ if __name__ == "__main__":
         rd_clients.append(ws_client)
 
     print("created all clients!")
+
+    # TODO : machine learning stuff can go here in the main thread
+    # ---------- ML STUFF GOES HERE ------------------------------
+
+
+    # wait until all rd_clients finish their work
     for i in range(num_clients):
         rd_clients[i].join()
+
+    # TODO : just print the content of rd_clients for debugging purposes, remove if not needed
+    for i in range(num_clients):
+        print(rd_clients[i])
+    
