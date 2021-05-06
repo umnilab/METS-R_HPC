@@ -188,10 +188,9 @@ class RDClient(threading.Thread):
 
 # method for intializing and running RDClients according
 # to the configurations specified in config
-def run_rdcm(config):
+def run_rdcm(num_clients, port_numbers):
 
-    num_clients = int(config['num_sim_instances'])
-    port_numbers = config['socket_port_numbers']
+
     rd_clients = []
 
     # create all clients and start the threads
@@ -231,6 +230,8 @@ if __name__ == "__main__":
     with open(sys.argv[1], "r") as f:
         config = json.load(f)
 
-    run_rdcm(config)
+    num_clients = int(config['num_sim_instances'])
+    port_numbers = config['socket_port_numbers']
+    run_rdcm(num_clients, port_numbers)
 
 

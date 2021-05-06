@@ -3,6 +3,7 @@ import sys
 import shutil
 import json
 from os import path
+from rdcm import run_rdcm
 
 
 class sim_options:
@@ -17,6 +18,7 @@ class sim_options:
         self.ports = []
 
     def __str__(self):
+        
         return """java_path : {}\
                 \njava_options : {}\
                 \nevacsim_dir : {}\
@@ -121,7 +123,7 @@ def get_classpath(options, includeBin=True):
 
     return classpath
     
-
+# NOTE : java version of RDCM is no longer used
 def run_rdcm_java(options, config_fname):
 
     # rdcm command
@@ -161,15 +163,20 @@ def main():
     
     if len(sys.argv) < 2:
         print("Specify the config file name!")
-        print("run_test.py <config_file_name>")
+        print("python3 run_test.py <config_file>")
         sys.exit(-1)
 
     options = read_run_config(sys.argv[1])
+    print("---------------- HPC options ----------------")
     print(options)
+    print("---------------------------------------------")
+
+    # prepare simulation directories
     prepare_sim_dirs(options)
-    # run_rdcm_java(options, sys.argv[1])
+    # launch the simulations
     run_simulations(options)
-    
+    # run rdcm 
+    run_rdcm(options.num_simulations, options.ports)
 
 if __name__ ==  "__main__":
     main()
