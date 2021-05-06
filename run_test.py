@@ -167,7 +167,7 @@ def main():
     options = read_run_config(sys.argv[1])
     print(options)
     prepare_sim_dirs(options)
-    run_rdcm_java(options, sys.argv[1])
+    # run_rdcm_java(options, sys.argv[1])
     run_simulations(options)
     
 
