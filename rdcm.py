@@ -1,12 +1,17 @@
 import websocket
 import json
 import sys
+import os
 import threading
 from threading import Lock
+import ast
 
 
 import socket
 from contextlib import closing
+
+from eco_routing.MabManager import MABManager
+from types import SimpleNamespace as SN
 
 # utilities
 def check_socket(host, port):
@@ -189,7 +194,29 @@ class RDClient(threading.Thread):
 # method for intializing and running RDClients according
 # to the configurations specified in config
 def run_rdcm(num_clients, port_numbers):
+    with open(sys.argv[1], "r") as f:
+        config = json.load(f)
 
+    # Obtain simulation arguments
+    args = {}
+    with open(os.path.join(config['evacsim_dir']+'data', 'Data.properties'), "r") as f:
+        for line in f:
+            if "#" in line:
+                continue
+            fields = line.replace(" ","").strip().split("=")
+            if len(fields) != 2:
+                continue
+            else:
+                print(fields)
+                try:
+                	args[fields[0]] = ast.literal_eval(fields[1])
+                except:
+                	args[fields[0]] = fields[1]
+
+
+    args = SN(**args)
+
+    mabManager= MABManager(config['evacsim_dir'], args)
 
     rd_clients = []
 
@@ -213,6 +240,10 @@ def run_rdcm(num_clients, port_numbers):
     #   also be in JSON format, also change the route_result reception side
     #   in the simulator to facilitate this.
 
+    # update the routing result
+
+    # ws_client.ws.send(route_result_json)
+
 
     # wait until all rd_clients finish their work
     for i in range(num_clients):
@@ -230,8 +261,10 @@ if __name__ == "__main__":
     with open(sys.argv[1], "r") as f:
         config = json.load(f)
 
+    # Obtain simulation arguments
     num_clients = int(config['num_sim_instances'])
     port_numbers = config['socket_port_numbers']
+
     run_rdcm(num_clients, port_numbers)
 
 
