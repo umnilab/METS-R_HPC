@@ -5,6 +5,7 @@ import os
 import threading
 from threading import Lock
 import ast
+import time
 
 
 import socket
@@ -12,6 +13,8 @@ from contextlib import closing
 
 from eco_routing.MabManager import MABManager
 from types import SimpleNamespace as SN
+
+from collections import defaultdict
 
 # utilities
 def check_socket(host, port):
@@ -209,14 +212,16 @@ def run_rdcm(num_clients, port_numbers):
             else:
                 print(fields)
                 try:
-                	args[fields[0]] = ast.literal_eval(fields[1])
+                    args[fields[0]] = ast.literal_eval(fields[1])
                 except:
-                	args[fields[0]] = fields[1]
+                    args[fields[0]] = fields[1]
 
 
     args = SN(**args)
 
     mabManager= MABManager(config['evacsim_dir'], args)
+
+    currentHour = {}
 
     rd_clients = []
 
@@ -225,6 +230,7 @@ def run_rdcm(num_clients, port_numbers):
         ws_client = RDClient("localhost", int(port_numbers[i]), i, False)
         ws_client.start()
         rd_clients.append(ws_client)
+        currentHour[port_numbers[i]] = 0
 
     print("created all clients!")
 
@@ -240,14 +246,83 @@ def run_rdcm(num_clients, port_numbers):
     #   also be in JSON format, also change the route_result reception side
     #   in the simulator to facilitate this.
 
-    # update the routing result
+    # initialize UCB data
+    routeUCBMap = {}
 
-    # ws_client.ws.send(route_result_json)
+    i = 0
+    while len(routeUCBMap) == 0:
+        with rd_clients[i].lock:
+            routeUCBMap = rd_clients[i].route_ucb_received
+            i += 1
+            i = i % num_clients
+            time.sleep(0.5)
+
+    print("routeUCBMap received")
+
+    routeUCBMapBus = {}
+
+    i = 0
+    while len(routeUCBMapBus) == 0:
+        with rd_clients[i].lock:
+            routeUCBMap = rd_clients[i].route_ucb_bus_received
+            i += 1
+            i = i % num_clients
+            time.sleep(0.5)
+
+    print("routeUCBMapBus received")
+
+    # initialize mabManager using background data
+    mabManager.refreshRouteUCB(routeUCBMap)
+    mabManager.refreshRouteUCBBus(routeUCBMapBus)
+    mabManager.initializeLinkEnergy1()
+    mabManager.initializeLinkEnergy2()
+    roadLength = mabManager.roadLengthMap
+
+    # initialize route result
+    routeResult = []
+    routeResultBus = []
+    for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SZIE/3600)):
+        oneResult = defaultdict(-1)
+        routeResult.append(oneResult)
+        oneResultBus = defaultdict(-1)
+        routeResultBus.append(oneResultBus)
+
+    # Update the UCB result regularly
+    while True:
+        print("One loop")
+        # # update the routing data
+        for i in range(num_clients):
+            with rd_clients[i].lock:
+                linkUCBMap = rd_clients[i].link_ucb_received
+                hour = mabManager.refreshLinkUCB(linkUCBMap)
+                currentHour[port_numbers[i]] = hour
+                linkUCBMapBus = rd_clients[i].link_ucb_bus_received
+                mabManager.refreshLinkUCBBus(linkUCBMapBus)
+                speedVehicle = rd_clients[i].speed_vehicle_received
+                mabManager.refreshLinkUCBShadow(speedVehicle)
+
+        # update the routing result
+        for hour in currentHour:
+            for od in routeResult:
+                routeAction = mabManager.ucbRouting(od, hour)
+                routeResult[hour][od] = routeAction
+            for od in routeResultBus:
+                routeAction = mabManager.ucbRoutingBus(od, hour)
+                routeResultBus[hour][od] = routeAction
+        # sent back the routing result
+        for i in range(num_clients):
+            with rd_clients[i].lock:
+                ws_client.ws.send(routeResult[currentHour[port_numbers[i]]])
+                ws_client.ws.send(routeResultBus[currentHour[port_numbers[i]]])
+
+        # ws_client.ws.send(route_result_json)
+
+        time.sleep(0.5) # wait for 0.5 seconds
 
 
-    # wait until all rd_clients finish their work
-    for i in range(num_clients):
-        rd_clients[i].join()
+        # wait until all rd_clients finish their work
+        for i in range(num_clients):
+            rd_clients[i].join()
 
     # TODO : just print the content of rd_clients for debugging purposes, remove if not needed
     for i in range(num_clients):

@@ -39,9 +39,9 @@ class MABBus(MAB):
 
     # Override the updateLinkUCB in Mab.java
     def updateLinkUCB(self, linkUCB):
-        for IDhour in self.linkUCB.keys():
+        for IDhour in linkUCB.keys():
             ID = int(IDhour.split(";")[0])
-            energyRecordAdd = len(self.linkUCB[ID]) - self.visit_count[ID]
+            energyRecordAdd = len(linkUCB[ID]) - self.visit_count[ID]
             if energyRecordAdd > 0:
                 self.visit_count[ID] += energyRecordAdd
                 self.generated_visit_count[ID] += energyRecordAdd # also updated the combined counter

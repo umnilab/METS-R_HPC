@@ -49,19 +49,19 @@ class MABManager(object):
         # TODO: Change to json
         for IDhour in new_linkUCBMapBus:
             hour = int(IDhour.split(";")[1])
-        self.mabBus[hour].updateLinkUCBBus(new_linkUCBMapBus)
+        self.mabBus[hour].updateLinkUCB(new_linkUCBMapBus)
         return hour
 
     def refreshRouteUCBBus(self, new_routeUCBMapBus):
         for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE//3600)):
             self.mabBus[hour].updateRouteUCB(new_routeUCBMapBus)
 
-    def refreshLinkUCBShadow(self, new_speedUCBMap, lengthUCB):
+    def refreshLinkUCBShadow(self, new_speedUCBMap):
         hour = 0
         # TODO: Change to json
         for IDhour in new_speedUCBMap:
             hour = int(IDhour.split(";")[1])
-        self.mabBus[hour].updateShadowBus(new_speedUCBMap, lengthUCB)
+        self.mabBus[hour].updateShadowBus(new_speedUCBMap, self.roadLengthMap)
         return hour
 
 
