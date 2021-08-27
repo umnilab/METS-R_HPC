@@ -30,7 +30,6 @@ class MABManager(object):
 
     def refreshLinkUCB(self, new_linkUCBMap):
         hour = 0
-        # TODO: Change to json
         for IDhour in new_linkUCBMap:
             hour = int(IDhour.split(";")[1])
         self.mab[hour].updateLinkUCB(new_linkUCBMap)
@@ -46,7 +45,6 @@ class MABManager(object):
 
     def refreshLinkUCBBus(self, new_linkUCBMapBus):
         hour = 0
-        # TODO: Change to json
         for IDhour in new_linkUCBMapBus:
             hour = int(IDhour.split(";")[1])
         self.mabBus[hour].updateLinkUCB(new_linkUCBMapBus)

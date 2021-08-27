@@ -48,7 +48,6 @@ def modify_property_file(fname, port):
 def prepare_sim_dirs(options):
 
     for i in range(0, options.num_simulations):
-
         # make a directory to run the simulator
         dir_name = "simulation_" + str(i)
         if not path.exists(dir_name):
