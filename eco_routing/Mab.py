@@ -20,23 +20,27 @@ class MAB(object):
         self.time_od = {} # visiting time for each OD pair
 
     def play(self, od):
+       #  print ("self time_od is ")
+       # print(self.time_od)
         if od in self.time_od:
-            time_od[od] += 1
+            self.time_od[od] += 1
         else:
-            time_od[od] = 1
+            self.time_od[od] = 1
         UCB = {}
         mean_award = {}
-        for i in range(len(self.valid_path)):
-            path_id = self.valid_path[odstr][i]
-            path = self.path_info[odstr][path_id]
+        for i in range(len(self.valid_path[od])):
+            #print("self_path")
+            #print(self.valid_path)
+            path_id = self.valid_path[od][i]
+            path = self.path_info[od][path_id]
             A = 0
             B = 0
             path_length = len(path)
             for j in range(path_length):
                 A += self.visit_energy[path[j]]/self.visit_count[path[j]] # mean
-                B += -np.sqrt((1.5*(np.log(time_od[od])))/(visit_count[path[j]]))/path_length # Upper confidence bound
+                B += -np.sqrt((1.5*(np.log(self.time_od[od])))/(self.visit_count[path[j]]))/path_length # Upper confidence bound
             UCB[path_id] =  A+B
-            mean_award[path_id] = AT
+            mean_award[path_id] = A
 
         minIndex = min(UCB, key=UCB.get)
         minEnergy  = UCB[minIndex]
@@ -46,18 +50,25 @@ class MAB(object):
         self.mean_award = mean_award.values()
 
     def updateLinkUCB(self, linkUCB):
+        #hour_list={'hour_int'}
+        #for ID in linkUCB.keys():
+        # update should be only summation of linkucb  delete information after updation
         for IDhour in linkUCB.keys():
             ID = int(IDhour.split(";")[0])
-            energyRecordAdd = len(linkUCB[ID]) - self.visit_count[ID]
+         #  if ID not in {'hour_int'}:
+            #energyRecordAdd = len(linkUCB[ID]) - self.visit_count[ID]
+            energyRecordAdd = len(linkUCB[IDhour])
             if energyRecordAdd > 0:
-                self.visit_count[ID] += energyRecordAdd
-                energyAdd = 0
-                for j in range(len(energyRecordAdd)):
-                    energyAdd += linkUCB[ID][-1-j]
-                self.visit_energy[ID] += energyAdd
+               self.visit_count[ID] += energyRecordAdd
+               energyAdd=sum(linkUCB[IDhour])
+               #energyAdd = 0
+               #for j in range(len(energyRecordAdd)):
+               #     energyAdd += linkUCB[IDhour][-1-j]
+               self.visit_energy[ID] += energyAdd
 
     def updateRouteUCB(self, routeUCB):
-        for od in self.routeUCB.keys():
+        for od in routeUCB.keys():
+   # the raw : for od in self.routeUCB.keys():
             roads = routeUCB[od].copy()
             self.path_info[od] = roads
             vpath = list(range(len(roads))) # assume all the path are valid

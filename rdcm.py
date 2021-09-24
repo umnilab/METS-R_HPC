@@ -71,83 +71,104 @@ class RDClient(threading.Thread):
 
 
     # on_message is automatically called when the sever sends a msg
+    #  this part has not been updated
     def on_message(self, ws, message):
-        print(message)
+        # print(message)
         if(self.log_msgs):
             print(f"{self.uri} : {message[0:self.msg_log_size]}")
 
         # decode the json string
         decoded_msg = json.loads(str(message))
-        
+        #print("received decoded message")
+        #print(decoded_msg['MSG_TYPE'])
         # every decoded msg must have a MSG_TYPE field
         assert 'MSG_TYPE' in decoded_msg.keys(), "No MSG_TYPE field in received json string!"
         
         # OD pair and ucb route candidates received 
         if decoded_msg['MSG_TYPE'] == "OD_PAIR":
             self.update_route_ucb(decoded_msg)
-    
+            
         # bus OD pair and ucb bus route candidates received
         elif decoded_msg['MSG_TYPE'] == "BOD_PAIR":
             self.update_route_ucb_bus(decoded_msg)
-        
+              
         # tick msg received
         elif decoded_msg['MSG_TYPE'] == 'TICK_MSG':
+                 
             entries = decoded_msg["entries"]
-
+            #print("received tick message") 
+            #print(entries)
             for entry in entries:
                 # energy update 
                 if entry['TYPE'] == 'E':
-                    id = int(entry['ID'])
-                    hour = int(entry['hour'])
-                    values = map(str_list_to_float_list, entry['values'])
-                    self.update_link_ucb(id, hour, values)
+                    id = str(entry['ID'])+";"+str(entry['hour'])
+                    #id = int(entry['ID'])
+                    #hour_int = int(entry['hour'])
+                    #print('id string')
+                    #print(id)
+                    #values = list(map(str_list_to_float_list, entry['values']))
+                    values=entry['values']
+                    #print("values")
+                    #print(values)
+                    #self.link_ucb_received['hour_int'] = int(entry['hour'])
+                    self.update_link_ucb(id, values)
+                    #print("received value")
+                    #print(self.link_ucb_received[id])
 
                 # bus energy update
                 elif entry['TYPE'] == 'BE':
-                    id = int(entry['ID'])
-                    hour = int(entry['hour'])
-                    values = map(str_list_to_float_list, entry['values'])
-                    self.update_link_ucb_bus(id, hour, values)
+                    #id = int(entry['ID'])
+                    id = str(entry['ID'])+";"+str(entry['hour'])
+                    #values = list(map(str_list_to_float_list, entry['values']))
+                    values=entry['values']
+                    #print("values")
+                    #print(values)
+                    #self.link_ucb_bus_received['hour_int'] = int(entry['hour'])
+                    self.update_link_ucb_bus(id, values)
 
                 # vehicle speed update
                 elif entry['TYPE'] == 'V':
-                    id = int(entry['ID'])
-                    hour = int(entry['hour'])
-                    values = map(str_list_to_float_list, entry['values'])
-                    self.update_speed_vehicle(id, hour, values)
+                    #id = int(entry['ID'])
+                    id = str(entry['ID'])+";"+str(entry['hour'])
+                    #values = list(map(str_list_to_float_list, entry['values']))
+                    values=entry['values']
+                    #print("values")
+                    #print(values)
+                    #self.speed_vehicle_received['hour_int'] = int(entry['hour'])
+                    self.update_speed_vehicle(id, values)
             
                 else:
                     print(f"unknown entry type in json mesage : {entry['TYPE']}")
 
     # method for updating the link energy map
-    def update_link_ucb(self, id, hour, values):
-        with self.lock: 
-            id = str(id)+";"+str(hour)
+    def update_link_ucb(self, id,values):
+        with self.lock:
+            #self.link_ucb_received['hour_int'] = hour_int
             if id not in self.link_ucb_received.keys():
                 self.link_ucb_received[id] = values
         
             else:
-                self.link_ucb_received[id].append(values)
-    
+                #self.link_ucb_received[id].append(values)
+                self.link_ucb_received[id].extend(values)
+            #print("updated link_ucb_received")
+            #print(self.link_ucb_received[id])
     # method for updating the link bus energy map
-    def update_link_ucb_bus(self, id, hour, values):
+    def update_link_ucb_bus(self, id,  values):
         with self.lock:
-            id = str(id)+";"+str(hour)
             if id not in self.link_ucb_bus_received.keys():
                 self.link_ucb_bus_received[id] = values
             
             else:
-                self.link_ucb_bus_received[id].append(values)
+                self.link_ucb_bus_received[id].extend(values)
     
     # method for updating the vehicle speed map
-    def update_speed_vehicle(self, id, hour, values):
+    def update_speed_vehicle(self, id, values):
         with self.lock:
-            id = str(id)+";"+str(hour)
             if id not in self.speed_vehicle_received.keys():
                 self.speed_vehicle_received[id] = values
         
             else:
-                self.speed_vehicle_received[id].append(values)
+                self.speed_vehicle_received[id].extend(values)
 
     # method for updating the ucb routes
     def update_route_ucb(self, json_obj):
@@ -225,9 +246,9 @@ def run_rdcm(num_clients, port_numbers):
 
 
     args = SN(**args)
-
+      
     mabManager= MABManager(config['evacsim_dir'], args)
-
+    #print(args)
     currentHour = {}
 
     rd_clients = []
@@ -265,13 +286,14 @@ def run_rdcm(num_clients, port_numbers):
             time.sleep(0.5)
 
     print("routeUCBMap received")
-
+    #print(routeUCBMap)
     routeUCBMapBus = {}
 
     i = 0
     while len(routeUCBMapBus) == 0:
         with rd_clients[i].lock:
-            routeUCBMap = rd_clients[i].route_ucb_bus_received
+            routeUCBMapBus = rd_clients[i].route_ucb_bus_received
+            #print("routeUCBMapBus received"+str(rd_clients[i].route_ucb_bus_received))
             i += 1
             i = i % num_clients
             time.sleep(0.5)
@@ -284,18 +306,22 @@ def run_rdcm(num_clients, port_numbers):
     mabManager.initializeLinkEnergy1()
     mabManager.initializeLinkEnergy2()
     roadLength = mabManager.roadLengthMap
-
+    #print(args)
     # initialize route result
     routeResult = []
     routeResultBus = []
-    for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SZIE/3600)):
+    # print(defaultdict)
+    print(range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)))
+    for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
         oneResult = {}
         for od in routeUCBMap:
-            onResult[od]=-1
+            oneResult[od]=-1 
         routeResult.append(oneResult)
+        #oneResultBus = defaultdict(lambda: -1)
+        # raw value is simply -1
         oneResultBus = {}
         for od in routeUCBMapBus:
-            oneResultBus[od]=-1
+            oneResultBus[od]=-1 
         routeResultBus.append(oneResultBus)
 
     # Update the UCB result regularly
@@ -304,51 +330,97 @@ def run_rdcm(num_clients, port_numbers):
         # # update the routing data
         for i in range(num_clients):
             with rd_clients[i].lock:
-                linkUCBMap = rd_clients[i].link_ucb_received
+                #print("rd_client is")
+                #print(rd_clients[i])
+                linkUCBMap = rd_clients[i].link_ucb_received 
+                print("link ucb received")
+                print(linkUCBMap.keys())
                 hour = mabManager.refreshLinkUCB(linkUCBMap)
                 currentHour[port_numbers[i]] = hour
                 linkUCBMapBus = rd_clients[i].link_ucb_bus_received
                 mabManager.refreshLinkUCBBus(linkUCBMapBus)
                 speedVehicle = rd_clients[i].speed_vehicle_received
                 mabManager.refreshLinkUCBShadow(speedVehicle)
-        # list of hour, each hour contains lists of od, each element of the routing result is the routeAction
+        #  list of hour, each hour contains lists of od, each element of the routing result is the routeAction
 # turn into a json object with 3 levels: hour , then od; then origin and destination
-        # update the routing result
+        #  update the routing result
         #  redudant for the od in routeResult? might be same od for this?
-        for hour in currentHour:
-            for od in routeResult[hour]:
-                routeAction = mabManager.ucbRouting(od, hour)
-                routeResult[hour][od] = routeAction
-            for od in routeResultBus[hour]:
-                routeAction = mabManager.ucbRoutingBus(od, hour)
-                routeResultBus[hour][od] = routeAction
+        #print("mabmanager is ")
+        #print(mabManager)
+        print("current hour is " +str(currentHour))
+        #print(routeResult)
+        for hour_od in currentHour.values():
+            for od in routeResult[hour_od]:
+                #print("hour is " +str(hour))
+                #print("od is " +str(od))
+                routeAction = mabManager.ucbRouting(od, hour_od)
+                routeResult[hour_od][od] = routeAction
+            for od in routeResultBus[hour_od]:
+                routeAction = mabManager.ucbRoutingBus(od, hour_od)
+                routeResultBus[hour_od][od] = routeAction
+            #print("routeResult_Bus_string")
+            #print(json.dumps(routeResultBus[hour_od]))
         # sent back the routing result
+        
+        
         for i in range(num_clients):
             with rd_clients[i].lock:
-                hour = currentHour[port_numbers[i]]
-                routeResult_json = {}
-                routeResultBus_json = {}
-                index_od = 0
-                routeResult_json['MSG_TYPE'] = 'RR'
-                for od in routeResult:
-                    routeResult_json[index_od]['OD'] = od
-                    routeResult_json[index_od]['result']=routeResult[hour][od]
-                    index_od += 1
-                index_od = 0
-                routeResultBus_json['MSG_TYPE'] = 'BRR'
-                for od in routeResultBus:
-                    routeResultBus_json[index_od]['OD']=od
-                    routeResultBus_json[index_od]['result']=routeResultBus[hour][od]
-                    index_od += 1
-            routeResult_json_string = json.dumps(routeResult_json)
-            routeResultBus_json_string = json.dumps(routeResultBus_json)
-            rd_clients[i].ws.send(routeResult_json_string)
-            rd_clients[i].ws.send(routeResultBus_json_string)
+                 #  clean the data set after refresh functions     
+                 rd_clients[i].link_ucb_received={}
+                 rd_clients[i].link_ucb_bus_received={}
+                 rd_clients[i].speed_vehicle_received={}
+ 
+                 hour = currentHour[port_numbers[i]]
+                 index_od =0
+                 index_od_bus=0
+                 #routeResult_json=[]
+                 #routeResultBus_json=[]
+                 od_list=[]
+                 result_list=[]
+                 bus_od_list=[]
+                 bus_result_list=[]
+        # generate json objects with keys "origin","dest",and "result"
+                 for od in routeResult[hour]:
+                    od_list.append(od)
+                    result_list.append(routeResult[hour][od])
+                    index_od+=1
+                 for od in routeResultBus[hour]:
+                    bus_od_list.append(od)
+                    bus_result_list.append(routeResultBus[hour][od])
+                    #routeResultBus_json_dict['OD']=od 
+                    #routeResultBus_json_dict['result']=routeResultBus[hour][od]
+                    #routeResultBus_json.append(routeResultBus_json_dict)
+                    index_od_bus+=1
+                    #routeResult_json[index_od]['dest']=od.split(',')[1]
+                    #routeResult_json[index_od]['result']=routeResult[hour][od]
+                    #print(routeResult_json[index_od]['result'])
+                    #routeResultBus_json[index_od]['OD']=od 
+                    #routeResultBus_json[index_od]['dest']=od.split(',')[1]
+                    #routeResultBus_json[index_od]['result']=routeResultBus[hour][od]
+                         
+                 routeResult_json_dict={}
+                 routeResult_json_dict['MSG_TYPE']="OD_PAIR"
+                 routeResult_json_dict['OD']=od_list 
+                 routeResult_json_dict['result']=result_list
+                 routeResultBus_json_dict={}
+                 routeResultBus_json_dict['MSG_TYPE']="BOD_PAIR"
+                 routeResultBus_json_dict['OD']=bus_od_list 
+                 routeResultBus_json_dict['result']=bus_result_list
 
-               # ws_client.ws.send(json.dumps(routeResult[currentHour[port_numbers[i]]]))
-              #  ws_client.ws.send(json.dumps(routeResultBus[currentHour[port_numbers[i]]]))
-              # ws_client.ws.send(routeResult[currentHour[port_numbers[i]]])
-              # ws_client.ws.send(routeResultBus[currentHour[port_numbers[i]]])
+                 if index_od==len(routeResult[hour]):
+                    #print("length of index"+str(len(routeResult[hour])))
+                    #print("length of hour"+str(index_od))
+                    routeResult_json_string=json.dumps(routeResult_json_dict)
+                    rd_clients[i].ws.send(routeResult_json_string) 
+                    #print("routeResult_json_string")
+                    #print(routeResult_json_string)
+                 if index_od_bus==len(routeResultBus[hour]):
+                    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
+                    rd_clients[i].ws.send(routeResultBus_json_string)
+                       #print("routeResultBus_json_string")
+                       #print(routeResultBus_json_string)
+               #ws_client.ws.send(routeResult[currentHour[port_numbers[i]]])
+               #ws_client.ws.send(routeResultBus[currentHour[port_numbers[i]]])
         # Note routeResult[currentHour[port_numbers[i]]] is a dictionary, to do things are:
         # Add a tag for MSG_TYPE
         # json.dump
@@ -362,13 +434,15 @@ def run_rdcm(num_clients, port_numbers):
         # ws_client.ws.send(route_result_json)
 
         time.sleep(0.5) # wait for 0.5 seconds
-
+        #print("time sleep 0.5 s")
+       
 
         # wait until all rd_clients finish their work
-        for i in range(num_clients):
-            rd_clients[i].join()
-    for i in range(num_clients):
-        print(rd_clients[i])
+    for j in range(num_clients):
+        rd_clients[j].join()
+        print("join function performed")
+    #for i in range(num_clients):
+            #print(rd_clients[i]) 
 
     
 
