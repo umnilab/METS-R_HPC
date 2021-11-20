@@ -33,7 +33,7 @@ import seaborn as sns
 
 
 #0.1 shapefile
-location = "/home/umni2/a/umnilab/users/wang5076/METSR_HPC/METSR_HPC/bus_scheduling/input_route_generation/"
+location = "/home/umni2/a/umnilab/projects/DOE_METSR/METSR_HPC/METSR_HPC/bus_scheduling/input_route_generation/"
 file = location+"tax_zones_bus_version.gpkg"
 taxi_zones = gp.read_file(file)
 keep_index = np.array(taxi_zones['OBJECTID'])-1
