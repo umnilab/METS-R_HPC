@@ -5,6 +5,9 @@ import json
 from os import path
 from rdcm import run_rdcm
 
+import socketserver
+
+
 
 class sim_options:
 
@@ -66,6 +69,10 @@ def modify_property_file(options, dest_data_dir, port, scenario, case):
 def prepare_sim_dirs(options):
     src_data_dir = options.evacsim_dir + "data"
     prepare_scenario_dict(options, src_data_dir + "/NYC/demand")
+    find_free_ports(options, options.num_simulations)
+    if len(options.ports) != options.num_simulations:
+        print("ERROR , cannot specify port number for all simulation instances")
+        sys.exit(-1)
     for i in range(0, options.num_simulations):
         # make a directory to run the simulator
         dir_name = "scenario" + str(options.scenario_index) + "_" + str(i)
@@ -97,6 +104,15 @@ def prepare_scenario_dict(options, path):
             options.cases[i].append(case.split("_")[1])
         i+=1
         
+def find_free_ports(options, num_simulations):
+    server_sockets = []
+    for i in range(num_simulations):
+        server_socket = socketserver.TCPServer(("localhost", 0), None)
+        server_sockets.append(server_socket)
+        options.ports.append(server_socket.server_address[1])
+    for server_socket in server_sockets:
+        server_socket.server_close()
+    
 def read_run_config(fname):
     with open(fname, "r") as f:
         config = json.load(f)
@@ -108,7 +124,7 @@ def read_run_config(fname):
     opts.groovy_dir = config['groovy_dir']
     opts.repast_plugin_dir = config['repast_plugin_dir']
     opts.num_simulations = int(config['num_sim_instances'])
-    opts.ports = config['socket_port_numbers']
+    #opts.ports = config['socket_port_numbers']
     
     opts.scenario_index = int(config['scenario_index'])
     opts.case_index = int(config['case_index'])
@@ -118,10 +134,9 @@ def read_run_config(fname):
     opts.bus_scheduling = config['bus_scheduling']
     opts.share_percentage = float(config['share_percentage'])
 
-    if len(opts.ports) != opts.num_simulations:
-        print("ERROR , please specify port number for all simulation instances")
-        sys.exit(-1)
-
+    #if len(opts.ports) != opts.num_simulations:
+    #    print("ERROR , please specify port number for all simulation instances")
+    #    sys.exit(-1)
 
     return opts
 
@@ -157,7 +172,6 @@ def get_classpath(options, includeBin=True):
     
 # NOTE : java version of RDCM is no longer used
 def run_rdcm_java(options, config_fname):
-
     # rdcm command
     rdcm_command = options.java_path + " " + \
                    "-classpath " + \
@@ -190,7 +204,6 @@ def run_simulations(options):
                    
 
 def main():
-    
     if len(sys.argv) < 2:
         print("Specify the config file name!")
         print("python3 run_hpc.py <config_file>")

@@ -240,7 +240,7 @@ def run_rdcm(num_clients, port_numbers):
             if len(fields) != 2:
                 continue
             else:
-                print(fields)
+                # print(fields)
                 try:
                     args[fields[0]] = ast.literal_eval(fields[1])
                 except:
@@ -360,7 +360,7 @@ def run_rdcm(num_clients, port_numbers):
                 #print(rd_clients[i])
                 linkUCBMap = rd_clients[i].link_ucb_received 
                 print("link ucb received")
-                print(linkUCBMap.keys())
+                # print(linkUCBMap.keys())
                 hour = mabManager.refreshLinkUCB(linkUCBMap)
                 currentHour[port_numbers[i]] = hour
                 linkUCBMapBus = rd_clients[i].link_ucb_bus_received
