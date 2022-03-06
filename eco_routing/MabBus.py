@@ -25,13 +25,8 @@ class MABBus(MAB):
             B = 0
             path_length = len(path)
             for j in range(path_length):
-                #print("A content")
-                #print(path)
+
                # print("od"+str(od))
-                #print("path selection"+str(i))
-                #print("path link id selection"+str(j))
-                #print(self.generated_visit_energy[path[j]])
-               # print(self.generated_visit_count[path[j]])
                 A += self.generated_visit_energy[path[j]]/self.generated_visit_count[path[j]] # mean
                 B += -np.sqrt((1.5*(np.log(self.time_od[od])))/(self.generated_visit_count[path[j]]))/path_length # Upper confidence bound
             UCB[path_id] =  A+B

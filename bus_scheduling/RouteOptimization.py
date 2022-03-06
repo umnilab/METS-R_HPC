@@ -11,10 +11,10 @@ import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 
-files = ["/home/umni2/a/umnilab/users/wang5076/METSR_HPC/METSR_HPC/bus_scheduling/input_route_optimization/metro_case_exact_0.mat"]   ###r1
-Blist = [200]                                   #fleet size           
-Tlist = [10]                                    #uncertainty level 
-mat = scipy.io.loadmat(files[0])
+# files = ["/home/umni2/a/umnilab/users/wang5076/METSR_HPC/METSR_HPC/bus_scheduling/input_route_optimization/metro_case_exact_0.mat"]   ###r1
+# Blist = [200]                                   #fleet size           
+# Tlist = [10]                                    #uncertainty level 
+# mat = scipy.io.loadmat(files[0])
 
 
 # # 1. Set parameters

@@ -5,8 +5,8 @@
 
 import math
 import numpy as np 
-from bus_scheduling.RouteGeneration import RouteGeneration
-from bus_scheduling.RouteOptimization import RouteOptimization
+from bus_scheduling.RouteGeneration20211123 import RouteGeneration
+from bus_scheduling.RouteOptimization20211123 import RouteOptimization
 #import RouteGeneration
 #import RouteOptimization
 
@@ -26,12 +26,22 @@ class BusPlanningManager(object):
     ### keys = {"from_JFK", "to_JFK", "from_LGA", "to_LGA", "from_PENN", "to_PENN"}
     # bus_route = ["123","456",...,"1234"]   each entry represents the zone that the bus goes through
     # bus_frequency  = [12, 23, ..., 35]     each entry represents the assigned number of buses on each route.
-    def __init__(self, zone_id_list):
+    def __init__(self, demand_location):
         #super().__init__(zone_id_list) #the zone id list
         self.travel_time = {}         #the travel time between two different zones in the city
         self.travel_demand = {}       #the travel demand from or to hubs 
+        self.bus_mat={}
         self.bus_route = {}
-        self.bus_frequency = {}
+        self.bus_gap = {}
+        self.bus_num = {}
+        self.bus_routename={}
+                    list_routename=[]
+                    for l in range(0,len_json):
+                        # assume the current hub is 134
+                        # XXX for hub  XX for hour XX for route 
+                        list_routename.append(134*10000+hour*100+l)
+                    BusPlanning_json['Bus_routename'] = list_routename
+
         self.route_generation = {}     #the route generation model
         self.route_optimization = {}   #the route optimization model
         demand_type_list = ["from_JFK", "to_JFK", "from_LGA", "to_LGA", "from_PENN", "to_PENN"]
@@ -68,7 +78,7 @@ class BusPlanningManager(object):
     #4 implement the bus route design
     def generate_route(self):
         self.route_generation.run()
-        self.bus_route = self.route_generation.get_route()
+        self.bus_mat = self.route_generation.get_route()
     
     #5 implement the bus frequency design
     def optimize_route(self):

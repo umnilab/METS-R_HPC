@@ -3,27 +3,24 @@ import sys
 import json
 from os import path
 from eco_routing.Mab import MAB
-from eco_routing.MabBus import MABBus
+# from eco_routing.MabBus import MABBus
 
 class MABManager(object):
     def __init__(self, working_dir, args):
         self.mab = {} # MAB model for E-Taxis, every hour we train a new model
-        self.mabBus = {} # MAB model for E-Buses
+        # self.mabBus = {} # MAB model for E-Buses
         self.initialLinkSpeedLength = []
         self.roadLengthMap = {}
-        
         self.path_info = {}
         self.valid_path = {}
         self.path_info_bus = {}
         self.valid_path_bus = {}
 
         self.working_dir = working_dir
-        
         self.args=args
-
         for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE//3600)+1):
             self.mab[hour] = MAB(self.path_info, self.valid_path)
-            self.mabBus[hour] = MABBus(self.path_info_bus, self.valid_path_bus)
+            # self.mabBus[hour] = MABBus(self.path_info_bus, self.valid_path_bus)
             self.initialLinkSpeedLength.append({})
 
     def ucbRouting(self, od, hour):
@@ -46,42 +43,40 @@ class MABManager(object):
         for hour in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
             self.mab[hour].updateRouteUCB(new_routeUCBMap)
 
-    def ucbRoutingBus(self, od, hour):
-        self.mabBus[hour].play(od)
-        return self.mabBus[hour].getAction()
+    # def ucbRoutingBus(self, od, hour):
+    #     self.mabBus[hour].play(od)
+    #     return self.mabBus[hour].getAction()
 
-    def refreshLinkUCBBus(self, new_linkUCBMapBus):
-        hour = 0
-        # TODO: Change to json
-        for IDhour in new_linkUCBMapBus.keys(): 
-            #print('hour is')
-            #print(IDhour)
-            hour = int(IDhour.split(";")[1])
-        #    break
+    # def refreshLinkUCBBus(self, new_linkUCBMapBus):
+    #     hour = 0
+    #     # TODO: Change to json
+    #     for IDhour in new_linkUCBMapBus.keys(): 
+    #         #print('hour is')
+    #         #print(IDhour)
+    #         hour = int(IDhour.split(";")[1])
+    #     #    break
  
-        #key_hour='hour_int'
-        #if key_hour in new_linkUCBMapBus.keys():
-        #    hour=new_linkUCBMapBus[key_hour]
-        self.mabBus[hour].updateLinkUCB(new_linkUCBMapBus)
-        return hour
+    #     #key_hour='hour_int'
+    #     #if key_hour in new_linkUCBMapBus.keys():
+    #     #    hour=new_linkUCBMapBus[key_hour]
+    #     self.mabBus[hour].updateLinkUCB(new_linkUCBMapBus)
+    #     return hour
 
-    def refreshRouteUCBBus(self, new_routeUCBMapBus):
-        for hour in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
-            self.mabBus[hour].updateRouteUCB(new_routeUCBMapBus)
+    # def refreshRouteUCBBus(self, new_routeUCBMapBus):
+    #     for hour in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
+    #         self.mabBus[hour].updateRouteUCB(new_routeUCBMapBus)
 
-    def refreshLinkUCBShadow(self, new_speedUCBMap):
-        hour = 0
-        # TODO: Change to json
-        for IDhour in new_speedUCBMap.keys():
-            hour = int(IDhour.split(";")[1])
-        #    break
-        #key_hour='hour_int'
-        #if key_hour in new_speedUCBMap.keys():
-        #    hour=new_speedUCBMap[key_hour]
-        lengthUCB=self.roadLengthMap
-        self.mabBus[hour].updateShadowBus(new_speedUCBMap, lengthUCB)
-        #self.mabBus[hour].updateShadowBus(new_speedUCBMap)
-        return hour
+    # def refreshLinkUCBShadow(self, new_speedUCBMap):
+    #     hour = 0
+    #     for IDhour in new_speedUCBMap.keys():
+    #         hour = int(IDhour.split(";")[1])
+    #     #key_hour='hour_int'
+    #     #if key_hour in new_speedUCBMap.keys():
+    #     #    hour=new_speedUCBMap[key_hour]
+    #     lengthUCB=self.roadLengthMap
+    #     self.mabBus[hour].updateShadowBus(new_speedUCBMap, lengthUCB)
+    #     #self.mabBus[hour].updateShadowBus(new_speedUCBMap)
+    #     return hour
 
 
     # Initialize speed data for each link
@@ -120,7 +115,7 @@ class MABManager(object):
 
         for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
             self.mab[i].warm_up(self.initialLinkSpeedLength[i])
-            self.mabBus[i].warm_up(self.initialLinkSpeedLength[i])
+            # self.mabBus[i].warm_up(self.initialLinkSpeedLength[i])
             # no warm_up_bus    only warm_up
 
     def getRoadLengthMap(self):
