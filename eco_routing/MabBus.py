@@ -60,7 +60,7 @@ class MABBus(MAB):
 
     def updateShadowBus(self, speedUCB, lengthUCB):
     #def updateShadowBus(self, speedUCB):
-        for IDhour in speedUCB.keys():
+        for IDhour in list(speedUCB.keys()):
         #for ID in speedUCB.keys():
             ID = int(IDhour.split(";")[0])
         #    if ID not in {'hour_int'}:
@@ -80,7 +80,7 @@ class MABBus(MAB):
                self.generated_visit_energy[ID] += energyAdd
 
     def updateRouteUCB(self, routeUCB):
-        for od in routeUCB.keys():
+        for od in list(routeUCB.keys()):
      # no self.routeUCB.keys()
             roads = routeUCB[od].copy()
             self.path_info[od] = roads

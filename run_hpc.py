@@ -1,13 +1,7 @@
-import os
 import sys
-import shutil
-import json
-from os import path
 from rdcm import run_rdcm
-import time
+from util import read_run_config, prepare_sim_dirs, run_simulations
 
-import socket
-from contextlib import closing
 
 # main function for running the rdcm and simulations
 def main():
@@ -28,7 +22,7 @@ def main():
     run_simulations(options)
     # run rdcm 
     # add scneario index for quick
-    run_rdcm(options.num_simulations, options.ports,options.bus_scheduling)
+    run_rdcm(options.num_simulations, options.ports)
 
 if __name__ ==  "__main__":
     main()

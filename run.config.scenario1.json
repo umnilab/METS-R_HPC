@@ -1,7 +1,7 @@
 {
 "java_path" : "/usr/bin/java",
 "java_options" : "-Xss256M -Xms1024M -Xmx4G -Xshare:off -Dfile.encoding=UTF-8",
-"evacsim_dir" : "/home/umni2/a/umnilab/projects/DOE_METSR/instance0/master/EvacSim/",
+"addsevs_dir" : "/home/umni2/a/umnilab/projects/DOE_METSR/METSR_FINAL/ADDSEVS/ADDSEVS/ADDSEVS/",
 "groovy_dir" : "/home/umni2/a/umnilab/apps/Eclipse/plugins/org.codehaus.groovy_2.4.17.v201906292136-e1906-RELEASE/",
 "repast_plugin_dir" : "/home/umni2/a/umnilab/apps/Eclipse/plugins/repast.simphony.runtime_2.7.0/",
 "scenario_index" : "0",

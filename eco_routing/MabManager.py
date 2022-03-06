@@ -116,7 +116,6 @@ class MABManager(object):
         for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
             self.mab[i].warm_up(self.initialLinkSpeedLength[i])
             # self.mabBus[i].warm_up(self.initialLinkSpeedLength[i])
-            # no warm_up_bus    only warm_up
 
     def getRoadLengthMap(self):
         return self.roadLengthMap

@@ -3,6 +3,7 @@
 
 import websocket
 import json
+import threading
 from contextlib import closing
 from threading import Lock
 from util import check_socket, str_list_mapper_gen

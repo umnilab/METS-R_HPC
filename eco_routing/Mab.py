@@ -20,8 +20,9 @@ class MAB(object):
         self.time_od = {} # visiting time for each OD pair
 
     def play(self, od):
-       #  print ("self time_od is ")
-       # print(self.time_od)
+        #  print ("self time_od is ")
+        # print(list(self.valid_path.keys()))
+        # print(self.time_od)
         if od in self.time_od:
             self.time_od[od] += 1
         else:
@@ -68,7 +69,7 @@ class MAB(object):
 
     def updateRouteUCB(self, routeUCB):
         for od in routeUCB.keys():
-   # the raw : for od in self.routeUCB.keys():
+            # the raw : for od in self.routeUCB.keys():
             roads = routeUCB[od].copy()
             self.path_info[od] = roads
             vpath = list(range(len(roads))) # assume all the path are valid

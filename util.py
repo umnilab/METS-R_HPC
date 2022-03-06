@@ -1,5 +1,10 @@
 import socket
 import json
+import os
+import time
+import shutil
+from os import path
+from contextlib import closing
 
 #### utilities for rdcm
 def check_socket(host, port):
@@ -22,7 +27,7 @@ class sim_options:
     def __init__(self):
         self.java_path = ""
         self.java_options = ""
-        self.evacsim_dir = ""
+        self.addsevs_dir = ""
         self.groovy_dir = ""
         self.repast_plugin_dir = ""
         self.num_simulations = 0
@@ -35,11 +40,11 @@ class sim_options:
         
         return """java_path : {}\
                 \njava_options : {}\
-                \nevacsim_dir : {}\
+                \naddsevs_dir : {}\
                 \ngroovy_dir : {}\
                 \nrepast_plugin_dir : {}\
                 \nnum_simulations : {}\
-                \nports : {}""".format(self.java_path, self.java_options, self.evacsim_dir, self.groovy_dir, self.repast_plugin_dir, self.num_simulations, self.ports)
+                \nports : {}""".format(self.java_path, self.java_options, self.addsevs_dir, self.groovy_dir, self.repast_plugin_dir, self.num_simulations, self.ports)
 
 # selected scenarios and ports
 def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, case):
@@ -74,7 +79,7 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
     f_new.close()
 
 def prepare_sim_dirs(options):
-    src_data_dir = options.evacsim_dir + "data"
+    src_data_dir = options.addsevs_dir + "data"
     prepare_scenario_dict(options, src_data_dir + "/NYC/demand")
     find_free_ports(options, options.num_simulations)
     if len(options.ports) != options.num_simulations:
@@ -100,7 +105,7 @@ def prepare_sim_dirs(options):
                 # print dest_data_dir
                 os.mkdir(dest_data_dir+"/NYC")
                 shutil.copy(src_data_dir+"/NYC/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                shutil.copy(src_data_dir+"/NYC/candidate_routes_bus.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+                # shutil.copy(src_data_dir+"/NYC/candidate_routes_bus.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
             except OSError as exc:
                 print(f"ERROR :can not copy the data directory. exception {exc}")
                 sys.exit(-1)
@@ -153,7 +158,7 @@ def read_run_config(fname):
     opts = sim_options()
     opts.java_path = config['java_path']
     opts.java_options = config['java_options']
-    opts.evacsim_dir = config['evacsim_dir']
+    opts.addsevs_dir = config['addsevs_dir']
     opts.groovy_dir = config['groovy_dir']
     opts.repast_plugin_dir = config['repast_plugin_dir']
     opts.num_simulations = int(config['num_sim_instances'])
@@ -174,7 +179,7 @@ def read_run_config(fname):
     return opts
 
 # construct the java classpath with all the required jar files. if includeBin is False it
-# won't add the EvacSim/bin directory to classpath
+# won't add the ADDSEVS/bin directory to classpath
 # This is needed for simulation command
 def get_classpath(options, includeBin=True):
     
@@ -193,11 +198,11 @@ def get_classpath(options, includeBin=True):
     classpath += options.repast_plugin_dir + "bin:" + \
                  options.repast_plugin_dir + "lib/*:"
     
-    classpath += options.evacsim_dir + ":" + \
-                 options.evacsim_dir + "lib/*"
+    classpath += options.addsevs_dir + ":" + \
+                 options.addsevs_dir + "lib/*"
     
     if(includeBin):
-        classpath += ":" + options.evacsim_dir + "bin"
+        classpath += ":" + options.addsevs_dir + "bin"
 
     return classpath
 
@@ -208,7 +213,7 @@ def run_rdcm_java(options, config_fname):
                    "-classpath " + \
                    "../rdcm_java_version/target/rdcm-1.0-SNAPSHOT.jar:../rdcm/target/dependency/*" + " " + \
                    "com.metsr.hpc.RemoteDataClientManager " + \
-                   config_fname + " " + options.evacsim_dir + "/data/"
+                   config_fname + " " + options.addsevs_dir + "/data/"
     
     # run rdcm on a new terminal
     cwd = str(os.getcwd())
@@ -222,7 +227,7 @@ def run_simulations(options):
                    "-classpath " + \
                    get_classpath(options, False) + " " + \
                    "repast.simphony.runtime.RepastMain " + \
-                   options.evacsim_dir + "EvacSim.rs"
+                   options.addsevs_dir + "addsEVs.rs"
         # got to sim directory 
         sim_dir = "scenario" + str(options.scenario_index) + "_"+ str(options.case_index) + "_"+ str(i)
         os.chdir(sim_dir)
