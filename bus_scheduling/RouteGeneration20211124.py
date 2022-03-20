@@ -548,8 +548,8 @@ class RouteGeneration(object):
               try:
                   r_g_result = route_generate(self.Q_tohub,self.Q_fromhub,self.hub_id,self.time, self.distance)  #route generation
                   result = {"routes_fromhub":r_g_result["routes_fromhub"], "routes_tohub":r_g_result["routes_tohub"]}
-                  print ("1. route generation results")
-                  print (result)
+                  #print ("1. route generation results")
+                  #print (result)
 		
 		#3. transforms the zone index in result from (ROW_Index-1, e.g., 114(JFK)) to (OBJECTID, e.g., 120(LGA)).
                   objectid_result = copy.copy(result)
@@ -570,29 +570,32 @@ class RouteGeneration(object):
                       #print("route from and route to")
                       #print(route_from)
                       #print(route_to)
-                      if route_from[-1] == route_to[0]:
-                         route = [self.hub_id] + list(route_from) + list(route_to[1:]) + [self.hub_id]
+                      if (len(route_from)>0)&(len(route_to)>0):
+                         if route_from[-1] == route_to[0]:
+                            route = [self.hub_id] + list(route_from) + list(route_to[1:]) + [self.hub_id]
                       else:
                          route = [self.hub_id] + list(route_from) + list(route_to) + [self.hub_id]
+                      #print("route is")
+                      #print(route)
                       final_route_row.append(route)
             
                  
               except BaseException:
                   print ("Error: We can not match these results!")
-                  print ("We regenerate the route!")
-                  print ("-----------------------------------------------------------")
+                  #print ("We regenerate the route!")
+                  #print ("-----------------------------------------------------------")
                   continue
               else:
                   break
 	# In[9]:
-        print ("-----------------------------------------------------------")
+        #print ("-----------------------------------------------------------")
         print ("2. route combination results in ROWID")
-        print (final_route_row)
+        #print (final_route_row)
         print (type(final_route_row))
         final_route_objectid = list([list([self.mapping_row_objectid[str(final_route_row[i][j])] for j in range(len(final_route_row[i]))])                       for i in range(len(final_route_row))])
         print ("3. route combination results in OBJECTID")
 
-        print (final_route_objectid)
+        #print (final_route_objectid)
         item4 = result_combine_result["route_stop_index"]
         item5 = result_combine_result["route_dist"].reshape((1,len(result_combine_result["route_dist"])))
         item6 = result_combine_result["route_trip_time"].reshape((1,len(result_combine_result["route_trip_time"])))

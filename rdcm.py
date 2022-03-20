@@ -14,12 +14,10 @@ from rdc import RDClient
 
 # main function for remote control client (RDC) manager
 # to the configurations specified in config
-def run_rdcm(num_clients, port_numbers):
-    with open(sys.argv[1], "r") as f:
-        config = json.load(f)
+def run_rdcm(config, num_clients, port_numbers):
     # Obtain simulation arguments
     args = {}
-    with open(os.path.join(config['addsevs_dir']+'data', 'Data.properties'), "r") as f:
+    with open(os.path.join(config.addsevs_dir+'data', 'Data.properties'), "r") as f:
         for line in f:
             if "#" in line:
                 continue
@@ -62,9 +60,9 @@ def run_rdcm(num_clients, port_numbers):
     # TODO : just print the content of rd_clients for debugging purposes, remove if not needed
     
     # initialize UCB data
-    if (config['eco_routing'] == 'true'):
+    if (config.eco_routing == 'true'):
         print("Initializing CUCB data!")
-        mabManager= MABManager(config['addsevs_dir'], args)
+        mabManager= MABManager(config.addsevs_dir, args)
         routeUCBMap = {}
         i = 0
         with rd_clients[i].lock:
@@ -108,82 +106,90 @@ def run_rdcm(num_clients, port_numbers):
             # routeResultBus.append(oneResultBus)
 
     # If enabling bus scheduling, then loading the demand prediction data
-    if (config['bus_scheduling'] == 'true'):
+    if (config.bus_scheduling == 'true'):
         print("Initializing bus scheduling data")
         date_sim=args.BT_EVENT_FILE.split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]
         # data for bus scheduling
-        path_pre = "demand_prediction/Modelling/PredictionResults"
-        demand_file_location_from = {}
-        demand_file_location_to = {}
-        for f in ['JFK','LGA','PENN']:
-            demand_file_location_from[f] = pd.read_csv(path_pre+"/"+f+"VehicleByHour2019fromHub.csv")
-            demand_file_location_to[f] = pd.read_csv(path_pre+"/"+f+"VehicleByHour2019toHub.csv")
-        taxi_zone_file = "bus_scheduling/input_route_generation/tax_zones_bus_version.gpkg"  
-        # use date_sim as the index in demand file                         
-        bus_ratio_str="demand_prediction/Modelling/bus_ratio/ratio_scenario"+scenario_index+"_speed_"+date_sim+".json" 
-        bus_ratio_file_raw=open(bus_ratio_str)
-        bus_ratio_file = eval(json.load(bus_ratio_file_raw))
-        busPlanningResults={}
-        for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
-            busPlanningResults[hour] = {}
+        #path_pre = "demand_prediction/Modelling/PredictionResults"
+        #demand_file_location_from = {}
+        #demand_file_location_to = {}
+        #for f in ['JFK','LGA','PENN']:
+        #    demand_file_location_from[f] = pd.read_csv(path_pre+"/"+f+"VehicleByHour2019fromHub.csv")
+        #    demand_file_location_to[f] = pd.read_csv(path_pre+"/"+f+"VehicleByHour2019toHub.csv")
+        #taxi_zone_file = "bus_scheduling/input_route_generation/tax_zones_bus_version.gpkg"  
+        # use date_sim as the index in demand file
+        
+        # directly use the cached results as the optimization is much slower than the simulator
+        ## comment this block and activate the next block                         
+        bus_scheduling_read = "bus_scheduling/bus_ratio_demand_8_80_400/ratio_scenario"+scenario_index+"_speed_"+date_sim+"_bus_scheduling.json" 
+        bus_scheduling_read_raw = open(bus_scheduling_read)
+        busPlanningResults = json.load(bus_scheduling_read_raw)
+        ## generate bus schedules in real time
+        #busPlanningResults={}
+        #for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
+        #    busPlanningResults[hour] = {}
+        #    if (len(bus_scheduling_file[str(hour)].keys())>0):
+        #       for f in ['JFK','LGA','PENN']:
+        #           busPlanningResults[str(hour)][f]=bus_scheduling_file[str(hour)][f]
+                
 
     # Update the UCB result regularly
     hour = 0
     while True:
         print(currentHour)
+        # uncomment this block if you want to generate bus schedules in real time
         # generate json message based on the bus planning optimization
-        if (config['bus_scheduling'] == 'true'):
-            if ((hour%2)==0 and hour>previousHour[port_numbers[i]]):
-                # mode function and upate the bus planning every 2 hours
-                # only send message when current hour differs from previous hour
-                for f in ['JFK','LGA','PENN']:
-                    bus_planning_json = {}
-                    hub_type = f
-                    #JFK: 114; LGA: 120; PENN: 164. 
-                    if hub_type=='JFK':
-                        hub_index = 114  
-                    if hub_type=='LGA':
-                        hub_index = 120
-                    if hub_type=='PENN':
-                        hub_index = 164 
-                    if hub_index>=180:
-                        continue
-                    hour_idx= min(hour + 2, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600))
-                    max_route = 30
-                    routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour_idx)          
-                    routeGeneration.run()
-                    # run() can include route_generate() and route_combine() function you def
-                    mat=routeGeneration.bus_mat
-                    Tlist = [10]     #uncertainty level
-                    Blist = [200]    #fleet size  
-                    routeOptimization=RouteOptimization(mat,Tlist,Blist)
-                    routeOptimization.run()
-                    # run() perform the process
-                    bus_planning_json['Bus_route'] =routeOptimization.Bus_route
-                    len_json=len(bus_planning_json['Bus_route'])
-                    bus_planning_json['Bus_num'] =routeOptimization.Bus_num[:len_json]
-                    # extract the first len_json items
-                    bus_planning_json['Bus_gap'] =routeOptimization.Bus_gap[:len_json]
-                    if sum(bus_planning_json['Bus_num'])==0:
-                        bus_planning_json['Bus_num'][0]=1
-                        bus_planning_json['Bus_gap'][0]=routeOptimization.bus_mat["route_trip_time"][0][0]*60
-                    print(bus_planning_json['Bus_route'])
-                    ## organize the json format of output 
-                    bus_planning_json['MSG_TYPE'] = "BUS_SCHEDULE" 
-                    # len_json=len(bus_planning_json['Bus_num']) 
-                    # generate dummy route name based on hub time and route count
-                    list_routename=[]
-                    for l in range(0,len_json): 
-                        # XXX for hub  XX for hour XX for ro
-                        list_routename.append(hub_index*10000+hour_idx*100+l)
-                    bus_planning_json['Bus_routename'] = list_routename
-                    bus_planning_json['Bus_currenthour'] = hour_idx 
-                    busPlanningResults[hour_idx][f] = json.dumps(bus_planning_json)
-                    # print('bus_planning_json_str')
-                    # print(busPlanningResults[hour][f]) 
-
-        if(config['eco_routing'] == 'true'):
+        # if ((hour%2)==0 and hour>previousHour[port_numbers[i]]):
+        #         # mode function and upate the bus planning every 2 hours
+        #         # only send message when current hour differs from previous hour
+        #         for f in ['JFK','LGA','PENN']:
+        #             bus_planning_json = {}
+        #             hub_type = f
+        #             #JFK: 114; LGA: 120; PENN: 164. 
+        #             if hub_type=='JFK':
+        #                 hub_index = 114  
+        #             if hub_type=='LGA':
+        #                 hub_index = 120
+        #             if hub_type=='PENN':
+        #                 hub_index = 164 
+        #             if hub_index>=180:
+        #                 continue
+        #             hour_idx= min(hour + 2, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600))
+        #             max_route = 30
+        #             routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour_idx)          
+        #             routeGeneration.run()
+        #             # run() can include route_generate() and route_combine() function you def
+        #             mat=routeGeneration.bus_mat
+        #             Tlist = [10]     #uncertainty level
+        #             Blist = [200]    #fleet size  
+        #             routeOptimization=RouteOptimization(mat,Tlist,Blist)
+        #             routeOptimization.run()
+        #             # run() perform the process
+        #             bus_planning_json['Bus_route'] =routeOptimization.Bus_route
+        #             len_json=len(bus_planning_json['Bus_route'])
+        #             bus_planning_json['Bus_num'] =routeOptimization.Bus_num[:len_json]
+        #             # extract the first len_json items
+        #             bus_planning_json['Bus_gap'] =routeOptimization.Bus_gap[:len_json]
+        #             if sum(bus_planning_json['Bus_num'])==0:
+        #                 bus_planning_json['Bus_num'][0]=1
+        #                 bus_planning_json['Bus_gap'][0]=routeOptimization.bus_mat["route_trip_time"][0][0]*60
+        #             print(bus_planning_json['Bus_route'])
+        #             ## organize the json format of output 
+        #             bus_planning_json['MSG_TYPE'] = "BUS_SCHEDULE" 
+        #             # len_json=len(bus_planning_json['Bus_num']) 
+        #             # generate dummy route name based on hub time and route count
+        #             list_routename=[]
+        #             for l in range(0,len_json): 
+        #                 # XXX for hub  XX for hour XX for ro
+        #                 list_routename.append(hub_index*10000+hour_idx*100+l)
+        #             bus_planning_json['Bus_routename'] = list_routename
+        #             bus_planning_json['Bus_currenthour'] = str(hour_idx) 
+        #             busPlanningResults[str(hour_idx)][f] = json.dumps(bus_planning_json)
+        #             previousHour[port_numbers[i]]=hour
+        #             # print('bus_planning_json_str')
+        #             # print(busPlanningResults[hour][f]) 
+        if(config.eco_routing == 'true'):
             # # update the routing data
             for i in range(num_clients):
                 with rd_clients[i].lock:
@@ -191,6 +197,8 @@ def run_rdcm(num_clients, port_numbers):
                     print("link ucb received")
                     # print(linkUCBMap.keys())
                     hour = mabManager.refreshLinkUCB(linkUCBMap)
+                    #print("hour is")
+                    #print(hour)
                     if(currentHour[port_numbers[i]] < hour):
                         currentHour[port_numbers[i]] = hour
                     # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
@@ -245,28 +253,43 @@ def run_rdcm(num_clients, port_numbers):
                     #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
                     #    rd_clients[i].ws.send(routeResultBus_json_string)
         
-        # if(config['bus_scheduling'] == 'true'):
-        #     for i in range(num_clients):
-        #         if (((hour%2)==0) and (hour>previousHour[port_numbers[i]])):
-        #             # mode function and upate the bus planning every 2 hours
-        #             # only send message when current hour differs from previous hour
-        #             # all results are prepared
-        #             for f in ['JFK','LGA','PENN']:
-        #                 bus_planning_prepared = True
-        #                 if f not in busPlanningResults[hour]:
-        #                     bus_planning_prepared = False
-        #             if bus_planning_prepared:
-        #                 print("Send bus scheduling results!")
-        #                 with rd_clients[i].lock:
-        #                     for f in ['JFK','LGA','PENN']:
-        #                         rd_clients[i].ws.send(busPlanningResults[hour][f])
-        #                     previousHour[port_numbers[i]]=hour
+        if(config.bus_scheduling == 'true'):
+            for i in range(num_clients):
+                hour=currentHour[port_numbers[i]]
+                if (((hour%2)==0) and (hour>previousHour[port_numbers[i]])):
+                    # mode function and upate the bus planning every 2 hours
+                    # only send message when current hour differs from previous hour
+                    # all results are prepared
+                    for f in ['JFK','LGA','PENN']:
+                        bus_planning_prepared = True
+                        if f not in busPlanningResults[str(hour)]:
+                            bus_planning_prepared = False
+                    if bus_planning_prepared:
+                        print("Send bus scheduling results!")
+                        with rd_clients[i].lock:
+                            busPlanningResults_combine={}
+                            JFK_json=json.loads(busPlanningResults[str(hour)]['JFK'])
+                            LGA_json=json.loads(busPlanningResults[str(hour)]['LGA'])
+                            PENN_json=json.loads(busPlanningResults[str(hour)]['PENN'])
+                            busPlanningResults_combine['Bus_route']=list(JFK_json['Bus_route'])+list(LGA_json['Bus_route'])+list(PENN_json['Bus_route'])
+                            busPlanningResults_combine['Bus_num']=list(JFK_json['Bus_num'])+list(LGA_json['Bus_num'])+list(PENN_json['Bus_num'])
+                            busPlanningResults_combine['Bus_gap']=list(JFK_json['Bus_gap'])+list(LGA_json['Bus_gap'])+list(PENN_json['Bus_gap'])
+                            busPlanningResults_combine['MSG_TYPE']="BUS_SCHEDULE"
+                            busPlanningResults_combine['Bus_routename']=list(JFK_json['Bus_routename'])+list(LGA_json['Bus_routename'])+list(PENN_json['Bus_routename'])
+                            busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
+                            print(json.dumps(busPlanningResults_combine))
+                            rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
+                            #for f in ['JFK','LGA','PENN']:
+                            #    print(f)
+                            #    print(busPlanningResults[str(hour)][f])
+                            #    rd_clients[i].ws.send(busPlanningResults[str(hour)][f])
+                            previousHour[port_numbers[i]]=hour
                                    
         time.sleep(0.5) # wait for 0.5 seconds
 
-        # wait until all rd_clients finish their work
-        for j in range(num_clients):
-            rd_clients[j].join()
+    # wait until all rd_clients finish their work
+    for j in range(num_clients):
+        rd_clients[j].join()
 
 # main function (used only for debugging)
 if __name__ == "__main__":
@@ -274,8 +297,8 @@ if __name__ == "__main__":
         config = json.load(f)
 
     # Obtain simulation arguments
-    num_clients = int(config['num_sim_instances'])
-    port_numbers = config['socket_port_numbers']
+    num_clients = int(config.num_sim_instances)
+    port_numbers = config.socket_port_numbers
     # pending_servers=
     #run_rdcm(options.num_simulations, options.ports, options.server_sockets)
     run_rdcm(num_clients, port_numbers,index_bus_scheduling)

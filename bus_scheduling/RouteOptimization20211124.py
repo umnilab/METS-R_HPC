@@ -124,7 +124,7 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
     #3. 
     A, b = list(), list()
     if constraint_activation["3"] == True:
-        #print ("the current iteration is .....")
+        print ("the current iteration is .....")
         #print (Prob["recourse_iter"])
         for i in range(Prob["recourse_iter"]):
             At = np.zeros((1,nvar))
@@ -415,7 +415,6 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
     
     #18.1 create model
     milp_model = gp.Model("milp")
-    milp_model.Params.LogToConsole = 0
     vname = 'x'
     vtypeList = [GRB.CONTINUOUS] *  nvar
     for i in Prob["params"]["mvar"]["y_range"]:
@@ -447,8 +446,8 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
     x_solution = x.X
     y_value = milp_model.ObjVal
     result = milp_model
-    # print ("-------------------------------Master-Solved--------------------------------------------------")
-    # print ("check: obj for master is", y_value)
+    #print ("-------------------------------Master-Solvered--------------------------------------------------")
+    #print ("check: obj for master is", y_value)
     return x_solution, y_value
 
 
@@ -579,7 +578,6 @@ def recourse_milp(x_master_milp, Prob):
     
     #9. define the varibale type
     milp_model = gp.Model("milp")
-    milp_model.Params.LogToConsole = 0
     vname = 'x'
     vtypeList = [GRB.CONTINUOUS] *  n_recourse
     for i in Prob["params"]["rvar"]["p_range"]:
@@ -596,8 +594,8 @@ def recourse_milp(x_master_milp, Prob):
     x_solution = x.X
     y_value = milp_model.ObjVal
     result = milp_model
-    # print ("----------------------------------Recourse-Solvered------------------------------------------")
-    # print ("check: obj for recourse is", y_value)
+    #print ("----------------------------------Recourse-Solvered------------------------------------------")
+    #print ("check: obj for recourse is", y_value)
     return x_solution, y_value
 
 
@@ -663,7 +661,7 @@ def route_optimization(bus_mat,Tlist,Blist):
                 LB, UB = MLB, MLB - x_master_milp[Prob["params"]["mvar"]["eta_range"]][0]  #numpy deletion
                 #print ("check_reduce", x_master_milp[Prob["params"]["mvar"]["eta_range"]])
                 x_recourse, fval = recourse_milp(x_master_milp, Prob)    #Call the recourse_milp
-                print ("fval_check", fval)
+                #print ("fval_check", fval)
                 #t += sol["time"]
                 UB = UB - fval   #fval is negative
                 if UB > ub_vec[-1]:
@@ -678,13 +676,13 @@ def route_optimization(bus_mat,Tlist,Blist):
                 lb_vec = lb_vec + [LB]
                 ub_vec = ub_vec + [UB]
                 number_bus_vec = number_bus_vec + [np.sum(x_master_milp[np.array(Prob["params"]["mvar"]["y_range"])])]
-                # print ("Iteration solved")
-                # print ("----------------------------------Iteration-------------------------------------------------------------")
-                # #print (Prob["Recourse_iter"])
-                # print('lower_bound_vector', lb_vec)
-                # print ('upper_bound_vector', ub_vec)
-                # print ("number_bus_vec", number_bus_vec)
-                # print("--------------------------------------------------------------------------------------------")
+                print ("Iteration solved")
+                print ("----------------------------------Iteration-------------------------------------------------------------")
+                #print (Prob["Recourse_iter"])
+                #print('lower_bound_vector', lb_vec)
+                #print ('upper_bound_vector', ub_vec)
+                #print ("number_bus_vec", number_bus_vec)
+                print("--------------------------------------------------------------------------------------------")
                 if t>120:
                     print('Timeout\n')
                     break

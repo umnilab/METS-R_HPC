@@ -87,9 +87,12 @@ def prepare_sim_dirs(options):
         sys.exit(-1)
     for i in range(0, options.num_simulations):
         # make a directory to run the simulator
-        dir_name = "scenario" + str(options.scenario_index) +"_"+ str(options.case_index) + "_" + str(i)
+        dir_name = "eco"+"_"+options.eco_routing+"_"
+        dir_name += "bus"+"_"+options.bus_scheduling+"_"
+        dir_name += "share"+"_"+str(int(options.share_percentage*100))
+        dir_name += "/scenario" + str(options.scenario_index) +"/"+ str(options.case_index) + "_" + str(i)
         if not path.exists(dir_name):
-            os.mkdir(dir_name)
+            os.makedirs(dir_name)
         # copy the simulation config files
         dest_data_dir = dir_name + "/" + "data" 
         output_data_dir = dir_name + "/" + "simulation_output" 
@@ -164,13 +167,13 @@ def read_run_config(fname):
     opts.num_simulations = int(config['num_sim_instances'])
     #opts.ports = config['socket_port_numbers']
     
-    opts.scenario_index = int(config['scenario_index'])
+    #opts.scenario_index = int(config['scenario_index'])
     #opts.case_index = int(config['case_index'])
     
     opts.charger_plan = config['charger_plan']
-    opts.eco_routing = config['eco_routing']
-    opts.bus_scheduling = config['bus_scheduling']
-    opts.share_percentage = float(config['share_percentage'])
+    #opts.eco_routing = config['eco_routing']
+    #opts.bus_scheduling = config['bus_scheduling']
+    #opts.share_percentage = float(config['share_percentage'])
 
     #if len(opts.ports) != opts.num_simulations:
     #    print("ERROR , please specify port number for all simulation instances")
@@ -229,11 +232,17 @@ def run_simulations(options):
                    "repast.simphony.runtime.RepastMain " + \
                    options.addsevs_dir + "addsEVs.rs"
         # got to sim directory 
-        sim_dir = "scenario" + str(options.scenario_index) + "_"+ str(options.case_index) + "_"+ str(i)
+        sim_dir = "eco"+"_"+options.eco_routing + "_"
+        sim_dir += "bus"+"_"+options.bus_scheduling + "_"
+        sim_dir += "share"+"_"+str(int(options.share_percentage*100))
+        os.chdir(sim_dir)
+        sim_dir = "scenario" + str(options.scenario_index) 
+        os.chdir(sim_dir)
+        sim_dir =  str(options.case_index) + "_" + str(i)
         os.chdir(sim_dir)
         cwd = str(os.getcwd())
         # run simulator on new terminal 
         # os.system("konsole --hold --workdir " + cwd + " -e " + sim_command + " &")
         os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
-        os.chdir("..")
+        os.chdir("../../..")
