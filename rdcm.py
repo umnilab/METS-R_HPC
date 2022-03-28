@@ -60,50 +60,50 @@ def run_rdcm(config, num_clients, port_numbers):
     # TODO : just print the content of rd_clients for debugging purposes, remove if not needed
     
     # initialize UCB data
-    if (config.eco_routing == 'true'):
-        print("Initializing CUCB data!")
-        mabManager= MABManager(config.addsevs_dir, args)
-        routeUCBMap = {}
-        i = 0
-        with rd_clients[i].lock:
-            while len(routeUCBMap) == 0:
-                routeUCBMap = rd_clients[i].route_ucb_received
-                i += 1
-                i = i % num_clients
-                time.sleep(0.5)
-            print("routeUCBMap received")
-            # print(routeUCBMap)
-            # routeUCBMapBus = {}
-            # i = 0
-            # while len(routeUCBMapBus) == 0:
-            #     with rd_clients[i].lock:
-            #         routeUCBMapBus = rd_clients[i].route_ucb_bus_received
-            #         #print("routeUCBMapBus received"+str(rd_clients[i].route_ucb_bus_received))
-            #         i += 1
-            #         i = i % num_clients
-            #         time.sleep(0.5)
-            # print("routeUCBMapBus received")
-        time.sleep(10) # wait for processing routeUCBMap        
-        # initialize mabManager using background data
-        mabManager.refreshRouteUCB(routeUCBMap)
-        # mabManager.refreshRouteUCBBus(routeUCBMapBus)
-        mabManager.initializeLinkEnergy1()
-        mabManager.initializeLinkEnergy2()
-        # initialize route result
-        routeResult = []
-        # routeResultBus = []
-        # print(list(routeUCBMap.keys()))
-        for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
-            oneResult = {}
-            for od in routeUCBMap.keys():
-                oneResult[od]=-1 
-            routeResult.append(oneResult)
-            #oneResultBus = defaultdict(lambda: -1)
-            # raw value is simply -1
-            # oneResultBus = {}
-            # for od in routeUCBMapBus:
-            #     oneResultBus[od]=-1 
-            # routeResultBus.append(oneResultBus)
+    # if (config.eco_routing == 'true'):
+    print("Initializing CUCB data!")
+    mabManager= MABManager(config.addsevs_dir, args)
+    routeUCBMap = {}
+    i = 0
+    with rd_clients[i].lock:
+        while len(routeUCBMap) == 0:
+            routeUCBMap = rd_clients[i].route_ucb_received
+            i += 1
+            i = i % num_clients
+            time.sleep(0.5)
+        print("routeUCBMap received")
+        # print(routeUCBMap)
+        # routeUCBMapBus = {}
+        # i = 0
+        # while len(routeUCBMapBus) == 0:
+        #     with rd_clients[i].lock:
+        #         routeUCBMapBus = rd_clients[i].route_ucb_bus_received
+        #         #print("routeUCBMapBus received"+str(rd_clients[i].route_ucb_bus_received))
+        #         i += 1
+        #         i = i % num_clients
+        #         time.sleep(0.5)
+        # print("routeUCBMapBus received")
+    time.sleep(20) # wait for processing routeUCBMap        
+    # initialize mabManager using background data
+    mabManager.refreshRouteUCB(routeUCBMap)
+    # mabManager.refreshRouteUCBBus(routeUCBMapBus)
+    mabManager.initializeLinkEnergy1()
+    mabManager.initializeLinkEnergy2()
+    # initialize route result
+    routeResult = []
+    # routeResultBus = []
+    # print(list(routeUCBMap.keys()))
+    for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
+        oneResult = {}
+        for od in routeUCBMap.keys():
+            oneResult[od]=-1 
+        routeResult.append(oneResult)
+        #oneResultBus = defaultdict(lambda: -1)
+        # raw value is simply -1
+        # oneResultBus = {}
+        # for od in routeUCBMapBus:
+        #     oneResultBus[od]=-1 
+        # routeResultBus.append(oneResultBus)
 
     # If enabling bus scheduling, then loading the demand prediction data
     if (config.bus_scheduling == 'true'):
@@ -189,22 +189,23 @@ def run_rdcm(config, num_clients, port_numbers):
         #             previousHour[port_numbers[i]]=hour
         #             # print('bus_planning_json_str')
         #             # print(busPlanningResults[hour][f]) 
+        #if(config.eco_routing == 'true'):
+        # # update the routing data
+        for i in range(num_clients):
+            with rd_clients[i].lock:
+                linkUCBMap = rd_clients[i].link_ucb_received 
+                print("link ucb received")
+                # print(linkUCBMap.keys())
+                hour = mabManager.refreshLinkUCB(linkUCBMap)
+                #print("hour is")
+                #print(hour)
+                if(currentHour[port_numbers[i]] < hour):
+                    currentHour[port_numbers[i]] = hour
+                # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
+                # mabManager.refreshLinkUCBBus(linkUCBMapBus)
+                # speedVehicle = rd_clients[i].speed_vehicle_received
+                # mabManager.refreshLinkUCBShadow(speedVehicle)
         if(config.eco_routing == 'true'):
-            # # update the routing data
-            for i in range(num_clients):
-                with rd_clients[i].lock:
-                    linkUCBMap = rd_clients[i].link_ucb_received 
-                    print("link ucb received")
-                    # print(linkUCBMap.keys())
-                    hour = mabManager.refreshLinkUCB(linkUCBMap)
-                    #print("hour is")
-                    #print(hour)
-                    if(currentHour[port_numbers[i]] < hour):
-                        currentHour[port_numbers[i]] = hour
-                    # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
-                    # mabManager.refreshLinkUCBBus(linkUCBMapBus)
-                    # speedVehicle = rd_clients[i].speed_vehicle_received
-                    # mabManager.refreshLinkUCBShadow(speedVehicle)
             for hour_od in currentHour.values():
                 for od in routeResult[hour_od]:
                     routeAction = mabManager.ucbRouting(od, hour_od)
@@ -212,7 +213,7 @@ def run_rdcm(config, num_clients, port_numbers):
                 # for od in routeResultBus[hour_od]:
                 #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
                 #     routeResultBus[hour_od][od] = routeAction
-            # sent back the planning results     
+            # sent back the planning results  
             for i in range(num_clients):
                 with rd_clients[i].lock:
                     # clean the data set after refresh functions     
