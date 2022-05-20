@@ -42,27 +42,30 @@ class RDClient(threading.Thread):
 
         # data maps can be accessed by both main thread (for ML algorithms)
         # and RDClient class. Therefore synchronization is needed to avoid data races
-        # TODO : if the main thready does reads, the lock can be removed safely?
+        # if the main thready only does reads, the lock can be removed safely
         self.lock = Lock()
 
 
     # on_message is automatically called when the sever sends a msg
     #  this part has not been updated
     def on_message(self, ws, message):
-        # print(message)
+   
         if(self.log_msgs):
             print(f"{self.uri} : {message[0:self.msg_log_size]}")
 
         # decode the json string
         decoded_msg = json.loads(str(message))
         #print("received decoded message")
+        #print(decoded_msg)
         #print(decoded_msg['MSG_TYPE'])
         # every decoded msg must have a MSG_TYPE field
         assert 'MSG_TYPE' in decoded_msg.keys(), "No MSG_TYPE field in received json string!"
         
         # OD pair and ucb route candidates received 
         if decoded_msg['MSG_TYPE'] == "OD_PAIR":
+            #print("OD pair start to be updated")
             self.update_route_ucb(decoded_msg)
+            #print("OD pair fnished updated")
             
         # bus OD pair and ucb bus route candidates received
         elif decoded_msg['MSG_TYPE'] == "BOD_PAIR":
@@ -120,8 +123,7 @@ class RDClient(threading.Thread):
         with self.lock:
             #self.link_ucb_received['hour_int'] = hour_int
             if id not in self.link_ucb_received.keys():
-                self.link_ucb_received[id] = values
-        
+                self.link_ucb_received[id] = values        
             else:
                 #self.link_ucb_received[id].append(values)
                 self.link_ucb_received[id].extend(values)
@@ -132,7 +134,7 @@ class RDClient(threading.Thread):
         with self.lock:
             if id not in self.link_ucb_bus_received.keys():
                 self.link_ucb_bus_received[id] = values
-            
+          
             else:
                 self.link_ucb_bus_received[id].extend(values)
     
@@ -146,11 +148,32 @@ class RDClient(threading.Thread):
                 self.speed_vehicle_received[id].extend(values)
 
     # method for updating the ucb routes
+    
+     ###########################################
+    # revised by zhenyu
+    # lock is used for multithread in python
+    # with function contains the acquire() and release()
+    # if it is a single thread, and no rare condition when two threads try to access one resource, lock is not needed
+    # sendstring function has been replaced by sendstringbyfuture in Eclispse. That works in both 1 and multiple instance conditions. sendstringbyfuture can guarantee that the thread will not be blocked under 1 instance. we send around 372 OD messages to the same client at one time, and if the message in the queue exceed 1000, it will report an blocking error, and therefore i replaced the function. 
+    ## this paragraph will be deleted once cleaned. 
+    ###########################################
+
     def update_route_ucb(self, json_obj):
+            assert json_obj['OD'] not in self.route_ucb_received.keys(), f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!"
+            #print(json_obj['OD'])
+            #print(list(map(str_list_to_int_list, json_obj['road_lists'])))
+            self.route_ucb_received[json_obj['OD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
+            #print(self.route_ucb_received)
+
+    ####  this is the version when multithread exists and we need with self.lock
+    ### if condition canot be used directly since the judgement will need RDCLIENT number which do exist in the RDCLIENT class. 
+    """def update_route_ucb(self, json_obj):
         with self.lock:
             assert json_obj['OD'] not in self.route_ucb_received.keys(), f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!"
-
+            print(json_obj['OD'])
+            print(list(map(str_list_to_int_list, json_obj['road_lists'])))
             self.route_ucb_received[json_obj['OD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
+            print(self.route_ucb_received) """
 
     # method for updating the ucb bus routes
     def update_route_ucb_bus(self, json_obj):

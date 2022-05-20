@@ -1,5 +1,6 @@
-import sys
+import sys, os
 import argparse
+import subprocess
 from rdcm import run_rdcm
 from util import read_run_config, prepare_sim_dirs, run_simulations
 
@@ -12,7 +13,7 @@ def get_arguments(argv):
                         help='the index of to simulate scenario, values from 0 to 3')
     parser.add_argument('-c','--case_index', type=int, 
                         help='the index within the scenario, take values from 0 to 9')
-    parser.add_argument('-p', '--share_percentage', type=float, default=0.5,
+    parser.add_argument('-sp', '--share_percentage', type=float, default=0.5,
                         help='percentage of sharable requests, 0 to 1')
     parser.add_argument('-e', '--eco_routing', action='store_true', default=False,
                         help='enable ecorouting')
@@ -42,10 +43,10 @@ def main():
     # prepare simulation directories
     prepare_sim_dirs(options)
     # launch the simulations
-    run_simulations(options)
+    pid = run_simulations(options)
     # run rdcm 
-    # add scneario index for quick
     run_rdcm(options, options.num_simulations, options.ports)
 
 if __name__ ==  "__main__":
+    # start a new thread to run the process
     main()

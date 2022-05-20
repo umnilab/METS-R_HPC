@@ -1,5 +1,6 @@
 import sys
-import os
+import psutil, os
+import signal
 import json
 import ast
 import time
@@ -15,6 +16,7 @@ from rdc import RDClient
 # main function for remote control client (RDC) manager
 # to the configurations specified in config
 def run_rdcm(config, num_clients, port_numbers):
+    # os.system("gnome-terminal --disable-factory")
     # Obtain simulation arguments
     args = {}
     with open(os.path.join(config.addsevs_dir+'data', 'Data.properties'), "r") as f:
@@ -25,7 +27,7 @@ def run_rdcm(config, num_clients, port_numbers):
             if len(fields) != 2:
                 continue
             else:
-                print(fields)
+                # print(fields)
                 try:
                     args[fields[0]] = ast.literal_eval(fields[1])
                 except:
@@ -65,10 +67,20 @@ def run_rdcm(config, num_clients, port_numbers):
     mabManager= MABManager(config.addsevs_dir, args)
     routeUCBMap = {}
     i = 0
+    #print("MabManager Initialized!")
+
+    ############################################## revised and hint for 1 instance 
+    # the with lock function for eco routing and bus scheduling has been verified to work in both 1 instance or multiple instances 
+    # in case if function is added to integrate both 1 and multiple instances, just focus on the rdc.py function. 
+     ###########################################
     with rd_clients[i].lock:
         while len(routeUCBMap) == 0:
             routeUCBMap = rd_clients[i].route_ucb_received
+            #print("routeUCBMap updated")
             i += 1
+            #print("i is"+str(i))
+            #print("num_clients is")
+            #print(num_clients)
             i = i % num_clients
             time.sleep(0.5)
         print("routeUCBMap received")
@@ -93,7 +105,10 @@ def run_rdcm(config, num_clients, port_numbers):
     routeResult = []
     # routeResultBus = []
     # print(list(routeUCBMap.keys()))
-    for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
+    
+    totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
+    emptyCount = 0
+    for hour in range(totalHour+1):
         oneResult = {}
         for od in routeUCBMap.keys():
             oneResult[od]=-1 
@@ -195,10 +210,15 @@ def run_rdcm(config, num_clients, port_numbers):
             with rd_clients[i].lock:
                 linkUCBMap = rd_clients[i].link_ucb_received 
                 print("link ucb received")
-                # print(linkUCBMap.keys())
+                #print(totalHour)
+                #print(currentHour[port_numbers[i]])
+                if (currentHour[port_numbers[i]] >= totalHour - 2):
+                    print(len(linkUCBMap.keys()))
+                    if(len(linkUCBMap.keys()) == 0):
+                        emptyCount += 1
+                    else:
+                        emptyCount = 0
                 hour = mabManager.refreshLinkUCB(linkUCBMap)
-                #print("hour is")
-                #print(hour)
                 if(currentHour[port_numbers[i]] < hour):
                     currentHour[port_numbers[i]] = hour
                 # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
@@ -257,7 +277,7 @@ def run_rdcm(config, num_clients, port_numbers):
         if(config.bus_scheduling == 'true'):
             for i in range(num_clients):
                 hour=currentHour[port_numbers[i]]
-                if (((hour%2)==0) and (hour>previousHour[port_numbers[i]])):
+                if (((hour%2)==0) and (hour>previousHour[port_numbers[i]]) and (hour<48)):
                     # mode function and upate the bus planning every 2 hours
                     # only send message when current hour differs from previous hour
                     # all results are prepared
@@ -286,12 +306,57 @@ def run_rdcm(config, num_clients, port_numbers):
                             #    rd_clients[i].ws.send(busPlanningResults[str(hour)][f])
                             previousHour[port_numbers[i]]=hour
                                    
+        # check the current simulated time
+      ##############################################   
+    # os.getpid get current process and kill the process to return to the terminal
+    # however, since the repast simulation will not close automatically, so we need to add exec to running the python function to close the terminal 
+    #  run:     exec python test.py
+     ########################################### 
+        #print(currentHour)
+        #print(totalHour)
+        if (min(currentHour) == totalHour or emptyCount >= 10):
+           print("simulation finished")
+           for pid in get_pids_by_script_name():
+               kill_proc_tree(pid)
+           kill_proc_tree(os.getpid()) 
+
         time.sleep(0.5) # wait for 0.5 seconds
+
+        
 
     # wait until all rd_clients finish their work
     for j in range(num_clients):
         rd_clients[j].join()
 
+
+def kill_proc_tree(pid, including_parent=True):    
+    parent = psutil.Process(pid)
+    children = parent.children(recursive=True)
+    for child in children:
+        child.kill()
+    gone, still_alive = psutil.wait_procs(children, timeout=5)
+    if including_parent:
+        parent.kill()
+        parent.wait(5)
+        
+def get_pids_by_script_name():
+
+    pids = []
+    for proc in psutil.process_iter():
+
+        try:
+            cmdline = proc.cmdline()
+            pid = proc.pid
+            
+            #print(cmdline)
+        except psutil.NoSuchProcess:
+            continue
+        if (len(cmdline)>2 and 'java' in cmdline[0]
+            and cmdline[-1].endswith('addsEVs.rs')):
+            pids.append(pid)
+
+    return pids
+        
 # main function (used only for debugging)
 if __name__ == "__main__":
     with open(sys.argv[1], "r") as f:
