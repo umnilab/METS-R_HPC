@@ -107,40 +107,35 @@ class RDClient(threading.Thread):
 
     # Method for updating the link energy map
     def update_link_ucb(self, id,values):
-        with self.lock:
-            if id not in self.link_ucb_received.keys():
-                self.link_ucb_received[id] = values        
-            else:
-                self.link_ucb_received[id].extend(values)
+        if id not in self.link_ucb_received.keys():
+            self.link_ucb_received[id] = values        
+        else:
+            self.link_ucb_received[id].extend(values)
 
     # Method for updating the link bus energy map
     def update_link_ucb_bus(self, id,  values):
-        with self.lock:
-            if id not in self.link_ucb_bus_received.keys():
-                self.link_ucb_bus_received[id] = values
-            else:
-                self.link_ucb_bus_received[id].extend(values)
+        if id not in self.link_ucb_bus_received.keys():
+            self.link_ucb_bus_received[id] = values
+        else:
+            self.link_ucb_bus_received[id].extend(values)
     
     # Method for updating the vehicle speed map
     def update_speed_vehicle(self, id, values):
-        with self.lock:
-            if id not in self.speed_vehicle_received.keys():
-                self.speed_vehicle_received[id] = values
-            else:
-                self.speed_vehicle_received[id].extend(values)
+        if id not in self.speed_vehicle_received.keys():
+            self.speed_vehicle_received[id] = values
+        else:
+            self.speed_vehicle_received[id].extend(values)
 
     # Method for updating the UCB routes
     def update_route_ucb(self, json_obj):
-        with self.lock:
-            assert json_obj['OD'] not in self.route_ucb_received.keys(), f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!"
-            self.route_ucb_received[json_obj['OD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
+        assert json_obj['OD'] not in self.route_ucb_received.keys(), f"WARNING : OD pair {json_obj['OD']} is already in the route_ucb_received map!"
+        self.route_ucb_received[json_obj['OD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
 
     # method for updating the ucb bus routes
     def update_route_ucb_bus(self, json_obj):
-        with self.lock:
-            assert json_obj['BOD'] not in self.route_ucb_bus_received.keys(), f"WARNING : BOD pair {json_obj['BOD']} is already in the route_ucb_bus_received map!"
+        assert json_obj['BOD'] not in self.route_ucb_bus_received.keys(), f"WARNING : BOD pair {json_obj['BOD']} is already in the route_ucb_bus_received map!"
 
-            self.route_ucb_bus_received[json_obj['BOD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
+        self.route_ucb_bus_received[json_obj['BOD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
 
     def on_error(self, ws, error):
         print(error)

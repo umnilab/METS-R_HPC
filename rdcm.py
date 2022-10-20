@@ -266,7 +266,7 @@ def run_rdcm(config, num_clients, port_numbers):
                         if f not in busPlanningResults[str(hour)]:
                             bus_planning_prepared = False
                     if bus_planning_prepared:
-                        print("Send bus scheduling results!")
+                        print("Sending bus scheduling results for hour {}".format(hour))
                         with rd_clients[i].lock:
                             busPlanningResults_combine={}
                             # comment the following three lines if the schedules are generated in real time
