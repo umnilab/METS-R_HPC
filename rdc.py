@@ -173,5 +173,5 @@ class RDClient(threading.Thread):
             f"route_ucb_bus_received keys :\n {self.route_ucb_bus_received.keys()}\n" \
             f"link_ucb_received keys :\n {self.link_ucb_received.keys()}\n" \
             f"link_ucb_bus_received keys :\n {self.link_ucb_bus_received.keys()}\n" \
-            f"speed_vehicle_received keys :\n {self.speed_vehicle_received.keys()}\n" \
+            f"speed_vehicle_received keys :\n {self.speed_vehicle_received.keys()}\n" 
         return s
