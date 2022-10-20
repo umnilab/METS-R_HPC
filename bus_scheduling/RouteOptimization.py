@@ -1,7 +1,18 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # RouteOptimization
+
+# In[1]:
+
 
 #The RouteOptimization class executes the the bus frequency planning module.
 #Author: Jiawei Xue. 
-#Time: Oct 2021
+#Time: Oct Nov 2021
+
+
+# In[2]:
+
 
 import math
 import numpy as np 
@@ -10,34 +21,28 @@ import scipy.io
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
+import pandas as pd
 
-# files = ["/home/umni2/a/umnilab/users/wang5076/METSR_HPC/METSR_HPC/bus_scheduling/input_route_optimization/metro_case_exact_0.mat"]   ###r1
-# Blist = [200]                                   #fleet size           
-# Tlist = [10]                                    #uncertainty level 
-# mat = scipy.io.loadmat(files[0])
-
-
+# In[3]:
+ 
 # # 1. Set parameters
 
-# In[4]:
+# In[5]:
 
 
 def set_params(mat_file):
     #1. first get those idxs to and from hubs
     params = dict()
+    print(mat_file)
     params["idx_to"] = [i for i, x in enumerate(mat_file["Q_tohub"][0]) if x > 0]        
     params["idx_from"] = [i for i, x in enumerate(mat_file["Q_fromhub"][0]) if x > 0]       
     params["nzone"] = 2*len(params["idx_to"])                           #number of zones
     params["nroute"] = len(mat_file["route_dist"][0])                   #number of routes
-    #print ("distance matrix")
-    #print (mat_file["route_dist"])
     params["B"] = 200
-    params["h_min"] = 3.0         #min
-    #params["h_max"] = 30.0        #headway range
+    params["h_min"] = 3.0         #min #headway range
     params["h_max"] = 30.0
     params["Capacity"] = 20
     params["cl"] = 3      #loss serve.       unit: 3$/mile
-    
     params["cw"] = 0.5*60      #waiting cost.     unit: 30$/hour
     params["co"] = 70           #operation weight. unit: 70$/hour
     params["op_cost"] = 70      #weight for operation
@@ -67,11 +72,11 @@ def set_params(mat_file):
     params["rvar"] = dict()
     params["rvar"]["p_range"] = [i for i in range(params["nzone"])]
     #demand equality constraint
-    params["rvar"]["lambda_range"] = [params["rvar"]["p_range"][-1]+1+j for j in range(params["nzone"])]   ###2???
+    params["rvar"]["lambda_range"] = [params["rvar"]["p_range"][-1]+1+j for j in range(params["nzone"])]  
     #to/from hub capacity constraint
     params["rvar"]["u_range"] = [params["rvar"]["lambda_range"][-1]+1+j for j in range(2*params["nroute"])]
     #served demand constraint.
-    params["rvar"]["v_range"] = [params["rvar"]["u_range"][-1]+1+j for j in range(params["nzone"])]        ###2???
+    params["rvar"]["v_range"] = [params["rvar"]["u_range"][-1]+1+j for j in range(params["nzone"])]        
     #relaxation of lambda_ip_i
     params["rvar"]["gamma_range"] = [params["rvar"]["v_range"][-1]+1+j for j in range(params["nzone"])]
     #relaxation of v_ip_i
@@ -97,7 +102,7 @@ def set_params(mat_file):
 
 # # 2. Master_milp
 
-# In[5]:
+# In[6]:
 
 
 def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = True or False
@@ -144,11 +149,7 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
             At = np.zeros(nvar)    
             A = np.array([At])
             b = [0]
-    #print ("At_equation_3")
-    #for j in range(len(At)):
-    #    print ("j",j,At[j])
-        
-        
+                
     #4. sum 2^kz_s^k>=Ts*kappa_s
     if constraint_activation["4"] == True:
         tA = np.zeros((Prob["params"]["nroute"], nvar))
@@ -254,7 +255,7 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
             At = np.zeros((Prob["params"]["nroute"], nvar))
             range_in = range(i*Prob["params"]["nroute"], (i+1)*Prob["params"]["nroute"])
             At[:, np.array(Prob["params"]["mvar"]["zs_range"])[range_in]] = np.eye(Prob["params"]["nroute"])
-            At[:, np.array(Prob["params"]["mvar"]["gs_range"])[range_in]] =                -np.diag([B_value for r in range(len(Prob["params"]["y_max"]))])
+            At[:, np.array(Prob["params"]["mvar"]["gs_range"])[range_in]] = -np.diag([B_value for r in range(len(Prob["params"]["y_max"]))])
             A =  np.vstack((A,np.array(At))) 
             for j in range(Prob["params"]["nroute"]):
                 b = b + [0] 
@@ -446,29 +447,14 @@ def master_milp(Prob, constraint_activation):  #constraint_activation["3"] = Tru
     x_solution = x.X
     y_value = milp_model.ObjVal
     result = milp_model
-    #print ("y_range")
-    #print ([x.X[params["mvar"]["y_range"][i]] for i in range(len(params["mvar"]["y_range"]))])  
-    #print ("sum_of_y")
-    #print (np.sum([x.X[params["mvar"]["y_range"][i]] for i in range(len(params["mvar"]["y_range"]))]))
-    #print ("gs_range")
-    #print ([x.X[params["mvar"]["gs_range"][i]] for i in range(len(params["mvar"]["gs_range"]))])  
-    
-    #print ("zs_range")
-    #print ([x.X[params["mvar"]["zs_range"][i]] for i in range(len(params["mvar"]["zs_range"]))])  
-    
-    #print ("k_range")
-    #print ([x.X[params["mvar"]["k_range"][i]] for i in range(len(params["mvar"]["k_range"]))])
-    
-    #print ("eta_range")
-    #print ("eta", x.X[params["mvar"]["eta_range"][0]])
-    #print ("-------------------------------Master-Solvered-------------------------------------------------------------")
-    print ("check: obj for master is", y_value)
+    #print ("-------------------------------Master-Solvered--------------------------------------------------")
+    #print ("check: obj for master is", y_value)
     return x_solution, y_value
 
 
 # # 3. recourse_milp
 
-# In[6]:
+# In[7]:
 
 
 def recourse_milp(x_master_milp, Prob):
@@ -508,7 +494,7 @@ def recourse_milp(x_master_milp, Prob):
     #Original A: sum X_from<=C, sum X_to<=C, sum X_i+Li=D
     array1 = np.eye(Prob["params"]["nzone"]) #200,200
     
-    array2 = np.multiply(Prob["params"]["route_stop_idx"][:, range(round(Prob["params"]["nzone"]/2))], master_h) #
+    array2 = np.multiply(Prob["params"]["route_stop_idx"][:, range(round(Prob["params"]["nzone"]/2))], master_h)
     array3 = np.zeros((Prob["params"]["nroute"], round(0.5*Prob["params"]["nzone"])))
     array4 = np.zeros((Prob["params"]["nroute"], Prob["params"]["nzone"]))
     
@@ -609,34 +595,27 @@ def recourse_milp(x_master_milp, Prob):
     x_solution = x.X
     y_value = milp_model.ObjVal
     result = milp_model
-    print ("----------------------------------Recourse-Solvered-------------------------------------------------------------")
-    print ("check: obj for recourse is", y_value)
+    #print ("----------------------------------Recourse-Solvered------------------------------------------")
+    #print ("check: obj for recourse is", y_value)
     return x_solution, y_value
 
 
 # # 4. Main function
 
-# In[7]:
+# In[8]:
 
 
-def route_optimization():
+def route_optimization(bus_mat,Tlist,Blist):
     constraint_activation  = dict()
     for i in range(15):
         constraint_activation[str(i+3)] = True
-    #false_index = [3,4,5,6,7,8,9,10]
-    #false_index = [11,12,13,14,15,16,17] 
-    #false_index = [14,15,16,17] 
-    #false_index = [11,12,13]
-    #false_index = [14,15] 
-    #false_index = [16,17] 
     false_index = [14] 
     for index in false_index:
         constraint_activation[str(index)] = False
     Results = dict()
     idx = 1
     i = 0
-    mat = scipy.io.loadmat(files[i])
-    test_name = files[i]
+    mat = bus_mat 
     params = set_params(mat)
     Prob = dict()
     Prob["params"] = params
@@ -661,7 +640,8 @@ def route_optimization():
             results = dict()
             results["master"] = dict()
             results["recourse"] = dict()
-            results["B"], results["name"], results["T"] = Blist[j], test_name, Tlist[k] #log the information.
+            #results["B"], results["name"], results["T"] = Blist[j], test_name, Tlist[k] #log the information.
+            results["B"], results["T"] = Blist[j], Tlist[k] #log the information.
             tf = [0]
             n = 0
             while n <=2:
@@ -681,7 +661,7 @@ def route_optimization():
                 LB, UB = MLB, MLB - x_master_milp[Prob["params"]["mvar"]["eta_range"]][0]  #numpy deletion
                 #print ("check_reduce", x_master_milp[Prob["params"]["mvar"]["eta_range"]])
                 x_recourse, fval = recourse_milp(x_master_milp, Prob)    #Call the recourse_milp
-                print ("fval_check", fval)
+                #print ("fval_check", fval)
                 #t += sol["time"]
                 UB = UB - fval   #fval is negative
                 if UB > ub_vec[-1]:
@@ -699,11 +679,11 @@ def route_optimization():
                 print ("Iteration solved")
                 print ("----------------------------------Iteration-------------------------------------------------------------")
                 #print (Prob["Recourse_iter"])
-                print('lower_bound_vector', lb_vec)
-                print ('upper_bound_vector', ub_vec)
-                print ("number_bus_vec", number_bus_vec)
+                #print('lower_bound_vector', lb_vec)
+                #print ('upper_bound_vector', ub_vec)
+                #print ("number_bus_vec", number_bus_vec)
                 print("--------------------------------------------------------------------------------------------")
-                if t>1800:
+                if t>120:
                     print('Timeout\n')
                     break
             tA = 1*np.eye(Prob["params"]["nroute"])
@@ -720,54 +700,93 @@ def route_optimization():
             return x_master_milp
 
 
+# In[9]:
+
+
+
 # In[10]:
-
-
-#ss  = route_optimization()
-
-#print("bus frequency")
-#print(ss[0:33])
-#print("route information")
-#print(mat["route_stop_index"][33])
-# In[11]:
 
 
 class RouteOptimization(object):
     #1. initialize the travel time, travel demand, and potential route
-    #2. initialize the route frequency
-    #3. update the travel time, and travel demand, 
-    #4. potential route
-    #5. implement the bus frequency design, and update the route frequency
+    #2. initialize the route frequency 
     
     #1. initialize the travel time, travel demand, and potential route
-    def __init__(self, travel_time, travel_demand, bus_route):
-        self.travel_time = travel_time        #the travel time between two different zones in the city
-        self.travel_demand = travel_demand    
-        self.bus_route = bus_route  
-        self.bus_frequency = {}  
- 
-    #2. update the travel time, travel demand
-    def update_time_demand(self, travel_time, travel_demand):
-        self.travel_time = travel_time
-        self.travel_demand = travel_demand
-    
-    #3. update the potential routes
-    def update_route(self, bus_route):
-        self.bus_route = bus_route 
-    
+    def __init__(self, bus_mat,Tlist,Blist):
+        self.bus_mat = bus_mat    
+        self.Bus_gap = list()
+        self.Bus_num = list()
+        self.Bus_route = list() 
+        self.Tlist = Tlist     #uncertainty level
+        self.Blist = Blist    #fleet size                                           
+        
+   
     #4. implement the bus route optimization, and update the bus route frequency. 
     def run(self):
         print ("start route optimization!")
         #implement the route generation process
         #self.bus_route 
-        results = route_optimization()
-        print ("finish route optimization!")
-        self.bus_frequency = results
+        mat=self.bus_mat
+        optimization_result = route_optimization(self.bus_mat,self.Tlist,self.Blist)
+        print("finish route optimization!")  
+        #print(optimization_result)
+        self.Bus_num = list(optimization_result[0:len(self.bus_mat["route_dist"][0])])
+        #print("Bus_num")
+        #print(self.Bus_num)
+        self.Bus_gap = list()
+        for i in range(len(self.Bus_num)):
+            if abs(self.Bus_num[i])>0.1:
+               self.Bus_gap.append(self.bus_mat["route_trip_time"][0][i]*60/self.Bus_num[i])
+                # bus gap in minute
+            else:
+                self.Bus_gap.append(0)
+        #print ("Bus_gap")
+        #print (self.Bus_gap)
+        #print (len(self.Bus_gap))
+        #self.Bus_route = self.bus_mat["final_route_objectid"]
+        #print(self.bus_mat["final_route_objectid"])
         
-    def get_frequency(self):
-        return self.bus_frequency;
-        print(self.bus_frequency)
+        location_sim="input_route_generation/zone_fileNYC.csv"
+        sim_server_dict=pd.read_csv(location_sim)
+        index_demand_prediction=sim_server_dict.iloc[:,2]
+        #print(index_demand_prediction)
+        index_demand_sim=sim_server_dict.iloc[:,0]
+        #print(index_demand_sim)
+        bus_route_raw=self.bus_mat["final_route_objectid"]
+        self.Bus_route = list()
+        for i in range(len(bus_route_raw)):
+            record = list(bus_route_raw[i])
+            #print("record")
+            #print(record)
+            #print("index_demand_prediction")
+            #print(index_demand_prediction)
+            for j in range(len(record)):
+                index_j=list(index_demand_prediction).index(record[j])
+                #print("the jth record")
+                #print(record[j])
+                #print("index of demand")
+                #print(index_j)
+                record[j]=int(list(index_demand_sim)[index_j])
+                #print("record estimated")
+                #print(record[j])  
+                
+            self.Bus_route.append(record) 
+        #print (self.Bus_route)
+        #print (len(self.Bus_route))
  
+
+#Take 30 routes as examples.
+#1. Bus_num 
+#"Bus_num": [0,1,5,...,4]               #30
+#2. Bus_gap
+#"Bus_gap": [1000,1200,1300,...,1200]   #30   
+#3. Bus_route
+#"Bus_route [[114], [],...,[]]"         #30, back
+#4. bus route name
+
+ 
+
+
 
 
 

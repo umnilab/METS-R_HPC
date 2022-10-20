@@ -1,25 +1,33 @@
 import sys
-import psutil, os
 import signal
 import json
 import ast
 import time
 import pandas as pd
+import psutil, os
 
 from eco_routing.MabManager import MABManager
-from bus_scheduling.RouteGeneration20211124 import RouteGeneration
-from bus_scheduling.RouteOptimization20211124 import RouteOptimization
+from bus_scheduling.RouteGeneration import RouteGeneration
+from bus_scheduling.RouteOptimization import RouteOptimization
 from types import SimpleNamespace as SN
 from collections import defaultdict
 from rdc import RDClient
 
-# main function for remote control client (RDC) manager
-# to the configurations specified in config
+"""
+Implementation of the RDCM (remote data client manager)
+
+RDCM communicates with multiple RDCs (remote data clients) to manage the 
+data flow between corresponding simulation instances.
+
+Currently we assume that all simulation instances are ran with the same 
+configurations, which can be extended to cover instances with different
+settings.
+"""
+
 def run_rdcm(config, num_clients, port_numbers):
-    # os.system("gnome-terminal --disable-factory")
-    # Obtain simulation arguments
+    # Obtain simulation arguments from the configuration file
     args = {}
-    with open(os.path.join(config.addsevs_dir+'data', 'Data.properties'), "r") as f:
+    with open(os.path.join(config.data_dir, 'Data.properties'), "r") as f:
         for line in f:
             if "#" in line:
                 continue
@@ -27,84 +35,66 @@ def run_rdcm(config, num_clients, port_numbers):
             if len(fields) != 2:
                 continue
             else:
-                # print(fields)
                 try:
                     args[fields[0]] = ast.literal_eval(fields[1])
                 except:
                     args[fields[0]] = fields[1]
     args = SN(**args)
 
-    # Track the progress (simulation hours) of each instance using rd_clients
+    # Create and maintain a list for RDCs
     rd_clients = []
-    currentHour = {}
-    previousHour = {}
  
     for i in range(num_clients):
-        #pending_servers[i].server_close()
         ws_client = RDClient("localhost", int(port_numbers[i]), i, False)
         ws_client.start()
         rd_clients.append(ws_client)
-        currentHour[port_numbers[i]] = 0
-        previousHour[port_numbers[i]] = -1
     print("Created all clients!")
 
 
-    # TODO : machine learning stuff can go here in the main thread
-    # ---------- ML STUFF GOES HERE ------------------------------
-    # NOTES : 
-    # 1) you need to acquire a lock if you read or write to rd_client's 
-    #   data maps, somthing like,
-    #   with rd_client[i].lock:
-    #       do somthing here with rd_client data maps
-    # 2) all messages are encoded in json format, so route_result must
-    #   also be in JSON format, also change the route_result reception side
-    #   in the simulator to facilitate this.
-    # TODO : just print the content of rd_clients for debugging purposes, remove if not needed
+    ''' 
+    ---------- OPERATIONAL ALGS START HERE ------------------------------
+    Remarks : 
+    1) you need to acquire a lock if you read or write to rd_client's 
+      data maps, somthing like,
+      with rd_client[i].lock:
+          do somthing here with rd_client data maps
+    2) all messages are encoded in json format, so route_result must
+      also be in JSON format, also change the route_result reception side
+      in the simulator to facilitate this.
+    ''' 
     
-    # initialize UCB data
-    # if (config.eco_routing == 'true'):
-    print("Initializing CUCB data!")
+    # Initialize UCB data
+    print("Initializing operational data!")
     mabManager= MABManager(config.addsevs_dir, args)
-    routeUCBMap = {}
-    i = 0
-    #print("MabManager Initialized!")
-
-    ############################################## revised and hint for 1 instance 
-    # the with lock function for eco routing and bus scheduling has been verified to work in both 1 instance or multiple instances 
-    # in case if function is added to integrate both 1 and multiple instances, just focus on the rdc.py function. 
-     ###########################################
     with rd_clients[i].lock:
+        routeUCBMap = {}
+        i = 0
         while len(routeUCBMap) == 0:
             routeUCBMap = rd_clients[i].route_ucb_received
-            #print("routeUCBMap updated")
             i += 1
-            #print("i is"+str(i))
-            #print("num_clients is")
-            #print(num_clients)
             i = i % num_clients
             time.sleep(0.5)
         print("routeUCBMap received")
-        # print(routeUCBMap)
+        # uncomment to enable eco-routing for bus
         # routeUCBMapBus = {}
         # i = 0
         # while len(routeUCBMapBus) == 0:
         #     with rd_clients[i].lock:
         #         routeUCBMapBus = rd_clients[i].route_ucb_bus_received
-        #         #print("routeUCBMapBus received"+str(rd_clients[i].route_ucb_bus_received))
         #         i += 1
         #         i = i % num_clients
         #         time.sleep(0.5)
         # print("routeUCBMapBus received")
-    time.sleep(20) # wait for processing routeUCBMap        
-    # initialize mabManager using background data
+    time.sleep(20) # Wait some time for processing routeUCBMap        
+    # Initialize mabManager using background data
     mabManager.refreshRouteUCB(routeUCBMap)
     # mabManager.refreshRouteUCBBus(routeUCBMapBus)
     mabManager.initializeLinkEnergy1()
     mabManager.initializeLinkEnergy2()
-    # initialize route result
+    
+    # Initialize route result
     routeResult = []
     # routeResultBus = []
-    # print(list(routeUCBMap.keys()))
     
     totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
     emptyCount = 0
@@ -113,6 +103,7 @@ def run_rdcm(config, num_clients, port_numbers):
         for od in routeUCBMap.keys():
             oneResult[od]=-1 
         routeResult.append(oneResult)
+        
         #oneResultBus = defaultdict(lambda: -1)
         # raw value is simply -1
         # oneResultBus = {}
@@ -120,12 +111,12 @@ def run_rdcm(config, num_clients, port_numbers):
         #     oneResultBus[od]=-1 
         # routeResultBus.append(oneResultBus)
 
-    # If enabling bus scheduling, then loading the demand prediction data
+    # Initialize bus scheduling data
     if (config.bus_scheduling == 'true'):
         print("Initializing bus scheduling data")
         date_sim=args.BT_EVENT_FILE.split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]
-        # data for bus scheduling
+        # data for bus schedulinge
         #path_pre = "demand_prediction/Modelling/PredictionResults"
         #demand_file_location_from = {}
         #demand_file_location_to = {}
@@ -134,28 +125,23 @@ def run_rdcm(config, num_clients, port_numbers):
         #    demand_file_location_to[f] = pd.read_csv(path_pre+"/"+f+"VehicleByHour2019toHub.csv")
         #taxi_zone_file = "bus_scheduling/input_route_generation/tax_zones_bus_version.gpkg"  
         # use date_sim as the index in demand file
-        
-        # directly use the cached results as the optimization is much slower than the simulator
-        ## comment this block and activate the next block                         
-        bus_scheduling_read = "bus_scheduling/bus_ratio_demand_8_80_400/ratio_scenario"+scenario_index+"_speed_"+date_sim+"_bus_scheduling.json" 
-        bus_scheduling_read_raw = open(bus_scheduling_read)
-        busPlanningResults = json.load(bus_scheduling_read_raw)
         ## generate bus schedules in real time
         #busPlanningResults={}
         #for hour in range(int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)+1):
         #    busPlanningResults[hour] = {}
-        #    if (len(bus_scheduling_file[str(hour)].keys())>0):
-        #       for f in ['JFK','LGA','PENN']:
-        #           busPlanningResults[str(hour)][f]=bus_scheduling_file[str(hour)][f]
-                
+        
+        # directly use the cached results as the optimization is much slower than the simulator                        
+        bus_scheduling_read = "bus_scheduling/offline_cache/scenario_"+scenario_index+"_speed_"+date_sim + "_" + str(args.NUM_OF_BUS)+"_bus_scheduling.json"
+        print("Using cached bus schedule from: " + bus_scheduling_read)
+        bus_scheduling_read_raw = open(bus_scheduling_read)
+        busPlanningResults = json.load(bus_scheduling_read_raw)
 
-    # Update the UCB result regularly
+    # Recurrent data flow
     hour = 0
     while True:
-        print(currentHour)
-        # uncomment this block if you want to generate bus schedules in real time
-        # generate json message based on the bus planning optimization
-        # if ((hour%2)==0 and hour>previousHour[port_numbers[i]]):
+        # Uncomment this block if you want to generate bus schedules in real time
+        # for i in range(len(rd_clients)):
+        #     if ((hour%2)==0 and hour>rd_clients[i].hour):
         #         # mode function and upate the bus planning every 2 hours
         #         # only send message when current hour differs from previous hour
         #         for f in ['JFK','LGA','PENN']:
@@ -189,7 +175,6 @@ def run_rdcm(config, num_clients, port_numbers):
         #             if sum(bus_planning_json['Bus_num'])==0:
         #                 bus_planning_json['Bus_num'][0]=1
         #                 bus_planning_json['Bus_gap'][0]=routeOptimization.bus_mat["route_trip_time"][0][0]*60
-        #             print(bus_planning_json['Bus_route'])
         #             ## organize the json format of output 
         #             bus_planning_json['MSG_TYPE'] = "BUS_SCHEDULE" 
         #             # len_json=len(bus_planning_json['Bus_num']) 
@@ -202,52 +187,51 @@ def run_rdcm(config, num_clients, port_numbers):
         #             bus_planning_json['Bus_currenthour'] = str(hour_idx) 
         #             busPlanningResults[str(hour_idx)][f] = json.dumps(bus_planning_json)
         #             previousHour[port_numbers[i]]=hour
-        #             # print('bus_planning_json_str')
-        #             # print(busPlanningResults[hour][f]) 
-        #if(config.eco_routing == 'true'):
-        # # update the routing data
+        
+        # Training the eco-routing with newly observed energy consumption of traversing links
         for i in range(num_clients):
             with rd_clients[i].lock:
                 linkUCBMap = rd_clients[i].link_ucb_received 
-                print("link ucb received")
-                #print(totalHour)
-                #print(currentHour[port_numbers[i]])
-                if (currentHour[port_numbers[i]] >= totalHour - 2):
-                    print(len(linkUCBMap.keys()))
+                if (rd_clients[i].hour >= totalHour):
                     if(len(linkUCBMap.keys()) == 0):
                         emptyCount += 1
                     else:
                         emptyCount = 0
-                hour = mabManager.refreshLinkUCB(linkUCBMap)
-                if(currentHour[port_numbers[i]] < hour):
-                    currentHour[port_numbers[i]] = hour
+                mabManager.refreshLinkUCB(linkUCBMap)
                 # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
                 # mabManager.refreshLinkUCBBus(linkUCBMapBus)
                 # speedVehicle = rd_clients[i].speed_vehicle_received
                 # mabManager.refreshLinkUCBShadow(speedVehicle)
+
+        # Sending back the eco-routing results 
         if(config.eco_routing == 'true'):
-            for hour_od in currentHour.values():
+            for i in range(num_clients):
+                hour_od = rd_clients[i].hour
+                if hour_od < 0:
+                    continue
                 for od in routeResult[hour_od]:
                     routeAction = mabManager.ucbRouting(od, hour_od)
                     routeResult[hour_od][od] = routeAction
                 # for od in routeResultBus[hour_od]:
                 #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
                 #     routeResultBus[hour_od][od] = routeAction
-            # sent back the planning results  
             for i in range(num_clients):
-                with rd_clients[i].lock:
-                    # clean the data set after refresh functions     
+                with rd_clients[i].lock: 
                     rd_clients[i].link_ucb_received={}
                     # rd_clients[i].link_ucb_bus_received={}
                     # rd_clients[i].speed_vehicle_received={}
-                    hour = currentHour[port_numbers[i]]
+                    hour = rd_clients[i].hour
+                    if hour < 0:
+                        continue
+                    
                     index_od =0
                     # index_od_bus=0
                     od_list=[]
                     result_list=[]
                     # bus_od_list=[]
                     # bus_result_list=[]
-                    # generate json objects with keys "origin","dest",and "result"
+                    
+                    # Generate resulting json objects 
                     for od in routeResult[hour]:
                        od_list.append(od)
                        result_list.append(routeResult[hour][od])
@@ -265,22 +249,18 @@ def run_rdcm(config, num_clients, port_numbers):
                     # routeResultBus_json_dict['OD']=bus_od_list 
                     # routeResultBus_json_dict['result']=bus_result_list
                     if index_od==len(routeResult[hour]):
-                        #print("length of index"+str(len(routeResult[hour])))
-                        #print("length of hour"+str(index_od))
                         routeResult_json_string=json.dumps(routeResult_json_dict)
                         rd_clients[i].ws.send(routeResult_json_string) 
-                        print("routing results sent!") 
                     # if index_od_bus==len(routeResultBus[hour]):
                     #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
                     #    rd_clients[i].ws.send(routeResultBus_json_string)
         
+        # Sending back the bus scheduling results 
         if(config.bus_scheduling == 'true'):
             for i in range(num_clients):
-                hour=currentHour[port_numbers[i]]
-                if (((hour%2)==0) and (hour>previousHour[port_numbers[i]]) and (hour<48)):
-                    # mode function and upate the bus planning every 2 hours
-                    # only send message when current hour differs from previous hour
-                    # all results are prepared
+                hour = rd_clients[i].hour
+                if (((hour % 2)==0) and (hour>rd_clients[i].prevHour) and (hour<totalHour)):
+                    # Only send message when current hour differs from previous hour
                     for f in ['JFK','LGA','PENN']:
                         bus_planning_prepared = True
                         if f not in busPlanningResults[str(hour)]:
@@ -289,45 +269,32 @@ def run_rdcm(config, num_clients, port_numbers):
                         print("Send bus scheduling results!")
                         with rd_clients[i].lock:
                             busPlanningResults_combine={}
+                            # comment the following three lines if the schedules are generated in real time
                             JFK_json=json.loads(busPlanningResults[str(hour)]['JFK'])
                             LGA_json=json.loads(busPlanningResults[str(hour)]['LGA'])
                             PENN_json=json.loads(busPlanningResults[str(hour)]['PENN'])
+
                             busPlanningResults_combine['Bus_route']=list(JFK_json['Bus_route'])+list(LGA_json['Bus_route'])+list(PENN_json['Bus_route'])
                             busPlanningResults_combine['Bus_num']=list(JFK_json['Bus_num'])+list(LGA_json['Bus_num'])+list(PENN_json['Bus_num'])
                             busPlanningResults_combine['Bus_gap']=list(JFK_json['Bus_gap'])+list(LGA_json['Bus_gap'])+list(PENN_json['Bus_gap'])
                             busPlanningResults_combine['MSG_TYPE']="BUS_SCHEDULE"
                             busPlanningResults_combine['Bus_routename']=list(JFK_json['Bus_routename'])+list(LGA_json['Bus_routename'])+list(PENN_json['Bus_routename'])
                             busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
-                            print(json.dumps(busPlanningResults_combine))
                             rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
-                            #for f in ['JFK','LGA','PENN']:
-                            #    print(f)
-                            #    print(busPlanningResults[str(hour)][f])
-                            #    rd_clients[i].ws.send(busPlanningResults[str(hour)][f])
-                            previousHour[port_numbers[i]]=hour
+                            rd_clients[i].prevHour=hour
                                    
-        # check the current simulated time
-      ##############################################   
-    # os.getpid get current process and kill the process to return to the terminal
-    # however, since the repast simulation will not close automatically, so we need to add exec to running the python function to close the terminal 
-    #  run:     exec python test.py
-     ########################################### 
-        #print(currentHour)
-        #print(totalHour)
-        if (min(currentHour) == totalHour or emptyCount >= 10):
-           print("simulation finished")
-           for pid in get_pids_by_script_name():
-               kill_proc_tree(pid)
-           kill_proc_tree(os.getpid()) 
+        # if (min(currentHour) == totalHour and emptyCount >= 10):
+           # automatically close the rdcm when the simulation is finished
+           # note it only works when you run a single instance
+        #   for pid in get_pids_by_script_name():
+        #       kill_proc_tree(pid)
+        #   kill_proc_tree(os.getpid()) 
 
         time.sleep(0.5) # wait for 0.5 seconds
 
-        
-
-    # wait until all rd_clients finish their work
+    # Wait until all rd_clients finish their work
     for j in range(num_clients):
         rd_clients[j].join()
-
 
 def kill_proc_tree(pid, including_parent=True):    
     parent = psutil.Process(pid)
@@ -340,15 +307,12 @@ def kill_proc_tree(pid, including_parent=True):
         parent.wait(5)
         
 def get_pids_by_script_name():
-
     pids = []
     for proc in psutil.process_iter():
 
         try:
             cmdline = proc.cmdline()
             pid = proc.pid
-            
-            #print(cmdline)
         except psutil.NoSuchProcess:
             continue
         if (len(cmdline)>2 and 'java' in cmdline[0]
@@ -359,14 +323,13 @@ def get_pids_by_script_name():
         
 # main function (used only for debugging)
 if __name__ == "__main__":
+    # Load simulation arguments
     with open(sys.argv[1], "r") as f:
         config = json.load(f)
-
-    # Obtain simulation arguments
     num_clients = int(config.num_sim_instances)
     port_numbers = config.socket_port_numbers
-    # pending_servers=
-    #run_rdcm(options.num_simulations, options.ports, options.server_sockets)
+
+    # Start RDCM
     run_rdcm(num_clients, port_numbers,index_bus_scheduling)
 
 
