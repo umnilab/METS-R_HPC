@@ -82,7 +82,7 @@ class MABManager(object):
     # Initialize speed data for each link
     def initializeLinkEnergy1(self):
         try:
-            fileName1 = self.working_dir + "data/NYC/background_traffic/background_traffic_NYC_one_week.csv";
+            fileName1 = "data/background_traffic_NYC_one_week.csv";
             with open(fileName1, 'r') as f:
                 f.readline()
                 for line in f.readlines():
@@ -99,7 +99,7 @@ class MABManager(object):
     # Initialize link length data for each link
     def initializeLinkEnergy2(self):   
         try:
-            fileName2 = self.working_dir + "data/NYC/background_traffic/background_traffic_NYC_one_week.csv";
+            fileName2 = + "data/background_traffic_NYC_one_week.csv";
             with open(fileName2, 'r') as f:
                 f.readline()
                 for line in f.readlines():
