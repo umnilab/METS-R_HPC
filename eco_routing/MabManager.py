@@ -81,37 +81,31 @@ class MABManager(object):
 
     # Initialize speed data for each link
     def initializeLinkEnergy1(self):
-        try:
-            fileName1 = "data/background_traffic_NYC_one_week.csv";
-            with open(fileName1, 'r') as f:
-                f.readline()
-                for line in f.readlines():
-                    result = line.split(",")
-                    roadID = int(result[0])
-                    backgroundSpeed = 0
-                    for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
-                        backgroundSpeed = float(result[i])
-                        speedLength  = [backgroundSpeed]
-                        self.initialLinkSpeedLength[i][roadID] = speedLength
-        except:
-            pass
+        fileName1 = "eco_routing/data/background_traffic_NYC_one_week.csv";
+        with open(fileName1, 'r') as f:
+            f.readline()
+            for line in f.readlines():
+                result = line.split(",")
+                roadID = int(result[0])
+                backgroundSpeed = 0
+                for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
+                    backgroundSpeed = float(result[i])
+                    speedLength  = [backgroundSpeed]
+                    self.initialLinkSpeedLength[i][roadID] = speedLength
 
     # Initialize link length data for each link
     def initializeLinkEnergy2(self):   
-        try:
-            fileName2 = + "data/background_traffic_NYC_one_week.csv";
-            with open(fileName2, 'r') as f:
-                f.readline()
-                for line in f.readlines():
-                    result = line.split(",")
-                    roadID = int(result[0])
-                    roadLength = float(result[-1])
-                    for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
-                        speedLength = [self.initialLinkSpeedLength[i][roadID][0], roadLength]
-                        self.initialLinkSpeedLength[i][roadID] = speedLength
-                        self.roadLengthMap[roadID] = roadLength
-        except:
-            pass
+        fileName2 = "eco_routing/data/background_traffic_NYC_one_week.csv";
+        with open(fileName2, 'r') as f:
+            f.readline()
+            for line in f.readlines():
+                result = line.split(",")
+                roadID = int(result[0])
+                roadLength = float(result[-1])
+                for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
+                    speedLength = [self.initialLinkSpeedLength[i][roadID][0], roadLength]
+                    self.initialLinkSpeedLength[i][roadID] = speedLength
+                    self.roadLengthMap[roadID] = roadLength
 
         for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
             self.mab[i].warm_up(self.initialLinkSpeedLength[i])
