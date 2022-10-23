@@ -247,5 +247,4 @@ def get_sim_dir(options, i):
     sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
     sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size)
     sim_dir += "_co" if options.cooperative=="true" else "_no_co"
-    sim_dir += 
     return sim_dir
