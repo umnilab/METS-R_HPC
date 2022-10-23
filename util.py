@@ -230,13 +230,13 @@ def run_simulations(options):
                    "repast.simphony.runtime.RepastMain " + \
                    options.addsevs_dir + "addsEVs.rs"
         # got to sim directory, modify this section when adding more operational algorithms
+        cwd = str(os.getcwd())
         sim_dir = get_sim_dir(options, i)
         os.chdir(sim_dir)
-        cwd = str(os.getcwd())
         # run simulator on new terminal 
         os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
-        os.chdir("../../..")
+        os.chdir(cwd)
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
