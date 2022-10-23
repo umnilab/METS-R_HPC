@@ -240,11 +240,11 @@ def run_simulations(options):
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
-    sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_instance_" + str(i)
+    sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_instance_" + str(i) + "_"
     sim_dir += "eco"+"_"+options.eco_routing + "_"
     sim_dir += "bus"+"_"+options.bus_scheduling + "_"
     sim_dir += "share"+"_"+str(int(options.share_percentage*100)) + "_"
     sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
-    sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size)
-    sim_dir += "_co" if options.cooperative=="true" else "_no_co"
+    sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size) + "_"
+    sim_dir += "co" if options.cooperative=="true" else "no_co"
     return sim_dir
