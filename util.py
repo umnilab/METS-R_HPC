@@ -5,6 +5,7 @@ import time
 import shutil
 from os import path
 from contextlib import closing
+from types import SimpleNamespace
 
 """
 Helper functions for METSR-HPC
@@ -26,29 +27,6 @@ def str_list_mapper_gen(func):
     def str_list_mapper(str_list):
         return [func(str) for str in str_list]
     return str_list_mapper
-
-# configurations for starting RDCM, RDC, and simulation instances
-class sim_options:
-    def __init__(self):
-        self.java_path = ""
-        self.java_options = ""
-        self.addsevs_dir = ""
-        self.groovy_dir = ""
-        self.repast_plugin_dir = ""
-        self.num_simulations = 0
-        self.ports = []
-        self.scenarios = []
-        self.cases = {}
-
-    def __str__(self):
-        
-        return """java_path : {}\
-                \njava_options : {}\
-                \naddsevs_dir : {}\
-                \ngroovy_dir : {}\
-                \nrepast_plugin_dir : {}\
-                \nnum_simulations : {}\
-                \nports : {}""".format(self.java_path, self.java_options, self.addsevs_dir, self.groovy_dir, self.repast_plugin_dir, self.num_simulations, self.ports)
 
 # Function for modifying simulation properties
 def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, case):
@@ -95,7 +73,7 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
 # Copy necessary files for running the simulation
 # Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
-    src_data_dir = options.addsevs_dir + "data"
+    src_data_dir = options.sim_dir + "data"
     prepare_scenario_dict(options, src_data_dir + "/NYC/demand")
     find_free_ports(options, options.num_simulations)
     if len(options.ports) != options.num_simulations:
@@ -132,17 +110,20 @@ def prepare_scenario_dict(options, path):
     scenarios = os.listdir(path)
     i = 0
     scenarios = sorted(scenarios)
+    options.scenarios=[]
+    options.cases = [[] for j in range(len(scenarios))]
     for scenario in scenarios:
         options.scenarios.append(scenario)
         options.cases[i] = []
         cases = os.listdir(path+"/"+scenario)
-        sorted(cases)
+        cases = sorted(cases)
         for case in cases:
             options.cases[i].append(case.split("_")[1])
         i+=1
 
 # Functions for finding available port
 def find_free_ports(options, num_simulations):
+    options.ports = []
     while True:
         for i in range(num_simulations):
             with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -164,10 +145,10 @@ def read_run_config(fname):
     with open(fname, "r") as f:
         config = json.load(f)
 
-    opts = sim_options()
+    opts = SimpleNamespace()
     opts.java_path = config['java_path']
     opts.java_options = config['java_options']
-    opts.addsevs_dir = config['addsevs_dir']
+    opts.sim_dir = config['sim_dir']
     opts.groovy_dir = config['groovy_dir']
     opts.repast_plugin_dir = config['repast_plugin_dir']
     opts.num_simulations = int(config['num_sim_instances'])
@@ -180,7 +161,7 @@ def read_run_config(fname):
     return opts
 
 # Construct the java classpath with all the required jar files. 
-# If includeBin is False it won't add the ADDSEVS/bin directory to classpath.
+# If includeBin is False it won't add the METS_R/bin directory to classpath.
 # This is needed for simulation command.
 def get_classpath(options, includeBin=True):
     
@@ -199,11 +180,11 @@ def get_classpath(options, includeBin=True):
     classpath += options.repast_plugin_dir + "bin:" + \
                  options.repast_plugin_dir + "lib/*:"
     
-    classpath += options.addsevs_dir + ":" + \
-                 options.addsevs_dir + "lib/*"
+    classpath += options.sim_dir + ":" + \
+                 options.sim_dir + "lib/*"
     
     if(includeBin):
-        classpath += ":" + options.addsevs_dir + "bin"
+        classpath += ":" + options.sim_dir + "bin"
 
     return classpath
 
@@ -214,7 +195,7 @@ def run_rdcm_java(options, config_fname):
                    "-classpath " + \
                    "../rdcm_java_version/target/rdcm-1.0-SNAPSHOT.jar:../rdcm/target/dependency/*" + " " + \
                    "com.metsr.hpc.RemoteDataClientManager " + \
-                   config_fname + " " + options.addsevs_dir + "/data/"
+                   config_fname + " " + options.sim_dir + "/data/"
     
     # run rdcm on a new terminal
     cwd = str(os.getcwd())
@@ -228,7 +209,7 @@ def run_simulations(options):
                    "-classpath " + \
                    get_classpath(options, False) + " " + \
                    "repast.simphony.runtime.RepastMain " + \
-                   options.addsevs_dir + "addsEVs.rs"
+                   options.sim_dir + "mets_r.rs"
         # got to sim directory, modify this section when adding more operational algorithms
         cwd = str(os.getcwd())
         sim_dir = get_sim_dir(options, i)
