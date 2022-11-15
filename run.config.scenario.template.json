@@ -1,0 +1,10 @@
+{
+"java_path" : $JAVA_HOME,
+"java_options" : "-Xss256M -Xms1024M -Xmx4G -Xshare:off -Dfile.encoding=UTF-8",
+"addsevs_dir" : $SIM_HOME,
+"groovy_dir" : $ECLIPSE_PLUGIN/org.codehaus.groovy_2.4.15.xx-201810221923-e49-RELEASE/,
+"repast_plugin_dir" : $ECLIPSE_PLUGIN/repast.simphony.runtime_2.6.0/,
+"charger_plan" : "Real.csv",
+"num_sim_instances" : "1",
+"socket_port_numbers" : "42629"
+}

@@ -1,9 +1,9 @@
 {
-"java_path" : "/usr/bin/java",
+"java_path" : "/usr/lib/jvm/java-1.8.0-openjdk-amd64",
 "java_options" : "-Xss256M -Xms1024M -Xmx4G -Xshare:off -Dfile.encoding=UTF-8",
-"addsevs_dir" : "/home/bridge/c/lei67/git/METS-R_SIM/ADDSEVS/",
-"groovy_dir" : "/home/umni2/a/umnilab/apps/Eclipse/plugins/org.codehaus.groovy_2.4.17.v201906292136-e1906-RELEASE/",
-"repast_plugin_dir" : "/home/umni2/a/umnilab/apps/Eclipse/plugins/repast.simphony.runtime_2.7.0/",
+"addsevs_dir" : "/mnt/c/Users/User/git/METS-R_SIM/",
+"groovy_dir" : "/mnt/c/Users/User/RepastSimphony-2.6/eclipse/plugins/org.codehaus.groovy_2.4.15.xx-201810221923-e49-RELEASE/",
+"repast_plugin_dir" : "/mnt/c/Users/User/RepastSimphony-2.6/eclipse/plugins/repast.simphony.runtime_2.6.0/",
 "charger_plan" : "L_0_120000.csv",
 "num_sim_instances" : "1",
 "socket_port_numbers" : "42629"
