@@ -1,9 +1,11 @@
 import socket
 import json
 import os
+import subprocess
 import time
 import shutil
 from os import path
+import platform
 from contextlib import closing
 from types import SimpleNamespace
 
@@ -163,7 +165,7 @@ def read_run_config(fname):
 # Construct the java classpath with all the required jar files. 
 # If includeBin is False it won't add the METS_R/bin directory to classpath.
 # This is needed for simulation command.
-def get_classpath(options, includeBin=True):
+def get_classpath(options, includeBin=True, separator=":"):
     
     classpath = ""
 
@@ -171,27 +173,27 @@ def get_classpath(options, includeBin=True):
         print(f"ERROR , groovy is not found at {options.groovy_dir}")
         sys.exit(-1)
     
-    classpath += options.groovy_dir + "lib/*:"
+    classpath += options.groovy_dir + "lib/*" + separator
 
     if not path.exists(options.repast_plugin_dir):
         print(f"ERROR , repast plugins not found at {options.repast_plugin_dir}")
         sys.exit(-1)
     
-    classpath += options.repast_plugin_dir + "bin:" + \
-                 options.repast_plugin_dir + "lib/*:"
+    classpath += options.repast_plugin_dir + "bin" + separator + \
+                 options.repast_plugin_dir + "lib/*" + separator
     
-    classpath += options.sim_dir + ":" + \
+    classpath += options.sim_dir + separator + \
                  options.sim_dir + "lib/*"
     
     if(includeBin):
-        classpath += ":" + options.sim_dir + "bin"
+        classpath += separator + options.sim_dir + "bin"
 
     return classpath
 
 # DEPRECATED : java version of RDCM 
 def run_rdcm_java(options, config_fname):
     # rdcm command
-    rdcm_command = options.java_path + " " + \
+    rdcm_command = '"' + options.java_path + '"' + " " + \
                    "-classpath " + \
                    "../rdcm_java_version/target/rdcm-1.0-SNAPSHOT.jar:../rdcm/target/dependency/*" + " " + \
                    "com.metsr.hpc.RemoteDataClientManager " + \
@@ -204,18 +206,30 @@ def run_rdcm_java(options, config_fname):
 # Function for starting the simulation
 def run_simulations(options):
     for i in range(0, options.num_simulations):
-        sim_command = options.java_path + " " + \
-                   options.java_options + " " + \
-                   "-classpath " + \
-                   get_classpath(options, False) + " " + \
-                   "repast.simphony.runtime.RepastMain " + \
-                   options.sim_dir + "mets_r.rs"
-        # got to sim directory, modify this section when adding more operational algorithms
         cwd = str(os.getcwd())
         sim_dir = get_sim_dir(options, i)
-        os.chdir(sim_dir)
-        # run simulator on new terminal 
-        os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
+        if platform.system() == "Windows":
+             # go to sim directory
+            os.chdir(sim_dir)
+            # run the simulation on a new terminal
+            sim_command = '"' + options.java_path + '"' + " " + \
+                    options.java_options + " " + \
+                    "-classpath " + \
+                    get_classpath(options, False, separator = ";") + " " + \
+                    "repast.simphony.runtime.RepastMain " + \
+                    options.sim_dir + "mets_r.rs"
+            subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
+        else:
+            # go to sim directory
+            os.chdir(sim_dir)
+            # run simulator on new terminal 
+            sim_command = options.java_path + " " + \
+                    options.java_options + " " + \
+                    "-classpath " + \
+                    get_classpath(options, False) + " " + \
+                    "repast.simphony.runtime.RepastMain " + \
+                    options.sim_dir + "mets_r.rs"
+            os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
         os.chdir(cwd)
 

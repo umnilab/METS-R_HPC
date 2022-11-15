@@ -1,0 +1,7 @@
+networkx
+shapely
+psutil
+seaborn
+geopandas
+gurobipy
+websocket-client

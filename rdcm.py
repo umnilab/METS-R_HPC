@@ -65,7 +65,7 @@ def run_rdcm(config, num_clients, port_numbers):
     
     # Initialize UCB data
     print("Initializing operational data!")
-    mabManager= MABManager(config.addsevs_dir, args)
+    mabManager= MABManager(config.sim_dir, args)
     with rd_clients[i].lock:
         routeUCBMap = {}
         i = 0
@@ -131,7 +131,7 @@ def run_rdcm(config, num_clients, port_numbers):
         #    busPlanningResults[hour] = {}
         
         # directly use the cached results as the optimization is much slower than the simulator                        
-        bus_scheduling_read = "bus_scheduling/offline_cache/scenario_"+scenario_index+"_speed_"+date_sim + "_" + str(args.NUM_OF_BUS)+"_bus_scheduling.json"
+        bus_scheduling_read = "bus_scheduling/offline_cache_cleaned/scenario_"+scenario_index+"_speed_"+date_sim + "_" + str(args.NUM_OF_BUS)+"_bus_scheduling.json"
         print("Using cached bus schedule from: " + bus_scheduling_read)
         bus_scheduling_read_raw = open(bus_scheduling_read)
         busPlanningResults = json.load(bus_scheduling_read_raw)
@@ -316,7 +316,7 @@ def get_pids_by_script_name():
         except psutil.NoSuchProcess:
             continue
         if (len(cmdline)>2 and 'java' in cmdline[0]
-            and cmdline[-1].endswith('addsEVs.rs')):
+            and cmdline[-1].endswith('mets_r.rs')):
             pids.append(pid)
 
     return pids
