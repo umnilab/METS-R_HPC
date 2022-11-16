@@ -42,11 +42,14 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
         if "NETWORK_LISTEN_PORT" in l:
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
         elif "DM_EVENT_FILE" in l:
-            l = "DM_EVENT_FILE = data/NYC/demand/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
+            if(options.full_demand == "true"):
+                l = "DM_EVENT_FILE = data/NYC/demand_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+            else:
+                l = "DM_EVENT_FILE = data/NYC/demand/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
         elif "BT_EVENT_FILE" in l:
-            l = "BT_EVENT_FILE = data/NYC/background_traffic/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case]+ "\n"
+            l = "BT_EVENT_FILE = data/NYC/background_traffic/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
         elif "BT_STD_FILE" in l:
-            l = "BT_STD_FILE = data/NYC/background_traffic/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case]+ "\n"
+            l = "BT_STD_FILE = data/NYC/background_traffic/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
         elif "ECO_ROUTING_EV" in l:
             l = "ECO_ROUTING_EV = " + str(options.eco_routing) + "\n"
         elif "NUM_OF_EV" in l:
@@ -76,7 +79,10 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
 # Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
     src_data_dir = options.sim_dir + "data"
-    prepare_scenario_dict(options, src_data_dir + "/NYC/demand")
+    if options.full_demand == "true":
+        prepare_scenario_dict(options, src_data_dir + "/NYC/demand_full")
+    else:
+        prepare_scenario_dict(options, src_data_dir + "/NYC/demand")
     find_free_ports(options, options.num_simulations)
     if len(options.ports) != options.num_simulations:
         print("ERROR , cannot specify port number for all simulation instances")
@@ -88,10 +94,6 @@ def prepare_sim_dirs(options):
             os.makedirs(dir_name)
         # copy the simulation config files
         dest_data_dir = dir_name + "/" + "data" 
-        output_data_dir = dir_name + "/" + "simulation_output" 
-        
-        if not path.exists(output_data_dir):
-            os.mkdir(output_data_dir)
         
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
@@ -242,4 +244,5 @@ def get_sim_dir(options, i):
     sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
     sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size) + "_"
     sim_dir += "co" if options.cooperative=="true" else "no_co"
+    sim_dir += "_full" if options.full_demand=="true" else ""
     return sim_dir

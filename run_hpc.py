@@ -31,6 +31,8 @@ def get_arguments(argv):
                         help='enable taxi-bus or bus-taxi cooperation')
     parser.add_argument('-df', '--demand_factor', type=float, default=1.0,
                         help='demand multiplier')
+    parser.add_argument('-f', '--full', action='store_true', default=False,
+                        help='using full demand or just hub-based demand, default is hub-based')
 
     args = parser.parse_args(argv)
 
@@ -50,6 +52,7 @@ def main():
     options.bus_fleet_size = args.bus_fleet
     options.taxi_fleet_size = args.taxi_fleet
     options.demand_factor = args.demand_factor
+    options.full_demand = "true" if args.full else "false"
     
     print("---------------- HPC options ----------------")
     print(options)

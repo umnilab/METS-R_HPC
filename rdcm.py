@@ -254,6 +254,8 @@ def run_rdcm(config, num_clients, port_numbers):
                     # if index_od_bus==len(routeResultBus[hour]):
                     #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
                     #    rd_clients[i].ws.send(routeResultBus_json_string)
+        else:
+            time.sleep(1) # sleep for 1 second to avoid mabManager.ucbRouting being called too frequently
         
         # Sending back the bus scheduling results 
         if(config.bus_scheduling == 'true'):
@@ -282,14 +284,9 @@ def run_rdcm(config, num_clients, port_numbers):
                             busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
                             rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
                             rd_clients[i].prevHour=hour
-                                   
-        # if (min(currentHour) == totalHour and emptyCount >= 10):
-           # automatically close the rdcm when the simulation is finished
-           # note it only works when you run a single instance
-        #   for pid in get_pids_by_script_name():
-        #       kill_proc_tree(pid)
-        #   kill_proc_tree(os.getpid()) 
-
+        else:
+            time.sleep(1)
+        
         time.sleep(0.5) # wait for 0.5 seconds
 
     # Wait until all rd_clients finish their work

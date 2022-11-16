@@ -1,3 +1,4 @@
 simulation_*/
 *.pyc
 *.pyc
+output/*

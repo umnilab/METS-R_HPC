@@ -56,16 +56,15 @@ class MAB(object):
         # update should be only summation of linkucb  delete information after updation
         for IDhour in linkUCB.keys():
             ID = int(IDhour.split(";")[0])
-         #  if ID not in {'hour_int'}:
             #energyRecordAdd = len(linkUCB[ID]) - self.visit_count[ID]
             energyRecordAdd = len(linkUCB[IDhour])
-            if energyRecordAdd > 0:
-               self.visit_count[ID] += energyRecordAdd
-               energyAdd=sum(linkUCB[IDhour])
-               #energyAdd = 0
-               #for j in range(len(energyRecordAdd)):
-               #     energyAdd += linkUCB[IDhour][-1-j]
-               self.visit_energy[ID] += energyAdd
+            if energyRecordAdd > 0 and ID in self.visit_count:
+                self.visit_count[ID] += energyRecordAdd
+                energyAdd=sum(linkUCB[IDhour])
+                #energyAdd = 0
+                #for j in range(len(energyRecordAdd)):
+                #     energyAdd += linkUCB[IDhour][-1-j]
+                self.visit_energy[ID] += energyAdd
 
     def updateRouteUCB(self, routeUCB):
         for od in routeUCB.keys():
