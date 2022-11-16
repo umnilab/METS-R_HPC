@@ -191,7 +191,7 @@ def run_rdcm(config, num_clients, port_numbers):
         # Training the eco-routing with newly observed energy consumption of traversing links
         for i in range(num_clients):
             with rd_clients[i].lock:
-                linkUCBMap = rd_clients[i].link_ucb_received 
+                linkUCBMap = rd_clients[i].link_ucb_received.copy()
                 if (rd_clients[i].hour >= totalHour):
                     if(len(linkUCBMap.keys()) == 0):
                         emptyCount += 1
