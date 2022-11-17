@@ -28,6 +28,7 @@ class RDClient(threading.Thread):
         self.port = port
         self.uri = f"ws://{host}:{port}"
         self.index = index
+        self.state = "connecting"
 
         # Msgs logging flags
         self.msg_log_size = msg_log_size
@@ -138,12 +139,15 @@ class RDClient(threading.Thread):
         self.route_ucb_bus_received[json_obj['BOD']] = list(map(str_list_to_int_list, json_obj['road_lists']))
 
     def on_error(self, ws, error):
+        self.state = "error"
         print(error)
 
-    def on_close(self, ws):
+    def on_close(self, ws, status_code, close_msg):
+        self.state = "closed"
         print(f"{self.uri} : connection closed")
 
     def on_open(self, ws):
+        self.state = "connected"
         print(f"{self.uri} : connection opened")
 
     # run() method implements what RDClient will be doing during its lifetime

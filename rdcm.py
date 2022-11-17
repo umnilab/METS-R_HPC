@@ -138,157 +138,165 @@ def run_rdcm(config, num_clients, port_numbers):
 
     # Recurrent data flow
     hour = 0
-    while True:
-        # Uncomment this block if you want to generate bus schedules in real time
-        # for i in range(len(rd_clients)):
-        #     if ((hour%2)==0 and hour>rd_clients[i].hour):
-        #         # mode function and upate the bus planning every 2 hours
-        #         # only send message when current hour differs from previous hour
-        #         for f in ['JFK','LGA','PENN']:
-        #             bus_planning_json = {}
-        #             hub_type = f
-        #             #JFK: 114; LGA: 120; PENN: 164. 
-        #             if hub_type=='JFK':
-        #                 hub_index = 114  
-        #             if hub_type=='LGA':
-        #                 hub_index = 120
-        #             if hub_type=='PENN':
-        #                 hub_index = 164 
-        #             if hub_index>=180:
-        #                 continue
-        #             hour_idx= min(hour + 2, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600))
-        #             max_route = 30
-        #             routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour_idx)          
-        #             routeGeneration.run()
-        #             # run() can include route_generate() and route_combine() function you def
-        #             mat=routeGeneration.bus_mat
-        #             Tlist = [10]     #uncertainty level
-        #             Blist = [200]    #fleet size  
-        #             routeOptimization=RouteOptimization(mat,Tlist,Blist)
-        #             routeOptimization.run()
-        #             # run() perform the process
-        #             bus_planning_json['Bus_route'] =routeOptimization.Bus_route
-        #             len_json=len(bus_planning_json['Bus_route'])
-        #             bus_planning_json['Bus_num'] =routeOptimization.Bus_num[:len_json]
-        #             # extract the first len_json items
-        #             bus_planning_json['Bus_gap'] =routeOptimization.Bus_gap[:len_json]
-        #             if sum(bus_planning_json['Bus_num'])==0:
-        #                 bus_planning_json['Bus_num'][0]=1
-        #                 bus_planning_json['Bus_gap'][0]=routeOptimization.bus_mat["route_trip_time"][0][0]*60
-        #             ## organize the json format of output 
-        #             bus_planning_json['MSG_TYPE'] = "BUS_SCHEDULE" 
-        #             # len_json=len(bus_planning_json['Bus_num']) 
-        #             # generate dummy route name based on hub time and route count
-        #             list_routename=[]
-        #             for l in range(0,len_json): 
-        #                 # XXX for hub  XX for hour XX for ro
-        #                 list_routename.append(hub_index*10000+hour_idx*100+l)
-        #             bus_planning_json['Bus_routename'] = list_routename
-        #             bus_planning_json['Bus_currenthour'] = str(hour_idx) 
-        #             busPlanningResults[str(hour_idx)][f] = json.dumps(bus_planning_json)
-        #             previousHour[port_numbers[i]]=hour
-        
-        # Training the eco-routing with newly observed energy consumption of traversing links
-        for i in range(num_clients):
-            with rd_clients[i].lock:
-                linkUCBMap = rd_clients[i].link_ucb_received.copy()
-                if (rd_clients[i].hour >= totalHour):
-                    if(len(linkUCBMap.keys()) == 0):
-                        emptyCount += 1
-                    else:
-                        emptyCount = 0
-                mabManager.refreshLinkUCB(linkUCBMap)
-                # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
-                # mabManager.refreshLinkUCBBus(linkUCBMapBus)
-                # speedVehicle = rd_clients[i].speed_vehicle_received
-                # mabManager.refreshLinkUCBShadow(speedVehicle)
-
-        # Sending back the eco-routing results 
-        if(config.eco_routing == 'true'):
-            for i in range(num_clients):
-                hour_od = rd_clients[i].hour
-                if hour_od < 0:
-                    continue
-                for od in routeResult[hour_od]:
-                    routeAction = mabManager.ucbRouting(od, hour_od)
-                    routeResult[hour_od][od] = routeAction
-                # for od in routeResultBus[hour_od]:
-                #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
-                #     routeResultBus[hour_od][od] = routeAction
-            for i in range(num_clients):
-                with rd_clients[i].lock: 
-                    rd_clients[i].link_ucb_received={}
-                    # rd_clients[i].link_ucb_bus_received={}
-                    # rd_clients[i].speed_vehicle_received={}
-                    hour = rd_clients[i].hour
-                    if hour < 0:
-                        continue
-                    
-                    index_od =0
-                    # index_od_bus=0
-                    od_list=[]
-                    result_list=[]
-                    # bus_od_list=[]
-                    # bus_result_list=[]
-                    
-                    # Generate resulting json objects 
-                    for od in routeResult[hour]:
-                       od_list.append(od)
-                       result_list.append(routeResult[hour][od])
-                       index_od+=1
-                    # for od in routeResultBus[hour]:
-                    #    bus_od_list.append(od)
-                    #    bus_result_list.append(routeResultBus[hour][od])
-                    #    index_od_bus+=1   
-                    routeResult_json_dict={}
-                    routeResult_json_dict['MSG_TYPE']="OD_PAIR"
-                    routeResult_json_dict['OD']=od_list 
-                    routeResult_json_dict['result']=result_list
-                    # routeResultBus_json_dict={}
-                    # routeResultBus_json_dict['MSG_TYPE']="BOD_PAIR"
-                    # routeResultBus_json_dict['OD']=bus_od_list 
-                    # routeResultBus_json_dict['result']=bus_result_list
-                    if index_od==len(routeResult[hour]):
-                        routeResult_json_string=json.dumps(routeResult_json_dict)
-                        rd_clients[i].ws.send(routeResult_json_string) 
-                    # if index_od_bus==len(routeResultBus[hour]):
-                    #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
-                    #    rd_clients[i].ws.send(routeResultBus_json_string)
-        else:
-            time.sleep(1) # sleep for 1 second to avoid mabManager.ucbRouting being called too frequently
-        
-        # Sending back the bus scheduling results 
-        if(config.bus_scheduling == 'true'):
-            for i in range(num_clients):
-                hour = rd_clients[i].hour
-                if (((hour % 2)==0) and (hour>rd_clients[i].prevHour) and (hour<totalHour)):
-                    # Only send message when current hour differs from previous hour
-                    for f in ['JFK','LGA','PENN']:
-                        bus_planning_prepared = True
-                        if f not in busPlanningResults[str(hour)]:
-                            bus_planning_prepared = False
-                    if bus_planning_prepared:
-                        print("Sending bus scheduling results for hour {}".format(hour))
+    continue_flag = True
+    while continue_flag:
+        try:
+            # Uncomment this block if you want to generate bus schedules in real time
+            # for i in range(len(rd_clients)):
+            #     if ((hour%2)==0 and hour>rd_clients[i].hour):
+            #         # mode function and upate the bus planning every 2 hours
+            #         # only send message when current hour differs from previous hour
+            #         for f in ['JFK','LGA','PENN']:
+            #             bus_planning_json = {}
+            #             hub_type = f
+            #             #JFK: 114; LGA: 120; PENN: 164. 
+            #             if hub_type=='JFK':
+            #                 hub_index = 114  
+            #             if hub_type=='LGA':
+            #                 hub_index = 120
+            #             if hub_type=='PENN':
+            #                 hub_index = 164 
+            #             if hub_index>=180:
+            #                 continue
+            #             hour_idx= min(hour + 2, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600))
+            #             max_route = 30
+            #             routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour_idx)          
+            #             routeGeneration.run()
+            #             # run() can include route_generate() and route_combine() function you def
+            #             mat=routeGeneration.bus_mat
+            #             Tlist = [10]     #uncertainty level
+            #             Blist = [200]    #fleet size  
+            #             routeOptimization=RouteOptimization(mat,Tlist,Blist)
+            #             routeOptimization.run()
+            #             # run() perform the process
+            #             bus_planning_json['Bus_route'] =routeOptimization.Bus_route
+            #             len_json=len(bus_planning_json['Bus_route'])
+            #             bus_planning_json['Bus_num'] =routeOptimization.Bus_num[:len_json]
+            #             # extract the first len_json items
+            #             bus_planning_json['Bus_gap'] =routeOptimization.Bus_gap[:len_json]
+            #             if sum(bus_planning_json['Bus_num'])==0:
+            #                 bus_planning_json['Bus_num'][0]=1
+            #                 bus_planning_json['Bus_gap'][0]=routeOptimization.bus_mat["route_trip_time"][0][0]*60
+            #             ## organize the json format of output 
+            #             bus_planning_json['MSG_TYPE'] = "BUS_SCHEDULE" 
+            #             # len_json=len(bus_planning_json['Bus_num']) 
+            #             # generate dummy route name based on hub time and route count
+            #             list_routename=[]
+            #             for l in range(0,len_json): 
+            #                 # XXX for hub  XX for hour XX for ro
+            #                 list_routename.append(hub_index*10000+hour_idx*100+l)
+            #             bus_planning_json['Bus_routename'] = list_routename
+            #             bus_planning_json['Bus_currenthour'] = str(hour_idx) 
+            #             busPlanningResults[str(hour_idx)][f] = json.dumps(bus_planning_json)
+            #             previousHour[port_numbers[i]]=hour
+            if(config.eco_routing == 'true'):
+                # Training the eco-routing with newly observed energy consumption of traversing links
+                for i in range(num_clients):
+                    if rd_clients[i].state == "connected":
                         with rd_clients[i].lock:
-                            busPlanningResults_combine={}
-                            # comment the following three lines if the schedules are generated in real time
-                            JFK_json=json.loads(busPlanningResults[str(hour)]['JFK'])
-                            LGA_json=json.loads(busPlanningResults[str(hour)]['LGA'])
-                            PENN_json=json.loads(busPlanningResults[str(hour)]['PENN'])
+                            linkUCBMap = rd_clients[i].link_ucb_received
+                            if (rd_clients[i].hour >= totalHour):
+                                if(len(linkUCBMap.keys()) == 0):
+                                    emptyCount += 1
+                                else:
+                                    emptyCount = 0
+                            mabManager.refreshLinkUCB(linkUCBMap)
+                            # linkUCBMapBus = rd_clients[i].link_ucb_bus_received
+                            # mabManager.refreshLinkUCBBus(linkUCBMapBus)
+                            # speedVehicle = rd_clients[i].speed_vehicle_received
+                            # mabManager.refreshLinkUCBShadow(speedVehicle)
 
-                            busPlanningResults_combine['Bus_route']=list(JFK_json['Bus_route'])+list(LGA_json['Bus_route'])+list(PENN_json['Bus_route'])
-                            busPlanningResults_combine['Bus_num']=list(JFK_json['Bus_num'])+list(LGA_json['Bus_num'])+list(PENN_json['Bus_num'])
-                            busPlanningResults_combine['Bus_gap']=list(JFK_json['Bus_gap'])+list(LGA_json['Bus_gap'])+list(PENN_json['Bus_gap'])
-                            busPlanningResults_combine['MSG_TYPE']="BUS_SCHEDULE"
-                            busPlanningResults_combine['Bus_routename']=list(JFK_json['Bus_routename'])+list(LGA_json['Bus_routename'])+list(PENN_json['Bus_routename'])
-                            busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
-                            rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
-                            rd_clients[i].prevHour=hour
-        else:
-            time.sleep(1)
-        
-        time.sleep(0.5) # wait for 0.5 seconds
+                # Sending back the eco-routing results 
+                for i in range(num_clients):
+                    if rd_clients[i].state == "connected":
+                        hour_od = rd_clients[i].hour
+                        if hour_od < 0:
+                            continue
+                        for od in routeResult[hour_od]:
+                            routeAction = mabManager.ucbRouting(od, hour_od)
+                            routeResult[hour_od][od] = routeAction
+                        # for od in routeResultBus[hour_od]:
+                        #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
+                        #     routeResultBus[hour_od][od] = routeAction
+                        # Generate resulting json objects 
+                        index_od =0
+                        od_list = []
+                        result_list=[]
+                        for od in routeResult[hour]:
+                            od_list.append(od)
+                            result_list.append(routeResult[hour][od])
+                            index_od+=1\
+                        
+                        # index_od_bus=0
+                        # bus_od_list=[]
+                        # bus_result_list=[]
+                        # for od in routeResultBus[hour]:
+                        #    bus_od_list.append(od)
+                        #    bus_result_list.append(routeResultBus[hour][od])
+                        #    index_od_bus+=1   
+                        routeResult_json_dict={}
+                        routeResult_json_dict['MSG_TYPE']="OD_PAIR"
+                        routeResult_json_dict['OD']=od_list 
+                        routeResult_json_dict['result']=result_list
+                        # routeResultBus_json_dict={}
+                        # routeResultBus_json_dict['MSG_TYPE']="BOD_PAIR"
+                        # routeResultBus_json_dict['OD']=bus_od_list 
+                        # routeResultBus_json_dict['result']=bus_result_list
+                        if index_od==len(routeResult[hour]):
+                            routeResult_json_string=json.dumps(routeResult_json_dict)
+                            rd_clients[i].ws.send(routeResult_json_string) 
+                        # if index_od_bus==len(routeResultBus[hour]):
+                        #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
+                        #    rd_clients[i].ws.send(routeResultBus_json_string)
 
+            # Clean the data cache in RDC
+            for i in range(num_clients):
+                if rd_clients[i].state == "connected":
+                    with rd_clients[i].lock: 
+                        rd_clients[i].link_ucb_received={}
+                        # rd_clients[i].link_ucb_bus_received={}
+                        # rd_clients[i].speed_vehicle_received={}
+                        hour = rd_clients[i].hour
+                        if hour < 0:
+                            continue
+
+            # Sending back the bus scheduling results 
+            if(config.bus_scheduling == 'true'):
+                if rd_clients[i].state == "connected":
+                    for i in range(num_clients):
+                        hour = rd_clients[i].hour
+                        if (((hour % 2)==0) and (hour>rd_clients[i].prevHour) and (hour<totalHour)):
+                            # Only send message when current hour differs from previous hour
+                            for f in ['JFK','LGA','PENN']:
+                                bus_planning_prepared = True
+                                if f not in busPlanningResults[str(hour)]:
+                                    bus_planning_prepared = False
+                            if bus_planning_prepared:
+                                print("Sending bus scheduling results for hour {}".format(hour))
+                                with rd_clients[i].lock:
+                                    busPlanningResults_combine={}
+                                    # comment the following three lines if the schedules are generated in real time
+                                    JFK_json=json.loads(busPlanningResults[str(hour)]['JFK'])
+                                    LGA_json=json.loads(busPlanningResults[str(hour)]['LGA'])
+                                    PENN_json=json.loads(busPlanningResults[str(hour)]['PENN'])
+
+                                    busPlanningResults_combine['Bus_route']=list(JFK_json['Bus_route'])+list(LGA_json['Bus_route'])+list(PENN_json['Bus_route'])
+                                    busPlanningResults_combine['Bus_num']=list(JFK_json['Bus_num'])+list(LGA_json['Bus_num'])+list(PENN_json['Bus_num'])
+                                    busPlanningResults_combine['Bus_gap']=list(JFK_json['Bus_gap'])+list(LGA_json['Bus_gap'])+list(PENN_json['Bus_gap'])
+                                    busPlanningResults_combine['MSG_TYPE']="BUS_SCHEDULE"
+                                    busPlanningResults_combine['Bus_routename']=list(JFK_json['Bus_routename'])+list(LGA_json['Bus_routename'])+list(PENN_json['Bus_routename'])
+                                    busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
+                                    rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
+                                    rd_clients[i].prevHour=hour
+            
+            time.sleep(0.5) # wait for 0.5 seconds
+        except:
+            pass
+        finally:
+            continue_flag = False
+            for j in range(num_clients):
+                if rd_clients[j].state == "connected":
+                    continue_flag = True
     # Wait until all rd_clients finish their work
     for j in range(num_clients):
         rd_clients[j].join()
