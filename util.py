@@ -31,7 +31,7 @@ def str_list_mapper_gen(func):
     return str_list_mapper
 
 # Function for modifying simulation properties
-def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, case):
+def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, case, instance):
     fname = src_data_dir + "/Data.properties"
     f = open(fname, "r")
     lines = f.readlines()
@@ -70,6 +70,8 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
             l = "BUS_SCHEDULE = data/NYC/bus_planning/bus_routes" + str(options.bus_fleet_size // 100) + ".json\n"
         elif ("COLLABORATIVE_EV" in l):
             l = "COLLABORATIVE_EV = " + str(options.cooperative) + "\n"
+        elif ("RANDOM_SEED" in l):
+            l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
         if "data/" in l:
             l = l.replace('data/', src_data_dir + '/')
         f_new.write(l)
@@ -87,7 +89,7 @@ def prepare_sim_dirs(options):
     if len(options.ports) != options.num_simulations:
         print("ERROR , cannot specify port number for all simulation instances")
         sys.exit(-1)
-    for i in range(0, options.num_simulations):
+    for i in range(options.num_simulations):
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
@@ -105,7 +107,7 @@ def prepare_sim_dirs(options):
             except OSError as exc:
                 print(f"ERROR :can not copy the data directory. exception {exc}")
                 sys.exit(-1)
-        modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], options.scenario_index, options.case_index)
+        modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], options.scenario_index, options.case_index, i)
         
     return dest_data_dir
 
@@ -157,10 +159,11 @@ def read_run_config(fname):
     opts.repast_plugin_dir = config['repast_plugin_dir']
     opts.num_simulations = int(config['num_sim_instances'])
     opts.charger_plan = config['charger_plan']
+    opts.random_seeds = config['random_seeds']
 
-    #if len(opts.ports) != opts.num_simulations:
-    #    print("ERROR , please specify port number for all simulation instances")
-    #    sys.exit(-1)
+    if len(opts.random_seeds) != opts.num_simulations:
+       print("ERROR , please specify random seeds for all simulation instances")
+       sys.exit(-1)
 
     return opts
 
@@ -237,7 +240,7 @@ def run_simulations(options):
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
-    sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_instance_" + str(i) + "_"
+    sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_seed_" + str(options.random_seeds[i]) + "_"
     sim_dir += "eco"+"_"+options.eco_routing + "_"
     sim_dir += "bus"+"_"+options.bus_scheduling + "_"
     sim_dir += "share"+"_"+str(int(options.share_percentage*100)) + "_"

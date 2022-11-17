@@ -33,7 +33,6 @@ def get_arguments(argv):
                         help='demand multiplier')
     parser.add_argument('-f', '--full', action='store_true', default=False,
                         help='using full demand or just hub-based demand, default is hub-based')
-
     args = parser.parse_args(argv)
 
     return args
