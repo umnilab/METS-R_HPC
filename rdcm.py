@@ -85,7 +85,7 @@ def run_rdcm(config, num_clients, port_numbers):
         #         i = i % num_clients
         #         time.sleep(0.5)
         # print("routeUCBMapBus received")
-    time.sleep(20) # Wait some time for processing routeUCBMap        
+    time.sleep(30) # Wait some time for processing routeUCBMap        
     # Initialize mabManager using background data
     mabManager.refreshRouteUCB(routeUCBMap)
     # mabManager.refreshRouteUCBBus(routeUCBMapBus)
