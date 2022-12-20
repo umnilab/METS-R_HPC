@@ -63,58 +63,57 @@ def run_rdcm(config, num_clients, port_numbers):
       in the simulator to facilitate this.
     ''' 
     
-    # Initialize UCB data
-    print("Initializing operational data!")
-    mabManager= MABManager(config.sim_dir, args)
-    with rd_clients[i].lock:
-        routeUCBMap = {}
-        i = 0
-        while len(routeUCBMap) == 0:
-            routeUCBMap = rd_clients[i].route_ucb_received
-            i += 1
-            i = i % num_clients
-            time.sleep(0.5)
-        print("routeUCBMap received")
-        # uncomment to enable eco-routing for bus
-        # routeUCBMapBus = {}
-        # i = 0
-        # while len(routeUCBMapBus) == 0:
-        #     with rd_clients[i].lock:
-        #         routeUCBMapBus = rd_clients[i].route_ucb_bus_received
-        #         i += 1
-        #         i = i % num_clients
-        #         time.sleep(0.5)
-        # print("routeUCBMapBus received")
-    time.sleep(30) # Wait some time for processing routeUCBMap        
-    # Initialize mabManager using background data
-    mabManager.refreshRouteUCB(routeUCBMap)
-    # mabManager.refreshRouteUCBBus(routeUCBMapBus)
-    mabManager.initializeLinkEnergy1()
-    mabManager.initializeLinkEnergy2()
-    
-    # Initialize route result
-    routeResult = []
-    # routeResultBus = []
-    
-    totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
-    emptyCount = 0
-    for hour in range(totalHour+1):
-        oneResult = {}
-        for od in routeUCBMap.keys():
-            oneResult[od]=-1 
-        routeResult.append(oneResult)
-        
-        #oneResultBus = defaultdict(lambda: -1)
-        # raw value is simply -1
-        # oneResultBus = {}
-        # for od in routeUCBMapBus:
-        #     oneResultBus[od]=-1 
-        # routeResultBus.append(oneResultBus)
+    if (config.eco_routing == 'true'):
+        # Initialize UCB data
+        print("Initializing operational data!")
+        mabManager= MABManager(config.sim_dir, args)
+        with rd_clients[i].lock:
+            routeUCBMap = {}
+            i = 0
+            while len(routeUCBMap) == 0:
+                routeUCBMap = rd_clients[i].route_ucb_received
+                i += 1
+                i = i % num_clients
+                time.sleep(0.5)
+            print("routeUCBMap received")
+            # uncomment to enable eco-routing for bus
+            # routeUCBMapBus = {}
+            # i = 0
+            # while len(routeUCBMapBus) == 0:
+            #     with rd_clients[i].lock:
+            #         routeUCBMapBus = rd_clients[i].route_ucb_bus_received
+            #         i += 1
+            #         i = i % num_clients
+            #         time.sleep(0.5)
+            # print("routeUCBMapBus received")
+        time.sleep(30) # Wait some time for processing routeUCBMap        
+        # Initialize mabManager using background data
+        mabManager.refreshRouteUCB(routeUCBMap)
+        # mabManager.refreshRouteUCBBus(routeUCBMapBus)
+        mabManager.initializeLinkEnergy1(config.road_file)
+        mabManager.initializeLinkEnergy2(config.road_file)
+        # Initialize route result
+        routeResult = []
+        # routeResultBus = []
+        totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
+        emptyCount = 0
+        for hour in range(totalHour+1):
+            oneResult = {}
+            for od in routeUCBMap.keys():
+                oneResult[od]=-1 
+            routeResult.append(oneResult)
+            
+            #oneResultBus = defaultdict(lambda: -1)
+            # raw value is simply -1
+            # oneResultBus = {}
+            # for od in routeUCBMapBus:
+            #     oneResultBus[od]=-1 
+            # routeResultBus.append(oneResultBus)
 
     # Initialize bus scheduling data
     if (config.bus_scheduling == 'true'):
         print("Initializing bus scheduling data")
-        date_sim=args.BT_EVENT_FILE.split("speed_")[1].split(".csv")[0]
+        date_sim=args.BT_EVENT_FILE.split("scenario")[1].split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]
         # data for bus schedulinge
         #path_pre = "demand_prediction/Modelling/PredictionResults"

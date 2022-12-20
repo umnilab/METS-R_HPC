@@ -761,14 +761,15 @@ class RouteOptimization(object):
             #print("index_demand_prediction")
             #print(index_demand_prediction)
             for j in range(len(record)):
-                index_j=list(index_demand_prediction).index(record[j])
-                #print("the jth record")
-                #print(record[j])
-                #print("index of demand")
-                #print(index_j)
-                record[j]=int(list(index_demand_sim)[index_j])
-                #print("record estimated")
-                #print(record[j])  
+                if(j in list(index_demand_prediction)):
+                    index_j=list(index_demand_prediction).index(record[j])
+                    #print("the jth record")
+                    #print(record[j])
+                    #print("index of demand")
+                    #print(index_j)
+                    record[j]=int(list(index_demand_sim)[index_j])
+                    #print("record estimated")
+                    #print(record[j])  
                 
             self.Bus_route.append(record) 
         #print (self.Bus_route)

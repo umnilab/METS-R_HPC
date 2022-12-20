@@ -5,6 +5,7 @@ import ast
 import time
 import pandas as pd
 import argparse
+import numpy as np
 from types import SimpleNamespace as SN
 
 from RouteGeneration import RouteGeneration
@@ -23,34 +24,30 @@ def get_arguments(argv):
 
     return args
 
-addsevs_dir = '/home/umni2/a/umnilab/projects/DOE_METSR/METSR_FINAL/ADDSAEVS/METSR_SIM/ADDSEVS/'
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
+sim_dir = '/home/bridge/c/lei67/git/METS-R_SIM/METS_R/'
 # Specify scenario and index
 options = get_arguments(sys.argv[1:])
-
 def prepare_scenario_dict(options, path):
     options.cases = [[],[],[],[]]
-    for case in os.listdir(path):
-        options.cases[int(case[14])].append(case.split("speed_")[1].split(".json")[0])
+    for scenario in os.listdir(path):
+        for case in os.listdir(path+"/"+scenario):
+            if(case.startswith("speed_std_")):
+                options.cases[int(scenario[-1])].append(case.split("speed_std_")[1].split(".csv")[0])
         
-prepare_scenario_dict(options, "input_route_generation/bus_ratio")
+prepare_scenario_dict(options, sim_dir+"data/NYC/operation/speed")
+options.cases[options.scenario_index] = sorted(options.cases[options.scenario_index])
 date_sim=options.cases[options.scenario_index][options.case_index]
 scenario_index=options.scenario_index
-
-# Load simulation config
-args = {}
-with open(os.path.join(addsevs_dir+'data', 'Data.properties'), "r") as f:
-    for line in f:
-        if "#" in line:
-            continue
-        fields = line.replace(" ","").strip().split("=")
-        if len(fields) != 2:
-            continue
-        else:
-            try:
-                args[fields[0]] = ast.literal_eval(fields[1])
-            except:
-                args[fields[0]] = fields[1]
-args = SN(**args)
 
 # Load the data for bus scheduling
 path_pre = "../demand_prediction/Modelling/PredictionResults"
@@ -59,7 +56,7 @@ demand_file_location_from = {}
 demand_file_location_to = {}
 
 # Note here the bus split ratio is not exact, which is a limitation of using offline cache
-ratio_file = "input_route_generation/bus_ratio/ratio_scenario"+str(scenario_index)+"_speed_"+date_sim+".json"
+ratio_file = "input_route_generation/bus_ratio.json"
 with open(ratio_file, 'r') as f:
     bus_ratio_file = json.load(f)
     bus_ratio_file = json.loads(bus_ratio_file)
@@ -70,7 +67,7 @@ for f in ['JFK','LGA','PENN']:
     
     # Generate and store the bus schedules
 busPlanningResults={}
-for hour in range(0, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600), 2):
+for hour in range(0, 30, 2):
     if ((hour%2)==0):
         busPlanningResults[hour] = {}
         for f in ['JFK','LGA','PENN']:
@@ -82,8 +79,8 @@ for hour in range(0, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3
                 hub_index = 120 
             if hub_type=='PENN':
                 hub_index = 164 
-            max_route = 50
-            routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour)
+            max_route = 30
+            routeGeneration = RouteGeneration(hub_index,bus_ratio_file,demand_file_location_from[f],demand_file_location_to[f],taxi_zone_file,max_route, date_sim, hour-3)
             routeGeneration.run()
             mat=routeGeneration.bus_mat
             print(mat)
@@ -105,8 +102,9 @@ for hour in range(0, int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3
                 # XXX for hub  XX for hour XX for ro
                 list_routename.append(hub_index*10000+hour*100+l)
             bus_planning_json['Bus_routename'] = list_routename
-            bus_planning_json['Bus_currenthour'] = str(hour) 
-            busPlanningResults[hour][f] = json.dumps(bus_planning_json)
+            bus_planning_json['Bus_currenthour'] = str(hour)
+            print(bus_planning_json)
+            busPlanningResults[hour][f] = json.dumps(bus_planning_json, cls=NpEncoder)
 # directly use the cached results as the optimization is much slower than the simulator
 with open("offline_cache/"+"scenario_"+str(scenario_index)+"_speed_"+str(date_sim)+"_" + str(options.bus_num) + "_bus_scheduling.json" , 'w') as f:
     json.dump(busPlanningResults, f)

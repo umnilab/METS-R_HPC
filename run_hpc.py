@@ -6,7 +6,7 @@ from util import read_run_config, prepare_sim_dirs, run_simulations
 
 """
 This is the entrance for METSR-HPC module
-usage example: python run_hpc.py -s 1 -c 0 -p 0.5 -e -b -tf 2000 -bf 100 -co -df 0.1
+usage example: python run_hpc.py -s 3 -c 2 -tf 2000 -bf 20 -co
 """
 
 def get_arguments(argv):
@@ -17,8 +17,6 @@ def get_arguments(argv):
                         help='the index of to simulate scenario, values from 0 to 3')
     parser.add_argument('-c','--case_index', type=int, 
                         help='the index within the scenario, take values from 0 to 9')
-    parser.add_argument('-p', '--share_percentage', type=float, default=0.5,
-                        help='percentage of sharable requests, 0 to 1')
     parser.add_argument('-e', '--eco_routing', action='store_true', default=False,
                         help='enable ecorouting')
     parser.add_argument('-b', '--bus_scheduling', action='store_true', default=False,
@@ -29,10 +27,8 @@ def get_arguments(argv):
                         help='number of AEV buses initialized')
     parser.add_argument('-co', '--cooperative', action='store_true', default=False,
                         help='enable taxi-bus or bus-taxi cooperation')
-    parser.add_argument('-df', '--demand_factor', type=float, default=1.0,
-                        help='demand multiplier')
-    parser.add_argument('-f', '--full', action='store_true', default=False,
-                        help='using full demand or just hub-based demand, default is hub-based')
+    parser.add_argument('-ds', '--demand_sharable', action='store_true', default=False,
+                        help='whether the request is sharable')
     args = parser.parse_args(argv)
 
     return args
@@ -47,11 +43,10 @@ def main():
     options.eco_routing = "true" if args.eco_routing else "false"
     options.bus_scheduling = "true" if args.bus_scheduling else "false"
     options.cooperative = "true" if args.cooperative else "false"
-    options.share_percentage = args.share_percentage
+    options.demand_sharable = "true" if args.demand_sharable else "false"
     options.bus_fleet_size = args.bus_fleet
     options.taxi_fleet_size = args.taxi_fleet
-    options.demand_factor = args.demand_factor
-    options.full_demand = "true" if args.full else "false"
+
     
     print("---------------- HPC options ----------------")
     print(options)

@@ -29,7 +29,6 @@ class MABManager(object):
 
     def refreshLinkUCB(self, new_linkUCBMap):
         hour = 0
-        # TODO: Change to json
         for IDhour in new_linkUCBMap.keys():
             hour = int(IDhour.split(";")[1])
         #    break
@@ -80,30 +79,30 @@ class MABManager(object):
 
 
     # Initialize speed data for each link
-    def initializeLinkEnergy1(self):
-        fileName1 = "eco_routing/data/background_traffic_NYC_one_week.csv";
+    def initializeLinkEnergy1(self, fileName1):
         with open(fileName1, 'r') as f:
-            f.readline()
+            f.readline() # skip the first line
             for line in f.readlines():
                 result = line.split(",")
                 roadID = int(result[0])
-                backgroundSpeed = 0
+                roadType = int(result[2])
                 for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
-                    backgroundSpeed = float(result[i])
+                    backgroundSpeed = 35 if roadType==2 else 25
                     speedLength  = [backgroundSpeed]
                     self.initialLinkSpeedLength[i][roadID] = speedLength
 
     # Initialize link length data for each link
-    def initializeLinkEnergy2(self):   
-        fileName2 = "eco_routing/data/background_traffic_NYC_one_week.csv";
+    def initializeLinkEnergy2(self, fileName2):   
         with open(fileName2, 'r') as f:
             f.readline()
             for line in f.readlines():
                 result = line.split(",")
                 roadID = int(result[0])
                 roadLength = float(result[-1])
+                roadType = int(result[2])
                 for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
-                    speedLength = [self.initialLinkSpeedLength[i][roadID][0], roadLength]
+                    backgroundSpeed =  35 if roadType==2 else 25
+                    speedLength = [backgroundSpeed, roadLength]
                     self.initialLinkSpeedLength[i][roadID] = speedLength
                     self.roadLengthMap[roadID] = roadLength
 

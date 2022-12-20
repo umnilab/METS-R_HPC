@@ -468,10 +468,10 @@ class RouteGeneration(object):
         taxi_zones = gp.read_file(taxi_zone_file)
         location='input_route_generation/'
         self.bus_mat = {}                     
-        keep_index = np.array(taxi_zones['OBJECTID'])-1  #[0,233]
+        keep_index = np.array(taxi_zones['OBJECTID']) #[0,233]
         self.mapping_row_objectid = dict()    #{"0":3, "1":4, "2":7,...}
         for i in range(len(keep_index)):
-            self.mapping_row_objectid[str(i)] = keep_index[i]+1
+            self.mapping_row_objectid[str(i)] = keep_index[i]
  
         Q_from = self.demand_file_location_from
         Q_to=self.demand_file_location_to
@@ -492,24 +492,30 @@ class RouteGeneration(object):
 #################Attention1############################
 #Attention Start: you need to redefine Q_fromhub, Q_tohub as the data from the row_idx by chaging row_idx
         Q_fromhub = [0.0 for i in range(len(keep_index))]
+
         for i in range(len(Q_fromhub)):
-            objectID = keep_index[i] + 1
+            objectID = keep_index[i]
             #print("objectID")
             #print(objectID)
             #if objectID in columnList:
             #Q_fromhub[i] = abs(Q_from.iloc[row_idx][columnList.index(objectID)]*)+abs(Q_from.iloc[row_idx+1][columnList.index(objectID)]) 
-            Q_fromhub[i] =max(abs(Q_from.iloc[(locationIDList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx][2]*bus_ratio_file[str(hour_idx)][str(i)])+abs(Q_from.iloc[(locationIDList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx+1][2]*bus_ratio_file[str(hour_idx+1)][str(i)]),0.01)
+            Q_fromhub[i] =max(abs(Q_from.iloc[(locationIDList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx][2]*\
+                bus_ratio_file[str(keep_index[hub_id])][str(keep_index[i])])+abs(Q_from.iloc[(locationIDList.index(objectID))*sum(date_2019_sum)*24+\
+                    index_date_month+hour_idx+1][2]*bus_ratio_file[str(keep_index[hub_id])][str(keep_index[i])]),0.01)
         Q_fromhub = np.array(Q_fromhub)
         #Q_tohub = copy.copy(Q_fromhub)
         locationIDtoList = list(np.unique(Q_to['PULocationID']))
         Q_tohub = [0.0 for i in range(len(keep_index))]
+        
         for i in range(len(Q_tohub)):
-            objectID = keep_index[i] + 1
+            objectID = keep_index[i]
             #print("objectID")
             #print(objectID)
             #if objectID in columnList:
             #Q_fromhub[i] = abs(Q_from.iloc[row_idx][columnList.index(objectID)]*)+abs(Q_from.iloc[row_idx+1][columnList.index(objectID)]) 
-            Q_tohub[i] =max(abs(Q_to.iloc[(locationIDtoList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx][2]*bus_ratio_file[str(hour_idx)][str(i)])+abs(Q_to.iloc[(locationIDtoList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx+1][2]*bus_ratio_file[str(hour_idx+1)][str(i)]),0.01)
+            Q_tohub[i] =max(abs(Q_to.iloc[(locationIDtoList.index(objectID))*sum(date_2019_sum)*24+index_date_month+hour_idx][2]*\
+                bus_ratio_file[str(keep_index[i])][str(keep_index[hub_id])])+abs(Q_to.iloc[(locationIDtoList.index(objectID))*sum(date_2019_sum)*24+\
+                    index_date_month+hour_idx+1][2]*bus_ratio_file[str(keep_index[i])][str(keep_index[hub_id])]),0.01)
         Q_tohub = np.array(Q_tohub)
 
         #print("Q_fromhub")
