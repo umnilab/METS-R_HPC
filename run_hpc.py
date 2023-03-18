@@ -14,9 +14,9 @@ def get_arguments(argv):
     parser.add_argument('-r','--run_config', default='run.config.scenario.json',
                         help='the folder that contains all the input data')
     parser.add_argument('-s','--scenario_index', type=int, 
-                        help='the index of to simulate scenario, values from 0 to 3')
+                        help='the index of to simulate scenario')
     parser.add_argument('-c','--case_index', type=int, 
-                        help='the index within the scenario, take values from 0 to 9')
+                        help='the index within the scenario')
     parser.add_argument('-e', '--eco_routing', action='store_true', default=False,
                         help='enable ecorouting')
     parser.add_argument('-b', '--bus_scheduling', action='store_true', default=False,

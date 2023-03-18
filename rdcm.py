@@ -62,7 +62,7 @@ def run_rdcm(config, num_clients, port_numbers):
       also be in JSON format, also change the route_result reception side
       in the simulator to facilitate this.
     ''' 
-    
+    totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
     if (config.eco_routing == 'true'):
         # Initialize UCB data
         print("Initializing operational data!")
@@ -95,7 +95,6 @@ def run_rdcm(config, num_clients, port_numbers):
         # Initialize route result
         routeResult = []
         # routeResultBus = []
-        totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
         emptyCount = 0
         for hour in range(totalHour+1):
             oneResult = {}
@@ -115,6 +114,12 @@ def run_rdcm(config, num_clients, port_numbers):
         print("Initializing bus scheduling data")
         date_sim=args.BT_EVENT_FILE.split("scenario")[1].split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]
+        i = 0
+        
+        for i in range(num_clients):
+            with rd_clients[i].lock:
+                while not rd_clients[i].state == "connected":
+                    time.sleep(0.5)
         # data for bus schedulinge
         #path_pre = "demand_prediction/Modelling/PredictionResults"
         #demand_file_location_from = {}
@@ -205,48 +210,47 @@ def run_rdcm(config, num_clients, port_numbers):
                             # speedVehicle = rd_clients[i].speed_vehicle_received
                             # mabManager.refreshLinkUCBShadow(speedVehicle)
 
-                # Sending back the eco-routing results 
+                # Sending back the eco-routing results
                 for i in range(num_clients):
                     if rd_clients[i].state == "connected":
                         hour_od = rd_clients[i].hour
-                        if hour_od < 0:
-                            continue
-                        for od in routeResult[hour_od]:
-                            routeAction = mabManager.ucbRouting(od, hour_od)
-                            routeResult[hour_od][od] = routeAction
-                        # for od in routeResultBus[hour_od]:
-                        #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
-                        #     routeResultBus[hour_od][od] = routeAction
-                        # Generate resulting json objects 
-                        index_od =0
-                        od_list = []
-                        result_list=[]
-                        for od in routeResult[hour]:
-                            od_list.append(od)
-                            result_list.append(routeResult[hour][od])
-                            index_od+=1\
-                        
-                        # index_od_bus=0
-                        # bus_od_list=[]
-                        # bus_result_list=[]
-                        # for od in routeResultBus[hour]:
-                        #    bus_od_list.append(od)
-                        #    bus_result_list.append(routeResultBus[hour][od])
-                        #    index_od_bus+=1   
-                        routeResult_json_dict={}
-                        routeResult_json_dict['MSG_TYPE']="OD_PAIR"
-                        routeResult_json_dict['OD']=od_list 
-                        routeResult_json_dict['result']=result_list
-                        # routeResultBus_json_dict={}
-                        # routeResultBus_json_dict['MSG_TYPE']="BOD_PAIR"
-                        # routeResultBus_json_dict['OD']=bus_od_list 
-                        # routeResultBus_json_dict['result']=bus_result_list
-                        if index_od==len(routeResult[hour]):
-                            routeResult_json_string=json.dumps(routeResult_json_dict)
-                            rd_clients[i].ws.send(routeResult_json_string) 
-                        # if index_od_bus==len(routeResultBus[hour]):
-                        #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
-                        #    rd_clients[i].ws.send(routeResultBus_json_string)
+                        if hour_od >= 0:
+                            for od in routeResult[hour_od]:
+                                routeAction = mabManager.ucbRouting(od, hour_od)
+                                routeResult[hour_od][od] = routeAction
+                            # for od in routeResultBus[hour_od]:
+                            #     routeAction = mabManager.ucbRoutingBus(od, hour_od)
+                            #     routeResultBus[hour_od][od] = routeAction
+                            # Generate resulting json objects 
+                            index_od =0
+                            od_list = []
+                            result_list=[]
+                            for od in routeResult[hour]:
+                                od_list.append(od)
+                                result_list.append(routeResult[hour][od])
+                                index_od+=1
+                            
+                            # index_od_bus=0
+                            # bus_od_list=[]
+                            # bus_result_list=[]
+                            # for od in routeResultBus[hour]:
+                            #    bus_od_list.append(od)
+                            #    bus_result_list.append(routeResultBus[hour][od])
+                            #    index_od_bus+=1   
+                            routeResult_json_dict={}
+                            routeResult_json_dict['MSG_TYPE']="OD_PAIR"
+                            routeResult_json_dict['OD']=od_list 
+                            routeResult_json_dict['result']=result_list
+                            # routeResultBus_json_dict={}
+                            # routeResultBus_json_dict['MSG_TYPE']="BOD_PAIR"
+                            # routeResultBus_json_dict['OD']=bus_od_list 
+                            # routeResultBus_json_dict['result']=bus_result_list
+                            if index_od==len(routeResult[hour]):
+                                routeResult_json_string=json.dumps(routeResult_json_dict)
+                                rd_clients[i].ws.send(routeResult_json_string) 
+                            # if index_od_bus==len(routeResultBus[hour]):
+                            #    routeResultBus_json_string=json.dumps(routeResultBus_json_dict)
+                            #    rd_clients[i].ws.send(routeResultBus_json_string)
 
             # Clean the data cache in RDC
             for i in range(num_clients):
@@ -258,11 +262,11 @@ def run_rdcm(config, num_clients, port_numbers):
                         hour = rd_clients[i].hour
                         if hour < 0:
                             continue
-
+                            
             # Sending back the bus scheduling results 
             if(config.bus_scheduling == 'true'):
-                if rd_clients[i].state == "connected":
-                    for i in range(num_clients):
+                for i in range(num_clients):
+                    if rd_clients[i].state == "connected":
                         hour = rd_clients[i].hour
                         if (((hour % 2)==0) and (hour>rd_clients[i].prevHour) and (hour<totalHour)):
                             # Only send message when current hour differs from previous hour
@@ -287,10 +291,9 @@ def run_rdcm(config, num_clients, port_numbers):
                                     busPlanningResults_combine['Bus_currenthour']=JFK_json['Bus_currenthour']
                                     rd_clients[i].ws.send(json.dumps(busPlanningResults_combine))
                                     rd_clients[i].prevHour=hour
-            
             time.sleep(0.5) # wait for 0.5 seconds
-        except:
-            pass
+        except Exception as e: 
+            print(e)
         finally:
             continue_flag = False
             for j in range(num_clients):

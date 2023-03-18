@@ -104,12 +104,14 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
             l = "BUS_PLANNING = " + str(options.bus_scheduling) + "\n"
         elif l.startswith("DEMAND_SHARABLE"):
             l = "DEMAND_SHARABLE = " + str(options.demand_sharable) + "\n"
+        elif l.startswith("DEMAND_DIFFUSION"):
+            l = "DEMAND_DIFFUSION = " + str(options.demand_diffusion) + "\n"
         elif l.startswith("DEMAND_FACTOR"):
             l = "DEMAND_FACTOR = " + str(options.demand_factor) + "\n"
         elif l.startswith("CHARGER_CSV"):
             l = "CHARGER_CSV = data/NYC/facility/charging_station/" + options.charger_plan + "\n"
-        elif (l.startswith("BUS_SCHEDULE")) and options.bus_fleet_size >= 50 and options.bus_scheduling == 'false':
-            l = "BUS_SCHEDULE = data/NYC/operation/bus_planning/bus_routes" + str(options.bus_fleet_size // 50) + ".json\n"
+        elif (l.startswith("BUS_SCHEDULE")) and options.bus_fleet_size >= 20 and options.bus_scheduling == 'false':
+            l = "BUS_SCHEDULE = data/NYC/operation/bus_planning/bus_routes" + str(options.bus_fleet_size // 20) + ".json\n"
         elif (l.startswith("COLLABORATIVE_EV")):
             l = "COLLABORATIVE_EV = " + str(options.cooperative) + "\n"
         elif (l.startswith("RANDOM_SEED")):
@@ -221,6 +223,7 @@ def read_run_config(fname):
     with open(fname, "r") as f:
         config = json.load(f)
 
+    ## Create a namespace to hold the options
     opts = SimpleNamespace()
     opts.java_path = config['java_path']
     opts.java_options = config['java_options']
@@ -231,6 +234,7 @@ def read_run_config(fname):
     opts.charger_plan = config['charger_plan']
     opts.full_network = config['full_network']
     opts.full_demand = config['full_demand']
+    opts.demand_diffusion = config['demand_diffusion']
     opts.sim_passenger = config['sim_passenger']
     opts.sim_hour = config['sim_hour']
     opts.random_seeds = config['random_seeds']

@@ -85,7 +85,7 @@ class MABManager(object):
             for line in f.readlines():
                 result = line.split(",")
                 roadID = int(result[0])
-                roadType = int(result[2])
+                roadType = int(float(result[2]))
                 for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
                     backgroundSpeed = 35 if roadType==2 else 25
                     speedLength  = [backgroundSpeed]
@@ -99,7 +99,7 @@ class MABManager(object):
                 result = line.split(",")
                 roadID = int(result[0])
                 roadLength = float(result[-1])
-                roadType = int(result[2])
+                roadType = int(float(result[2]))
                 for i in range(int(self.args.SIMULATION_STOP_TIME * self.args.SIMULATION_STEP_SIZE//3600)+1):
                     backgroundSpeed =  35 if roadType==2 else 25
                     speedLength = [backgroundSpeed, roadLength]
