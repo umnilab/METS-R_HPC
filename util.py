@@ -317,4 +317,6 @@ def get_sim_dir(options, i):
     sim_dir += "_co" if options.cooperative=="true" else ""
     sim_dir += "_pass" if options.sim_passenger=="true" else ""
     sim_dir += "_full" if options.full_demand=="true" else ""
+    sim_dir += "_" + str(int(options.demand_factor*100))
+    sim_dir += "_" + str(options.num_threads)
     return sim_dir

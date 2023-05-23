@@ -29,6 +29,10 @@ def get_arguments(argv):
                         help='enable taxi-bus or bus-taxi cooperation')
     parser.add_argument('-ds', '--demand_sharable', action='store_true', default=False,
                         help='whether the request is sharable')
+    parser.add_argument('-df', '--demand_factor', type=float, default  = -1, 
+                        help='ratio of demand')
+    parser.add_argument('-th', '--threads', type=int, default  = -1, 
+                        help='number of threads')
     args = parser.parse_args(argv)
 
     return args
@@ -46,6 +50,11 @@ def main():
     options.demand_sharable = "true" if args.demand_sharable else "false"
     options.bus_fleet_size = args.bus_fleet
     options.taxi_fleet_size = args.taxi_fleet
+
+    if(args.demand_factor > 0):
+        options.demand_factor = args.demand_factor
+    if(args.threads > 0):
+        options.num_threads = args.threads
 
     
     print("---------------- HPC options ----------------")
