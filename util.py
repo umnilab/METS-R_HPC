@@ -9,6 +9,7 @@ import platform
 from contextlib import closing
 from types import SimpleNamespace
 import sys
+import zipfile
 
 """
 Helper functions for METSR-HPC
@@ -22,7 +23,7 @@ def check_socket(host, port):
             flag =  True
         else:
             flag =  False
-    time.sleep(5)
+    time.sleep(1)
     return flag
 
 # Factory for processsing a str list with a given func
@@ -42,17 +43,17 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
     for l in lines:
         if l.startswith("NETWORK_LISTEN_PORT"):
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
-        elif l.startswith("DM_EVENT_FILE"):
+        elif l.startswith("RH_DEMAND_FILE"):
             if(options.full_demand == "true"):
                 if(options.sim_passenger == "true"):
-                    l = "DM_EVENT_FILE = data/NYC/demand/passenger_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                    l = "RH_DEMAND_FILE = data/NYC/demand/passenger_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
                 else:
-                    l = "DM_EVENT_FILE = data/NYC/demand/request_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                    l = "RH_DEMAND_FILE = data/NYC/demand/request_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
             else:
                 if(options.sim_passenger == "true"):
-                    l = "DM_EVENT_FILE = data/NYC/demand/passenger/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                    l = "RH_DEMAND_FILE = data/NYC/demand/passenger/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
                 else:
-                    l = "DM_EVENT_FILE =  data/NYC/demand/request/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
+                    l = "RH_DEMAND_FILE =  data/NYC/demand/request/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
         elif l.startswith("ROADS_SHAPEFILE"):
             if(options.full_network == "true"):
                 l = "ROADS_SHAPEFILE = data/NYC/facility/road_full/road_fileNYC.shp\n"
@@ -75,11 +76,11 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
                 l = "LANES_CSV = data/NYC/facility/road_full/lane_fileNYC.csv\n"
             else:
                 l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
-        elif l.startswith("DM_SHARE_PERCENTAGE"):
+        elif l.startswith("RH_SHARE_PERCENTAGE"):
             if(options.full_demand == "true"):
-                l = "DM_SHARE_PERCENTAGE = data/NYC/demand/share_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
             else:
-                l = "DM_SHARE_PERCENTAGE = data/NYC/demand/share/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
         elif l.startswith("BT_EVENT_FILE"):
             if(options.full_network == "true"):
                 l = "BT_EVENT_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
@@ -139,6 +140,10 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
             l = "HOUR_OF_DEMAND = " + str(options.sim_hour) + "\n"
         elif (l.startswith("SIMULATION_STOP_TIME")):
             l = "SIMULATION_STOP_TIME = " + str(round(int(options.sim_hour)*3600/float(options.sim_step_size))) + "\n"
+        elif (l.startswith("AGG_DEFAULT_PATH")):
+            l = "AGG_DEFAULT_PATH = agg_output" + "\n"
+        elif (l.startswith("JSON_DEFAULT_PATH")):
+            l = "JSON_DEFAULT_PATH = trajectory_output" + "\n"
         if "data/" in l:
             l = l.replace('data/', src_data_dir + '/')
         f_new.write(l)
@@ -161,8 +166,10 @@ def prepare_sim_dirs(options):
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
             os.makedirs(dir_name)
+        shutil.copy(options.sim_dir+"/log4j.properties", dir_name + "/log4j.properties")
         # copy the simulation config files
         dest_data_dir = dir_name + "/" + "data" 
+        options.data_dir = dest_data_dir
         
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
@@ -180,9 +187,24 @@ def prepare_sim_dirs(options):
             except OSError as exc:
                 print(f"ERROR :can not copy the data directory. exception {exc}")
                 sys.exit(-1)
+
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], options.scenario_index, options.case_index, i)
-        
-    return dest_data_dir
+
+# copy necessary files for running the batch run
+# def prepare_sim_dirs_for_batch(options):
+#     # copy the complete_mode.jar in batch_output to the target directory
+#     src_data_dir = options.sim_dir + "batch"
+#     for i in range(options.num_simulations):
+#         # make a directory to run the simulator
+#         dir_name = get_sim_dir(options, i)
+#         if not path.exists(dir_name):
+#             os.makedirs(dir_name)
+#         shutil.copy(src_data_dir + "/complete_model.jar",dir_name + "/complete_model.zip")
+#         # unzip the jar file
+#         with zipfile.ZipFile(dir_name + "/complete_model.zip", 'r') as zip_ref:
+#             zip_ref.extractall(dir_name)
+#         os.remove(dir_name + "/complete_model.zip")
+#     prepare_sim_dirs(options)
 
 # Function for getting the file name list of demand scenarios
 def prepare_scenario_dict(options, path):
@@ -228,7 +250,7 @@ def read_run_config(fname):
     opts.java_path = config['java_path']
     opts.java_options = config['java_options']
     opts.sim_dir = config['sim_dir']
-    opts.groovy_dir = config['groovy_dir']
+    # opts.groovy_dir = config['groovy_dir']
     opts.repast_plugin_dir = config['repast_plugin_dir']
     opts.num_simulations = int(config['num_sim_instances'])
     opts.charger_plan = config['charger_plan']
@@ -255,25 +277,52 @@ def get_classpath(options, includeBin=True, separator=":"):
     
     classpath = ""
 
-    if not path.exists(options.groovy_dir):
-        print(f"ERROR , groovy is not found at {options.groovy_dir}")
-        sys.exit(-1)
+    # if not path.exists(options.groovy_dir):
+    #     print(f"ERROR , groovy is not found at {options.groovy_dir}")
+    #     sys.exit(-1)
     
-    classpath += options.groovy_dir + "lib/*" + separator
+    # classpath += options.groovy_dir + "lib/*" + separator
 
     if not path.exists(options.repast_plugin_dir):
         print(f"ERROR , repast plugins not found at {options.repast_plugin_dir}")
         sys.exit(-1)
     
-    classpath += options.repast_plugin_dir + "bin" + separator + \
-                 options.repast_plugin_dir + "lib/*" + separator
+    classpath += options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/lib/*" + separator
     
-    classpath += options.sim_dir + separator + \
-                 options.sim_dir + "lib/*"
+    # classpath += options.sim_dir + separator + \
+    #              options.sim_dir + "lib/*"
     
-    if(includeBin):
-        classpath += separator + options.sim_dir + "bin"
+    # if(includeBin):
+    #     classpath += separator + options.sim_dir + "bin"
 
+    return classpath
+
+def get_classpath2(options, includeBin=True, separator=":"):
+    
+    classpath = ""
+    # if not path.exists(options.repast_plugin_dir):
+    #     print(f"ERROR , repast plugins not found at {options.repast_plugin_dir}")
+    #     sys.exit(-1)
+    classpath += options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.batch_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.batch_2.7.0/lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.distributed.batch_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.distributed.batch_2.7.0/lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.core_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.core_2.7.0/lib/*" + separator + \
+                 options.sim_dir + "bin" + separator + \
+                 options.sim_dir + "lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.bin_and_src_2.7.0/repast.simphony.bin_and_src.jar" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.essentials_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.gis_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.gis_2.7.0/lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.sql_2.7.0/bin" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.sql_2.7.0/lib/*" + separator + \
+                 options.repast_plugin_dir + "repast.simphony.scenario_2.7.0/bin" + separator 
+    # classpath += "bin/*" + separator + \
+    #              "lib/*"
     return classpath
 
 # Function for starting the simulation
@@ -284,27 +333,62 @@ def run_simulations(options):
         if platform.system() == "Windows":
              # go to sim directory
             os.chdir(sim_dir)
+
+            print(get_classpath(options, False, separator = ";"))
             # run the simulation on a new terminal
-            sim_command = '"' + options.java_path + '"' + " " + \
+            sim_command = '"' + options.java_path + 'java"' + " " + \
                     options.java_options + " " + \
                     "-classpath " + \
-                    get_classpath(options, False, separator = ";") + " " + \
+                    '"' +get_classpath(options, False, separator = ";") + '" '  + \
                     "repast.simphony.runtime.RepastMain " + \
                     options.sim_dir + "mets_r.rs"
+            print(sim_command)
             subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
             os.chdir(sim_dir)
             # run simulator on new terminal 
-            sim_command = options.java_path + " " + \
+            sim_command = options.java_path + "java " + \
                     options.java_options + " " + \
                     "-classpath " + \
-                    get_classpath(options, False) + " " + \
+                    get_classpath(options, False) + " "  + \
                     "repast.simphony.runtime.RepastMain " + \
                     options.sim_dir + "mets_r.rs"
             os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
         os.chdir(cwd)
+
+def run_simulations_in_background(options):
+    # prepare_sim_dirs_for_batch(options)
+    for i in range(0, options.num_simulations):
+        cwd = str(os.getcwd())
+        sim_dir = get_sim_dir(options, i)
+        if platform.system() == "Windows":
+             # go to sim directory
+            os.chdir(sim_dir)
+            # run the simulation on a new terminal
+            sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
+                    "-cp " + \
+                    '"' + get_classpath2(options, False, separator = ";") + '" ' + \
+                    "repast.simphony.batch.BatchMain " + \
+                    "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
+                    "-interactive " + options.sim_dir + "mets_r.rs "
+            print(sim_command)
+            subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
+        else:
+            # go to sim directory
+            os.chdir(sim_dir)
+            # run simulator on new terminal 
+            sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
+                    "-cp " + \
+                    '"' + get_classpath2(options, False) + '" ' + \
+                    "repast.simphony.batch.BatchMain " + \
+                    "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
+                    "-interactive " + options.sim_dir + "mets_r.rs "
+            os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
+        # go back to test directory
+        os.chdir(cwd)
+
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):

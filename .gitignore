@@ -2,3 +2,4 @@ simulation_*/
 *.pyc
 *.pyc
 output/*
+*.log

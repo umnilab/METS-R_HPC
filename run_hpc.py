@@ -2,11 +2,11 @@ import sys
 import argparse
 
 from rdcm import run_rdcm
-from util import read_run_config, prepare_sim_dirs, run_simulations
+from util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background
 
 """
 This is the entrance for METSR-HPC module
-usage example: python run_hpc.py -s 3 -c 2 -tf 2000 -bf 20 -co
+usage example: python run_hpc.py -s 0 -c 0 -tf 2000 -bf 20
 """
 
 def get_arguments(argv):
@@ -62,11 +62,10 @@ def main():
     print("---------------------------------------------")
 
     # Prepare simulation directories
-    options.data_dir = prepare_sim_dirs(options)
-    print(options.data_dir)
-
+    prepare_sim_dirs(options)
     # Launch the simulations
-    run_simulations(options)
+    # run_simulations(options)
+    run_simulations_in_background(options)
     
     # Run RDCM (remote data colient manager) 
     run_rdcm(options, options.num_simulations, options.ports)

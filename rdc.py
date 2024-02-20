@@ -153,13 +153,26 @@ class RDClient(threading.Thread):
     # run() method implements what RDClient will be doing during its lifetime
     def run(self):
         print(f"waiting until the server is up at {self.uri}")
+
+        # all clients are disconnected
+        wait_time = 0
+
         while not check_socket(self.host, self.port):
-            pass
+            # count the real-world seconds 
+            wait_time += 1
+            if wait_time > 20:
+                print(f"waiting for the server to be up at {self.uri}.. time out in {30-wait_time} seconds..")
+            if wait_time > 30:
+                print("Waiting overtime, please check the connection and restart the simulation.")
+                # close the connection
+                self.ws.close()
+                break
 
-        print(f"sever is active at {self.uri},  running client..")
+        if wait_time <= 60:
+            print(f"sever is active at {self.uri},  running client..")
 
-        # listen to the server forever
-        self.ws.run_forever()
+            # listen to the server forever
+            self.ws.run_forever()
 
     # override __str__ for logging 
     def __str__(self):

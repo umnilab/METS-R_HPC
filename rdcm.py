@@ -63,6 +63,7 @@ def run_rdcm(config, num_clients, port_numbers):
       in the simulator to facilitate this.
     ''' 
     totalHour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
+
     if (config.eco_routing == 'true'):
         # Initialize UCB data
         print("Initializing operational data!")
@@ -114,8 +115,6 @@ def run_rdcm(config, num_clients, port_numbers):
         print("Initializing bus scheduling data")
         date_sim=args.BT_EVENT_FILE.split("scenario")[1].split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]
-        i = 0
-        
         for i in range(num_clients):
             with rd_clients[i].lock:
                 while not rd_clients[i].state == "connected":
@@ -296,12 +295,11 @@ def run_rdcm(config, num_clients, port_numbers):
             print(e)
         finally:
             continue_flag = False
-            for j in range(num_clients):
-                if rd_clients[j].state == "connected":
-                    continue_flag = True
+
     # Wait until all rd_clients finish their work
     for j in range(num_clients):
-        rd_clients[j].join()
+        rd_clients[j].join(timeout=10)
+
 
 def kill_proc_tree(pid, including_parent=True):    
     parent = psutil.Process(pid)
@@ -337,6 +335,6 @@ if __name__ == "__main__":
     port_numbers = config.socket_port_numbers
 
     # Start RDCM
-    run_rdcm(num_clients, port_numbers,index_bus_scheduling)
+    run_rdcm(num_clients, port_numbers)
 
 

@@ -1,9 +1,8 @@
 {
-"java_path" : "C:/Program Files/Java/jdk1.8.0_301/bin/javaw",
-"java_options" : "-Xss256M -Xms1024M -Xmx4G -Xshare:off -Dfile.encoding=UTF-8",
-"sim_dir" : "C:/Users/User/git/METS-R_SIM/METS_R/",
-"groovy_dir" : "C:/Users/User/RepastSimphony-2.7/eclipse/plugins/org.codehaus.groovy_2.4.17.v201906292136-e1906-RELEASE/",
-"repast_plugin_dir" : "C:/Users/User/RepastSimphony-2.7/eclipse/plugins/repast.simphony.runtime_2.7.0/",
+"java_path" : "C:/Program Files/Java/jdk1.8.0_202/bin/",
+"java_options" : "-Xss256M -Xms1024M -Xmx4G",
+"sim_dir" : "C:/Users/ALei/git/METS-R_SIM/METS_R/",
+"repast_plugin_dir" : "C:/Users/ALei/RepastSimphony-2.7/eclipse/plugins/",
 "charger_plan" : "L_0_120000.csv",
 "num_sim_instances" : "1",
 "random_seeds": ["42"],
