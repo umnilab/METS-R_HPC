@@ -1,7 +1,7 @@
 # How to run?
 Update the `run.config.json` file with your configurations and run HPC framework using,
 ```
-python3 run_hpc.py run.config.json
+python run_hpc.py -s 0 -c 0 -tf 2000 -bf 20
 ```  
 # How it works?
 `run.config.json' file contains all the settings needed to run the simulation instances and remote data client (RDClient) instances.
@@ -9,7 +9,6 @@ python3 run_hpc.py run.config.json
 * `java_path` : location of the java installation in your machine
 * `java_options` : jvm options
 * `evacsim_dir` : location of the METS-R simulator code
-* `groovy_dir` : groovy eclipse plugin location
 * `repast_plugin_dir` : repast eclipse plugin location
 * `num_sim_instances` : number of parallel simulation instances to run
 * `socket_port_numbers` : socket port numbers each simulation instance will be listening on
