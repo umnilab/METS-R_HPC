@@ -334,7 +334,7 @@ def run_simulations(options):
              # go to sim directory
             os.chdir(sim_dir)
 
-            print(get_classpath(options, False, separator = ";"))
+            # print(get_classpath(options, False, separator = ";"))
             # run the simulation on a new terminal
             sim_command = '"' + options.java_path + 'java"' + " " + \
                     options.java_options + " " + \
@@ -342,7 +342,7 @@ def run_simulations(options):
                     '"' +get_classpath(options, False, separator = ";") + '" '  + \
                     "repast.simphony.runtime.RepastMain " + \
                     options.sim_dir + "mets_r.rs"
-            print(sim_command)
+            # print(sim_command)
             subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
@@ -373,7 +373,7 @@ def run_simulations_in_background(options):
                     "repast.simphony.batch.BatchMain " + \
                     "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
                     "-interactive " + options.sim_dir + "mets_r.rs "
-            print(sim_command)
+            # print(sim_command)
             subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
