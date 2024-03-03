@@ -343,7 +343,10 @@ def run_simulations(options):
                     "repast.simphony.runtime.RepastMain " + \
                     options.sim_dir + "mets_r.rs"
             # print(sim_command)
-            subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
+            if options.verbose: # print the sim output to the console
+                subprocess.Popen(sim_command, shell=True)
+            else:
+                subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
             os.chdir(sim_dir)
@@ -354,7 +357,10 @@ def run_simulations(options):
                     get_classpath(options, False) + " "  + \
                     "repast.simphony.runtime.RepastMain " + \
                     options.sim_dir + "mets_r.rs"
-            os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
+            if options.verbose:
+                os.system(sim_command)
+            else:
+                os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
         os.chdir(cwd)
 
@@ -374,7 +380,10 @@ def run_simulations_in_background(options):
                     "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
                     "-interactive " + options.sim_dir + "mets_r.rs "
             # print(sim_command)
-            subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
+            if options.verbose: # print the sim output to the console
+                subprocess.Popen(sim_command)
+            else:
+                subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
             os.chdir(sim_dir)
@@ -385,7 +394,10 @@ def run_simulations_in_background(options):
                     "repast.simphony.batch.BatchMain " + \
                     "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
                     "-interactive " + options.sim_dir + "mets_r.rs "
-            os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
+            if options.verbose:
+                os.system(sim_command)
+            else:
+                os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
         os.chdir(cwd)
 

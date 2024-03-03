@@ -34,7 +34,6 @@ from scipy.spatial import cKDTree
 from shapely.geometry import LineString, shape,Point
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
-from lapsolver import solve_dense
 from scipy.io import savemat
 
  

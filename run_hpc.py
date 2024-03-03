@@ -33,6 +33,8 @@ def get_arguments(argv):
                         help='ratio of demand')
     parser.add_argument('-th', '--threads', type=int, default  = -1, 
                         help='number of threads')
+    parser.add_argument('-v', '--verbose', action='store_true', default=False,
+                        help='verbose mode')
     args = parser.parse_args(argv)
 
     return args
@@ -50,6 +52,7 @@ def main():
     options.demand_sharable = "true" if args.demand_sharable else "false"
     options.bus_fleet_size = args.bus_fleet
     options.taxi_fleet_size = args.taxi_fleet
+    options.verbose = args.verbose
 
     if(args.demand_factor > 0):
         options.demand_factor = args.demand_factor
