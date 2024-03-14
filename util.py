@@ -390,7 +390,7 @@ def run_simulations_in_background(options):
             # run simulator on new terminal 
             sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
                     "-cp " + \
-                    '"' + get_classpath2(options, False) + '" ' + \
+                    get_classpath2(options, False) + ' ' + \
                     "repast.simphony.batch.BatchMain " + \
                     "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
                     "-interactive " + options.sim_dir + "mets_r.rs "
