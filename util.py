@@ -44,50 +44,50 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
         if l.startswith("NETWORK_LISTEN_PORT"):
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
         elif l.startswith("RH_DEMAND_FILE"):
-            if(options.full_demand == "true"):
-                if(options.sim_passenger == "true"):
+            if(options.full_demand):
+                if(options.sim_passenger):
                     l = "RH_DEMAND_FILE = data/NYC/demand/passenger_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
                 else:
                     l = "RH_DEMAND_FILE = data/NYC/demand/request_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
             else:
-                if(options.sim_passenger == "true"):
+                if(options.sim_passenger):
                     l = "RH_DEMAND_FILE = data/NYC/demand/passenger/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
                 else:
                     l = "RH_DEMAND_FILE =  data/NYC/demand/request/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
         elif l.startswith("ROADS_SHAPEFILE"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "ROADS_SHAPEFILE = data/NYC/facility/road_full/road_fileNYC.shp\n"
             else:
                 l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
         elif l.startswith("LANES_SHAPEFILE"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "LANES_SHAPEFILE = data/NYC/facility/road_full/lane_fileNYC.shp\n"
             else:
                 l = "LANES_SHAPEFILE = data/NYC/facility/road/lane_fileNYC.shp\n"
         elif l.startswith("ROADS_CSV"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "ROADS_CSV = data/NYC/facility/road_full/road_fileNYC.csv\n"
                 options.road_file = options.sim_dir + "/data/NYC/facility/road_full/road_fileNYC.csv"
             else:
                 l = "ROADS_CSV = data/NYC/facility/road/road_fileNYC.csv\n"
                 options.road_file = options.sim_dir + "/data/NYC/facility/road/road_fileNYC.csv"
         elif l.startswith("LANES_CSV"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "LANES_CSV = data/NYC/facility/road_full/lane_fileNYC.csv\n"
             else:
                 l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
         elif l.startswith("RH_SHARE_PERCENTAGE"):
-            if(options.full_demand == "true"):
+            if(options.full_demand):
                 l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
             else:
                 l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
         elif l.startswith("BT_EVENT_FILE"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "BT_EVENT_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
             else:
                 l = "BT_EVENT_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
         elif l.startswith("BT_STD_FILE"):
-            if(options.full_network == "true"):
+            if(options.full_network):
                 l = "BT_STD_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
             else:
                 l = "BT_STD_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
@@ -144,6 +144,8 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
             l = "AGG_DEFAULT_PATH = agg_output" + "\n"
         elif (l.startswith("JSON_DEFAULT_PATH")):
             l = "JSON_DEFAULT_PATH = trajectory_output" + "\n"
+        elif (l.startswith("SYNCHRONIZED")):
+            l = "SYNCHRONIZED = true" + "\n"
         if "data/" in l:
             l = l.replace('data/', src_data_dir + '/')
         f_new.write(l)
@@ -153,7 +155,7 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
 # Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
     src_data_dir = options.sim_dir + "data"
-    if options.full_demand == "true":
+    if options.full_demand:
         prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request_full")
     else:
         prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request")
@@ -170,41 +172,20 @@ def prepare_sim_dirs(options):
         # copy the simulation config files
         dest_data_dir = dir_name + "/" + "data" 
         options.data_dir = dest_data_dir
-        
+
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            
-            try:
-                os.mkdir(dest_data_dir+"/NYC")
-                if options.eco_routing == "true":
-                    if options.full_network == "true":
-                        shutil.copy("eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
-                    else:
-                        shutil.copy("eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            os.mkdir(dest_data_dir+"/NYC")
 
-            except OSError as exc:
-                print(f"ERROR :can not copy the data directory. exception {exc}")
-                sys.exit(-1)
+            if options.eco_routing:
+                if options.full_network:
+                    shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+                    shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+                else:
+                    shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+                    shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], options.scenario_index, options.case_index, i)
-
-# copy necessary files for running the batch run
-# def prepare_sim_dirs_for_batch(options):
-#     # copy the complete_mode.jar in batch_output to the target directory
-#     src_data_dir = options.sim_dir + "batch"
-#     for i in range(options.num_simulations):
-#         # make a directory to run the simulator
-#         dir_name = get_sim_dir(options, i)
-#         if not path.exists(dir_name):
-#             os.makedirs(dir_name)
-#         shutil.copy(src_data_dir + "/complete_model.jar",dir_name + "/complete_model.zip")
-#         # unzip the jar file
-#         with zipfile.ZipFile(dir_name + "/complete_model.zip", 'r') as zip_ref:
-#             zip_ref.extractall(dir_name)
-#         os.remove(dir_name + "/complete_model.zip")
-#     prepare_sim_dirs(options)
 
 # Function for getting the file name list of demand scenarios
 def prepare_scenario_dict(options, path):
@@ -243,32 +224,13 @@ def find_free_ports(options, num_simulations):
 # Read json format configuration 
 def read_run_config(fname):
     with open(fname, "r") as f:
-        config = json.load(f)
+        config = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
 
-    ## Create a namespace to hold the options
-    opts = SimpleNamespace()
-    opts.java_path = config['java_path']
-    opts.java_options = config['java_options']
-    opts.sim_dir = config['sim_dir']
-    # opts.groovy_dir = config['groovy_dir']
-    opts.repast_plugin_dir = config['repast_plugin_dir']
-    opts.num_simulations = int(config['num_sim_instances'])
-    opts.charger_plan = config['charger_plan']
-    opts.full_network = config['full_network']
-    opts.full_demand = config['full_demand']
-    opts.demand_diffusion = config['demand_diffusion']
-    opts.sim_passenger = config['sim_passenger']
-    opts.sim_hour = config['sim_hour']
-    opts.random_seeds = config['random_seeds']
-    opts.num_threads = int(config['num_threads'])
-    opts.demand_factor = float(config['demand_factor'])
-    opts.sim_step_size = float(config['sim_step_size'])
-
-    if len(opts.random_seeds) != opts.num_simulations:
-       print("ERROR , please specify random seeds for all simulation instances")
+    if len(config.random_seeds) != config.num_simulations:
+       print("ERROR, please specify random seeds for all simulation instances")
        sys.exit(-1)
 
-    return opts
+    return config
 
 # Construct the java classpath with all the required jar files. 
 # If includeBin is False it won't add the METS_R/bin directory to classpath.
@@ -277,33 +239,23 @@ def get_classpath(options, includeBin=True, separator=":"):
     
     classpath = ""
 
-    # if not path.exists(options.groovy_dir):
-    #     print(f"ERROR , groovy is not found at {options.groovy_dir}")
-    #     sys.exit(-1)
-    
-    # classpath += options.groovy_dir + "lib/*" + separator
-
     if not path.exists(options.repast_plugin_dir):
         print(f"ERROR , repast plugins not found at {options.repast_plugin_dir}")
         sys.exit(-1)
     
     classpath += options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/bin" + separator + \
-                 options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/lib/*" + separator
+                 options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/lib/*" + separator + \
+                 options.sim_dir + "lib/*" + separator    
+ 
     
-    # classpath += options.sim_dir + separator + \
-    #              options.sim_dir + "lib/*"
-    
-    # if(includeBin):
-    #     classpath += separator + options.sim_dir + "bin"
+
 
     return classpath
 
 def get_classpath2(options, includeBin=True, separator=":"):
     
     classpath = ""
-    # if not path.exists(options.repast_plugin_dir):
-    #     print(f"ERROR , repast plugins not found at {options.repast_plugin_dir}")
-    #     sys.exit(-1)
+
     classpath += options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/bin" + separator + \
                  options.repast_plugin_dir + "repast.simphony.runtime_2.7.0/lib/*" + separator + \
                  options.repast_plugin_dir + "repast.simphony.batch_2.7.0/bin" + separator + \
@@ -321,8 +273,7 @@ def get_classpath2(options, includeBin=True, separator=":"):
                  options.repast_plugin_dir + "repast.simphony.sql_2.7.0/bin" + separator + \
                  options.repast_plugin_dir + "repast.simphony.sql_2.7.0/lib/*" + separator + \
                  options.repast_plugin_dir + "repast.simphony.scenario_2.7.0/bin" + separator 
-    # classpath += "bin/*" + separator + \
-    #              "lib/*"
+
     return classpath
 
 # Function for starting the simulation
@@ -365,7 +316,6 @@ def run_simulations(options):
         os.chdir(cwd)
 
 def run_simulations_in_background(options):
-    # prepare_sim_dirs_for_batch(options)
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
         sim_dir = get_sim_dir(options, i)
@@ -405,9 +355,9 @@ def run_simulations_in_background(options):
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
     sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_seed_" + str(options.random_seeds[i]) + "_"
-    sim_dir += "eco"+"_"+options.eco_routing + "_"
-    sim_dir += "bus"+"_"+options.bus_scheduling + "_"
-    sim_dir += "share"+"_"+options.demand_sharable + "_"
+    sim_dir += "eco"+"_"+str(options.eco_routing) + "_"
+    sim_dir += "bus"+"_"+str(options.bus_scheduling) + "_"
+    sim_dir += "share"+"_"+str(options.demand_sharable) + "_"
     sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
     sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size)
     sim_dir += "_co" if options.cooperative=="true" else ""

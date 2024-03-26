@@ -1,0 +1,70 @@
+version: "0.1"
+
+networks:
+  bridge:
+    driver: bridge
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      bridge:
+        aliases:
+          - zookeeper
+
+  kafka:
+    image: confluentinc/cp-kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL_SAME_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL_SAME_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL_SAME_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      bridge:
+        aliases:
+          - kafka
+
+  init-kafka:
+    image: confluentinc/cp-kafka
+    depends_on:
+      - kafka
+    command: sh -c "echo 'init topics' && /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic link_energy --partitions 1 --replication-factor 1 &&\
+      /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic link_tt --partitions 1 --replication-factor 1 &&\
+      /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic cv2x --partitions 1 --replication-factor 1"
+    networks:
+      bridge:
+        aliases:
+          - init-kafka
+    
+  postgres:
+    build:
+      context: ./postgres
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "5432:5432"
+    networks:
+      - bridge
+
+volumes:
+  settings:
+  data:

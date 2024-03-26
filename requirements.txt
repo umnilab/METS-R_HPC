@@ -5,3 +5,4 @@ seaborn
 geopandas
 gurobipy
 websocket-client
+kafka-python
