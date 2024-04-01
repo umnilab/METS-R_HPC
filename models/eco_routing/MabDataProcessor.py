@@ -18,6 +18,7 @@ class MabDataProcessor:
 
       def process(self):
             messages = self.consumer.poll(timeout_ms=5)
+            print(messages)
 
             if not (messages is None or len(messages) == 0):
                   for key, records in messages.items():

@@ -40,6 +40,9 @@ class RemoteDataClient(threading.Thread):
         self.prev_tick = -1
         self.prev_time = time.time()
 
+        # latest message from the server
+        self.latest_message = None
+
         # Create a listener socket
         self.ws = websocket.WebSocketApp(self.uri,
                                          on_open=self.on_open,
@@ -56,7 +59,7 @@ class RemoteDataClient(threading.Thread):
     # on_message is automatically called when the sever sends a msg
     def on_message(self, ws, message):
         # for debugging
-        # print(f"{self.uri} : {message[0:100]}")
+        print(f"{self.uri} : {message[0:100]}")
 
         # Decode the json string
         decoded_msg = json.loads(str(message))
@@ -69,6 +72,7 @@ class RemoteDataClient(threading.Thread):
             self.handle_step_message(decoded_msg)
         elif decoded_msg['TYPE'].split("_")[0] == "ANS":
             self.handle_answer_message(ws, decoded_msg)
+            self.latest_message = decoded_msg
         elif decoded_msg['TYPE'].split("_")[0] == "ATK":
             self.handle_attack_message(ws, decoded_msg)
             
@@ -139,10 +143,126 @@ class RemoteDataClient(threading.Thread):
         self.prev_time = time.time()
         msg = {'TYPE': 'STEP', 'TICK': tick}
         self.ws.send(json.dumps(msg))
-        
 
     def send_query_message(self, msg):
+        self.prev_time = time.time()
         self.ws.send(json.dumps(msg))
+
+    def process_query_message(self, msg):
+        ans_type = msg['TYPE'].replace("QUERY", "ANS")
+        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type):
+            time.sleep(0.001)
+            if time.time() - self.prev_time > 10:
+                return "Query_failed"
+        res = self.latest_message.copy()
+        self.latest_message = None
+        return res
+    
+    def process_query_message_with_id(self, msg):
+        ans_type = msg['TYPE'].replace("QUERY", "ANS")
+        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type or "ID" not in self.latest_message or self.latest_message['ID'] != msg['ID']):
+            time.sleep(0.001)
+            if time.time() - self.prev_time > 10:
+                return "Query_failed"
+        res = self.latest_message.copy()
+        self.latest_message = None
+        return res
+
+
+    # high level API for sending messages
+    def step(self):
+        while self.current_tick <= self.prev_tick:
+            time.sleep(0.001)
+        self.send_step_message(self.current_tick)
+    
+    # query vehicles
+    def query_vehicle(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_vehicle"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+
+ 
+    # query taxi
+    def query_taxi(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_taxi"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+        
+    # query bus
+    def query_bus(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_bus"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id      
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+
+        
+    # query road
+    def query_road(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_road"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id      
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+
+    # query zone
+    def query_zone(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_zone"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+
+            my_msg["ID"] = id      
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+
+    # query signal
+    def query_signal(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_signal"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id      
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+
+    # query chargingStation
+    def query_chargingStation(self, id = None):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_chargingStation"
+        if id is None:
+            self.send_query_message(my_msg)
+            return self.process_query_message(my_msg)
+        else:
+            my_msg["ID"] = id      
+            self.send_query_message(my_msg)
+            return self.process_query_message_with_id(my_msg)
+        
+
 
     # override __str__ for logging 
     def __str__(self):
