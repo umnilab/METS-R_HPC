@@ -41,7 +41,7 @@ services:
       - kafka
     command: sh -c "echo 'init topics' && /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic link_energy --partitions 1 --replication-factor 1 &&\
       /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic link_tt --partitions 1 --replication-factor 1 &&\
-      /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic cv2x --partitions 1 --replication-factor 1"
+      /bin/kafka-topics --bootstrap-server kafka:9092  --create --if-not-exists --topic bsm --partitions 1 --replication-factor 1"
     networks:
       bridge:
         aliases:

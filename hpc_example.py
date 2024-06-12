@@ -2,19 +2,27 @@ import sys
 import os
 import argparse
 import time
-from RemoteDataClientManager import RemoteDataClientManager
-from util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background
+from runner.HPCRunner import HPCRunner
+from utils.util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background
 
 """
 This is the entrance for METSR-HPC module
-usage example: python main.py -s 0 -c 0 -tf 2000 -bf 20
+usage example: python hpc_example.py -s 0 -c 0 -tf 4000 -bf 40 -e -v
 """
 
-# TODO: Need to state clearly the meaning of the scenarios
+# This script is used to run the METS-R simulation for the NYC case:
+# The scenario is associate with to the different demand patterns.
+# The case is associate with the different days.
+
+# The default demand is from 2019-04-25
+# The full data is available at https://drive.google.com/drive/folders/1r6bsCjGYrg4ckLQeud4yMWfQ8qy85zJS?usp=sharing
+# To use it, copy it to METS_R/data in METS-R_SIM (https://github.com/umnilab/METS-R_SIM)
+# Scenario 0 - Sunday pattern, Scenario 1 - Saturday pattern, Scenario 2 - Weekday pattern, Scenario 3 - Anomalies
+
 
 def get_arguments(argv):
     parser = argparse.ArgumentParser(description='METS-R simulation')
-    parser.add_argument('-r','--run_config', default='configs/run.config.scenario.json',
+    parser.add_argument('-r','--run_config', default='configs/run_hpc_NYC_win.json',
                         help='the folder that contains all the input data')
     parser.add_argument('-s','--scenario_index', type=int, 
                         help='the index of to simulate scenario')
@@ -34,22 +42,15 @@ def get_arguments(argv):
                         help='enable taxi-bus or bus-taxi cooperation')
     parser.add_argument('-ds', '--demand_sharable', action='store_true', default=False,
                         help='whether the request is sharable')
-    parser.add_argument('-df', '--demand_factor', type=float, default  = -1, 
+    parser.add_argument('-df', '--demand_factor', type=float, default  = 1.0, 
                         help='ratio of demand')
-    parser.add_argument('-th', '--threads', type=int, default  = -1, 
-                        help='number of threads')
     parser.add_argument('-v', '--verbose', action='store_true', default=False,
                         help='verbose mode')
     args = parser.parse_args(argv)
 
-    return args
-
-if __name__ ==  "__main__":
-    # Load configs
-    args = get_arguments(sys.argv[1:])
     config = read_run_config(args.run_config)
-    config.case_index = args.case_index
     config.scenario_index = args.scenario_index
+    config.case_index = args.case_index
     config.eco_routing =  args.eco_routing
     config.eco_routing_bus = args.eco_routing_bus
     config.bus_scheduling = args.bus_scheduling
@@ -58,11 +59,13 @@ if __name__ ==  "__main__":
     config.bus_fleet_size = args.bus_fleet
     config.taxi_fleet_size = args.taxi_fleet
     config.verbose = args.verbose
+    config.demand_factor = args.demand_factor
 
-    if(args.demand_factor > 0):
-        config.demand_factor = args.demand_factor
-    if(args.threads > 0):
-        config.num_threads = args.threads
+    return config
+
+if __name__ ==  "__main__":
+    # Load configs
+    config = get_arguments(sys.argv[1:])
     
     print("---------------- HPC options ----------------")
     print(config)
@@ -76,7 +79,7 @@ if __name__ ==  "__main__":
     os.system("docker-compose up -d")
     os.chdir("..")
 
-    time.sleep(5) # wait for the servers to be up
+    time.sleep(10) # wait 10s for the Kafka servers to be up
 
     # Prepare simulation directories
     prepare_sim_dirs(config)
@@ -86,5 +89,5 @@ if __name__ ==  "__main__":
     run_simulations_in_background(config)
     
     # Run RDCM (remote data client manager) 
-    rdcm = RemoteDataClientManager(config)
+    rdcm = HPCRunner(config)
     rdcm.run()

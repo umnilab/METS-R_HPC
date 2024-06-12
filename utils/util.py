@@ -12,7 +12,7 @@ import sys
 import zipfile
 
 """
-Helper functions for METSR-HPC
+Helper functions for METSR-SIM and METSR-HPC
 """
 
 # Function for checking whether the socket connection is on
@@ -33,8 +33,16 @@ def str_list_mapper_gen(func):
     return str_list_mapper
 
 # Function for modifying simulation properties
-def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, case, instance):
-    fname = src_data_dir + "/Data.properties"
+def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, template):
+    fname = src_data_dir + "/Data.properties." + template
+    if not path.exists(fname):
+        print("ERROR, cannot find the property template file at ", fname)
+        sys.exit(-1)
+
+    if options.template == "NYC":
+        scenario = options.scenario_index
+        case = options.case_index
+
     f = open(fname, "r")
     lines = f.readlines()
     f.close()
@@ -43,78 +51,6 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
     for l in lines:
         if l.startswith("NETWORK_LISTEN_PORT"):
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
-        elif l.startswith("RH_DEMAND_FILE"):
-            if(options.full_demand):
-                if(options.sim_passenger):
-                    l = "RH_DEMAND_FILE = data/NYC/demand/passenger_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
-                else:
-                    l = "RH_DEMAND_FILE = data/NYC/demand/request_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
-            else:
-                if(options.sim_passenger):
-                    l = "RH_DEMAND_FILE = data/NYC/demand/passenger/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
-                else:
-                    l = "RH_DEMAND_FILE =  data/NYC/demand/request/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
-        elif l.startswith("ROADS_SHAPEFILE"):
-            if(options.full_network):
-                l = "ROADS_SHAPEFILE = data/NYC/facility/road_full/road_fileNYC.shp\n"
-            else:
-                l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
-        elif l.startswith("LANES_SHAPEFILE"):
-            if(options.full_network):
-                l = "LANES_SHAPEFILE = data/NYC/facility/road_full/lane_fileNYC.shp\n"
-            else:
-                l = "LANES_SHAPEFILE = data/NYC/facility/road/lane_fileNYC.shp\n"
-        elif l.startswith("ROADS_CSV"):
-            if(options.full_network):
-                l = "ROADS_CSV = data/NYC/facility/road_full/road_fileNYC.csv\n"
-                options.road_file = options.sim_dir + "/data/NYC/facility/road_full/road_fileNYC.csv"
-            else:
-                l = "ROADS_CSV = data/NYC/facility/road/road_fileNYC.csv\n"
-                options.road_file = options.sim_dir + "/data/NYC/facility/road/road_fileNYC.csv"
-        elif l.startswith("LANES_CSV"):
-            if(options.full_network):
-                l = "LANES_CSV = data/NYC/facility/road_full/lane_fileNYC.csv\n"
-            else:
-                l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
-        elif l.startswith("RH_SHARE_PERCENTAGE"):
-            if(options.full_demand):
-                l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
-            else:
-                l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
-        elif l.startswith("BT_EVENT_FILE"):
-            if(options.full_network):
-                l = "BT_EVENT_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
-            else:
-                l = "BT_EVENT_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
-        elif l.startswith("BT_STD_FILE"):
-            if(options.full_network):
-                l = "BT_STD_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
-            else:
-                l = "BT_STD_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
-        elif l.startswith("DM_WAITING_TIME"):
-            l = "DM_WAITING_TIME = data/NYC/demand/wait/" + options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
-        elif l.startswith("ECO_ROUTING_EV"):
-            l = "ECO_ROUTING_EV = " + str(options.eco_routing) + "\n"
-        elif l.startswith("NUM_OF_EV"):
-            l = "NUM_OF_EV = " + str(options.taxi_fleet_size) + "\n"
-        elif l.startswith("NUM_OF_BUS"):
-            l = "NUM_OF_BUS = " + str(options.bus_fleet_size) + "\n"
-        # elif "ECO_ROUTING_BUS" in l:
-        #     l = "ECO_ROUTING_BUS = " + str(options.eco_routing) + "\n"
-        elif l.startswith("BUS_PLANNING"):
-            l = "BUS_PLANNING = " + str(options.bus_scheduling) + "\n"
-        elif l.startswith("DEMAND_SHARABLE"):
-            l = "DEMAND_SHARABLE = " + str(options.demand_sharable) + "\n"
-        elif l.startswith("DEMAND_DIFFUSION"):
-            l = "DEMAND_DIFFUSION = " + str(options.demand_diffusion) + "\n"
-        elif l.startswith("DEMAND_FACTOR"):
-            l = "DEMAND_FACTOR = " + str(options.demand_factor) + "\n"
-        elif l.startswith("CHARGER_CSV"):
-            l = "CHARGER_CSV = data/NYC/facility/charging_station/" + options.charger_plan + "\n"
-        elif (l.startswith("BUS_SCHEDULE")) and options.bus_fleet_size >= 20 and options.bus_scheduling == 'false':
-            l = "BUS_SCHEDULE = data/NYC/operation/bus_planning/bus_routes" + str(options.bus_fleet_size // 20) + ".json\n"
-        elif (l.startswith("COLLABORATIVE_EV")):
-            l = "COLLABORATIVE_EV = " + str(options.cooperative) + "\n"
         elif (l.startswith("RANDOM_SEED")):
             l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
         elif (l.startswith("MULTI_THREADING")):
@@ -134,20 +70,90 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
                 l = "N_THREADS = 1" + "\n" 
         elif (l.startswith("SIMULATION_STEP_SIZE")):
             l = "SIMULATION_STEP_SIZE = " + str(options.sim_step_size) + "\n"
-        elif (l.startswith("HOUR_OF_SPEED")):
-            l = "HOUR_OF_SPEED = " + str(options.sim_hour) + "\n"
-        elif (l.startswith("HOUR_OF_DEMAND")):
-            l = "HOUR_OF_DEMAND = " + str(options.sim_hour) + "\n"
         elif (l.startswith("SIMULATION_STOP_TIME")):
-            l = "SIMULATION_STOP_TIME = " + str(round(int(options.sim_hour)*3600/float(options.sim_step_size))) + "\n"
+            l = "SIMULATION_STOP_TIME = " + str(round(int(options.sim_minutes))) + "\n"
         elif (l.startswith("AGG_DEFAULT_PATH")):
             l = "AGG_DEFAULT_PATH = agg_output" + "\n"
         elif (l.startswith("JSON_DEFAULT_PATH")):
             l = "JSON_DEFAULT_PATH = trajectory_output" + "\n"
+        elif (l.startswith("STANDALONE")):
+            l = "STANDALONE = "+ str(options.standalone) + "\n"
         elif (l.startswith("SYNCHRONIZED")):
-            l = "SYNCHRONIZED = true" + "\n"
+            l = "SYNCHRONIZED = " + str(options.synchronized) + "\n"
+
+        if (template  == "NYC"):
+            if l.startswith("RH_DEMAND_FILE"):
+                if(options.full_demand):
+                    if(options.sim_passenger):
+                        l = "RH_DEMAND_FILE = data/NYC/demand/passenger_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                    else:
+                        l = "RH_DEMAND_FILE = data/NYC/demand/request_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                else:
+                    if(options.sim_passenger):
+                        l = "RH_DEMAND_FILE = data/NYC/demand/passenger/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                    else:
+                        l = "RH_DEMAND_FILE =  data/NYC/demand/request/"+options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case]+ "\n"
+            elif l.startswith("ROADS_SHAPEFILE"):
+                if(options.full_network):
+                    l = "ROADS_SHAPEFILE = data/NYC/facility/road_full/road_fileNYC.shp\n"
+                else:
+                    l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
+            elif l.startswith("LANES_SHAPEFILE"):
+                if(options.full_network):
+                    l = "LANES_SHAPEFILE = data/NYC/facility/road_full/lane_fileNYC.shp\n"
+                else:
+                    l = "LANES_SHAPEFILE = data/NYC/facility/road/lane_fileNYC.shp\n"
+            elif l.startswith("ROADS_CSV"):
+                if(options.full_network):
+                    l = "ROADS_CSV = data/NYC/facility/road_full/road_fileNYC.csv\n"
+                    options.road_file = options.sim_dir + "/data/NYC/facility/road_full/road_fileNYC.csv"
+                else:
+                    l = "ROADS_CSV = data/NYC/facility/road/road_fileNYC.csv\n"
+                    options.road_file = options.sim_dir + "/data/NYC/facility/road/road_fileNYC.csv"
+            elif l.startswith("LANES_CSV"):
+                if(options.full_network):
+                    l = "LANES_CSV = data/NYC/facility/road_full/lane_fileNYC.csv\n"
+                else:
+                    l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
+            elif l.startswith("RH_SHARE_PERCENTAGE"):
+                if(options.full_demand):
+                    l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share_full/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+                else:
+                    l = "RH_SHARE_PERCENTAGE = data/NYC/demand/share/" + options.scenarios[scenario] + "/demand_" + options.cases[scenario][case]+ "\n"
+            elif l.startswith("BT_EVENT_FILE"):
+                if(options.full_network):
+                    l = "BT_EVENT_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
+                else:
+                    l = "BT_EVENT_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
+            elif l.startswith("BT_STD_FILE"):
+                if(options.full_network):
+                    l = "BT_STD_FILE = data/NYC/operation/speed_full/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
+                else:
+                    l = "BT_STD_FILE = data/NYC/operation/speed/"+options.scenarios[scenario] + "/speed_std_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
+            elif l.startswith("RH_WAITING_TIME"):
+                l = "RH_WAITING_TIME = data/NYC/demand/wait/" + options.scenarios[scenario] + "/demand_"+ options.cases[scenario][case].replace('json','csv')+ "\n"
+            elif l.startswith("ECO_ROUTING_EV"):
+                l = "ECO_ROUTING_EV = " + str(options.eco_routing) + "\n"
+            elif l.startswith("NUM_OF_EV"):
+                l = "NUM_OF_EV = " + str(options.taxi_fleet_size) + "\n"
+            elif l.startswith("NUM_OF_BUS"):
+                l = "NUM_OF_BUS = " + str(options.bus_fleet_size) + "\n"
+            elif l.startswith("ECO_ROUTING_BUS"):
+                l = "ECO_ROUTING_BUS = " + str(options.eco_routing_bus) + "\n"
+            elif l.startswith("BUS_PLANNING"):
+                l = "BUS_PLANNING = " + str(options.bus_scheduling) + "\n"
+            elif l.startswith("RH_DEMAND_SHARABLE"):
+                l = "RH_DEMAND_SHARABLE = " + str(options.demand_sharable) + "\n"
+            elif l.startswith("RH_DEMAND_FACTOR"):
+                l = "RH_DEMAND_FACTOR = " + str(options.demand_factor) + "\n"
+            elif (l.startswith("BUS_SCHEDULE")) and options.bus_fleet_size >= 20 and options.bus_scheduling == 'false':
+                l = "BUS_SCHEDULE = data/NYC/operation/bus_planning/bus_routes" + str(options.bus_fleet_size // 20) + ".json\n"
+            elif (l.startswith("COLLABORATIVE_EV")):
+                l = "COLLABORATIVE_EV = " + str(options.cooperative) + "\n"
+        
         if "data/" in l:
             l = l.replace('data/', src_data_dir + '/')
+        
         f_new.write(l)
     f_new.close()
 
@@ -155,14 +161,27 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, scenario, c
 # Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
     src_data_dir = options.sim_dir + "data"
-    if options.full_demand:
-        prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request_full")
+    if options.template == "NYC":
+        if options.full_demand:
+            prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request_full")
+        else:
+            prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request")
+    
+    # check if metsr_port in the NameSpace options
+    if hasattr(options, 'metsr_port'):
+        # check if metsr_port number is equal to the number of simulations
+        if options.num_simulations > len(options.metsr_port):
+            print("ERROR , port number is less than the number of simulation instances")
+            sys.exit(-1)
+        else:
+            options.ports = options.metsr_port
     else:
-        prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request")
-    find_free_ports(options, options.num_simulations)
+        print("No port number specified, find available ports for simulation instances")
+        find_free_ports(options, options.num_simulations)
     if len(options.ports) != options.num_simulations:
         print("ERROR , cannot specify port number for all simulation instances")
         sys.exit(-1)
+
     for i in range(options.num_simulations):
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
@@ -175,17 +194,18 @@ def prepare_sim_dirs(options):
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            os.mkdir(dest_data_dir+"/NYC")
+            os.mkdir(dest_data_dir+"/" + options.template)
 
-            if options.eco_routing:
-                if options.full_network:
-                    shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                    shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
-                else:
-                    shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                    shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            if options.template == "NYC":
+                if options.eco_routing:
+                    if options.full_network:
+                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+                    else:
+                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
 
-        modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], options.scenario_index, options.case_index, i)
+        modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
 
 # Function for getting the file name list of demand scenarios
 def prepare_scenario_dict(options, path):
@@ -354,15 +374,19 @@ def run_simulations_in_background(options):
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
-    sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_seed_" + str(options.random_seeds[i]) + "_"
-    sim_dir += "eco"+"_"+str(options.eco_routing) + "_"
-    sim_dir += "bus"+"_"+str(options.bus_scheduling) + "_"
-    sim_dir += "share"+"_"+str(options.demand_sharable) + "_"
-    sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
-    sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size)
-    sim_dir += "_co" if options.cooperative=="true" else ""
-    sim_dir += "_pass" if options.sim_passenger=="true" else ""
-    sim_dir += "_full" if options.full_demand=="true" else ""
-    sim_dir += "_" + str(int(options.demand_factor*100))
-    sim_dir += "_" + str(options.num_threads)
+    if options.template == "NYC":
+        sim_dir = "output/scenario_" + str(options.scenario_index) +"_case_"+ str(options.case_index) + "_seed_" + str(options.random_seeds[i]) + "_"
+        sim_dir += "eco"+"_"+str(options.eco_routing) + "_"
+        sim_dir += "bus"+"_"+str(options.bus_scheduling) + "_"
+        sim_dir += "share"+"_"+str(options.demand_sharable) + "_"
+        sim_dir += "demand"+"_"+str(int(options.demand_factor*100)) + "_"
+        sim_dir += "taxi_" + str(options.taxi_fleet_size) + "_bus_" + str(options.bus_fleet_size)
+        sim_dir += "_co" if options.cooperative=="true" else ""
+        sim_dir += "_pass" if options.sim_passenger=="true" else ""
+        sim_dir += "_full" if options.full_demand=="true" else ""
+        sim_dir += "_" + str(int(options.demand_factor*100))
+        sim_dir += "_" + str(options.num_threads)
+    else:
+        from datetime import datetime
+        sim_dir = "output/"+ options.template + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_seed_" + str(options.random_seeds[i])
     return sim_dir

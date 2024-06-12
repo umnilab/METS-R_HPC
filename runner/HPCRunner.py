@@ -12,20 +12,20 @@ from models.eco_routing.MabManager import MABManager
 from models.bus_scheduling.BusPlanningManager import BusPlanningManager
 from types import SimpleNamespace as SN
 from collections import defaultdict
-from RemoteDataClient import RemoteDataClient
+from clients.METSRClient import METSRClient
 
 """
-Implementation of the RDCM (remote data client manager)
+Implementation of the HPC Runner
 
-RDCM communicates with multiple RDCs (remote data clients) to manage the 
+A  HPC runner communicates with multiple METSRClient to manage the 
 data flow between corresponding simulation instances.
 
 Currently we assume that all simulation instances are ran with the same 
-configurations, which can be extended to cover instances with different
+configurations, which can be extended to cover instances with different 
 settings.
 """
 
-class RemoteDataClientManager:
+class HPCRunner:
     def __init__(self, config):
         # Obtain simulation arguments from the configuration file
         args = {}
@@ -45,7 +45,7 @@ class RemoteDataClientManager:
         
         self.sim_args = SN(**args)
 
-        self.total_hour = int(self.sim_args.SIMULATION_STOP_TIME * self.sim_args.SIMULATION_STEP_SIZE/3600)
+        self.total_hour = int(self.sim_args.SIMULATION_STOP_TIME/60)
 
         self.config = config
 
@@ -53,7 +53,7 @@ class RemoteDataClientManager:
         self.rd_clients = []
     
         for i in range(config.num_simulations):
-            ws_client = RemoteDataClient("localhost", int(config.ports[i]), i, self)
+            ws_client = METSRClient("localhost", int(config.ports[i]), i, self)
             ws_client.start()
             self.rd_clients.append(ws_client)
         print("Created all clients!")
@@ -98,7 +98,7 @@ class RemoteDataClientManager:
                     if rd_client.state == "connected":
                         tmp_tick = rd_client.current_tick
                         if tmp_tick >= 0:
-                            tmp_hour = (tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) // 3600
+                            tmp_hour = int((tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) // 3600)
     
                             if(self.config.eco_routing and tmp_tick > rd_client.prev_tick):
                                 # Process the link energy data

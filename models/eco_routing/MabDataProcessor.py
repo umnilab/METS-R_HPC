@@ -18,17 +18,16 @@ class MabDataProcessor:
 
       def process(self):
             messages = self.consumer.poll(timeout_ms=5)
-            print(messages)
 
             if not (messages is None or len(messages) == 0):
                   for key, records in messages.items():
                         if key.topic == "link_energy":
                               # go through each consumer record
                               for record in records:
-                                    hour = (record.value['utc_time'] * self.manager.args.SIMULATION_STEP_SIZE) // 3600
+                                    hour = int((record.value['utc_time'] * self.manager.args.SIMULATION_STEP_SIZE) // 3600)
                                     if record.value['veh_type'] == 1:
                                           self.manager.mab[hour].updateLinkUCB(record.value['road_id'], record.value['link_energy'])
-                                    elif record.value['veh_type'] == 2:
+                                    elif record.value['veh_type'] == 2 and self.config.eco_routing_bus:
                                           self.manager.mabBus[hour].updateLinkUCB(record.value['road_id'], record.value['link_energy'])
       def process_bus(self):
             messages = self.consumer.poll(timeout_ms=5)
@@ -37,5 +36,5 @@ class MabDataProcessor:
                         if key.topic == "link_tt":
                               # go through each consumer record
                               for record in records:
-                                    hour = (record.value['utc_time'] * self.manager.args.SIMULATION_STEP_SIZE) // 3600
+                                    hour = int((record.value['utc_time'] * self.manager.args.SIMULATION_STEP_SIZE) // 3600)
                                     self.manager.mabBus[hour].updateShadowBus(record.value['road_id'], record.value['travel_time'], record.value['length'])

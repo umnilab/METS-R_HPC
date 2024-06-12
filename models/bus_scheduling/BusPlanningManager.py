@@ -15,7 +15,7 @@ class BusPlanningManager(object):
         # directly use the cached results as the optimization is much slower than the simulator     
         date_sim=args.BT_EVENT_FILE.split("scenario")[1].split("speed_")[1].split(".csv")[0]
         scenario_index=args.BT_EVENT_FILE.split("scenario")[1].split("/speed")[0]                   
-        bus_scheduling_read = "bus_scheduling/offline_cache_cleaned/scenario_"+scenario_index+"_speed_"+date_sim + "_" + str(args.NUM_OF_BUS)+"_bus_scheduling.json"
+        bus_scheduling_read = "models/bus_scheduling/offline_cache_cleaned/scenario_"+scenario_index+"_speed_"+date_sim + "_" + str(args.NUM_OF_BUS)+"_bus_scheduling.json"
         print("Using cached bus schedule from: " + bus_scheduling_read)
         bus_scheduling_read_raw = open(bus_scheduling_read)
         self.busPlanningResults = json.load(bus_scheduling_read_raw)
