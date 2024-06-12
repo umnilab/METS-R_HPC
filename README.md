@@ -1,1 +1,1 @@
-Welcome! This is the repository for the remote controller (HPC module) for [METS-R SIM](https://github.com/umnilab/METS-R_SIM), please refer to the online [document](https://umnilab.github.io/METS-R_doc) for the latest instructions.
+This is the repository for the HPC module of [METS-R SIM](https://github.com/umnilab/METS-R_SIM), please refer to the online [document](https://umnilab.github.io/METS-R_doc) for the latest instructions.
