@@ -121,7 +121,7 @@ class CoSimRunner(object):
                   print(t)
                   if t % 600 == 0:
                         # generate 100 random trips every 1 minute
-                        self.generate_random_trips(100)
+                        self.generate_random_trips(100, start_vid = int(t // 6))
                         print(f"Generated 100 random trips at time {t * self.config.sim_step_size // 60} minute!")
                   self.step()
 
@@ -168,10 +168,10 @@ class CoSimRunner(object):
                                     if tmp_lane != self.carla_veh_lanes[vid]:
                                           # TODO: figure out is to the left or right
                                           if tmp_lane < self.carla_veh_lanes[vid]:
-                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] + 1, new_dist, carla_veh.get_location().x, \
+                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] - 1, new_dist, carla_veh.get_location().x, \
                                                                         carla_veh.get_location().y, private_veh, transform_coords = True)
                                           else:
-                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] - 1, new_dist, carla_veh.get_location().x, \
+                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] + 1, new_dist, carla_veh.get_location().x, \
                                                                         carla_veh.get_location().y, private_veh, transform_coords = True)
                                                 
                                     else:
@@ -226,11 +226,11 @@ class CoSimRunner(object):
             else:
                   print(f"Warning: vehicle {vid} has not enter the co-sim road yet.")
 
-      def generate_random_trips(self, num_trips):
+      def generate_random_trips(self, num_trips, start_vid = 0):
             for vid in range(num_trips):
-                  success = self.metsr.generate_trip(vid)
+                  success = self.metsr.generate_trip(vid + start_vid)
                   while not success:
-                        success = self.metsr.generate_trip(vid) # if the vehicle is not generated successfully, try again
+                        success = self.metsr.generate_trip(vid + start_vid) # if the vehicle is not generated successfully, try again
 
 
 
