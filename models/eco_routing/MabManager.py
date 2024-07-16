@@ -21,7 +21,7 @@ class MABManager(object):
         self.config = config
         self.args=args
 
-        self.total_hour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE/3600)
+        self.total_hour = int(args.SIMULATION_STOP_TIME * args.SIMULATION_STEP_SIZE / 60)
 
         self.received_route_ucb = False
         self.received_route_ucb_bus = False

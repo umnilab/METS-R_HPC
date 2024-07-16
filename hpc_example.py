@@ -85,7 +85,7 @@ if __name__ ==  "__main__":
     prepare_sim_dirs(config)
 
     # Launch the simulations
-    # run_simulations(config)
+    # run_simulations(config) # for debugging
     run_simulations_in_background(config)
     
     # Run RDCM (remote data client manager) 

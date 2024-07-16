@@ -22,7 +22,7 @@ A client directly communicates with a specific METSR-SIM server.
 
 class METSRClient(threading.Thread):
 
-    def __init__(self, host, port, index, manager = None, retry_threshold = 10):
+    def __init__(self, host, port, index, manager = None, retry_threshold = 10, verbose = False):
         super().__init__()
 
         # Websocket config
@@ -32,6 +32,7 @@ class METSRClient(threading.Thread):
         self.index = index
         self.state = "connecting"
         self.retry_threshold = retry_threshold  # time out for resending the same message if no response
+        self.verbose = verbose
 
         # a pointer to the manager
         self.manager = manager
@@ -63,7 +64,8 @@ class METSRClient(threading.Thread):
     # on_message is automatically called when the sever sends a msg
     def on_message(self, ws, message):
         # for debugging
-        # print(f"{self.uri} : {message[0:200]}")
+        if self.verbose:
+            print(f"{self.uri} : {message[0:200]}")
 
         # Decode the json string
         decoded_msg = json.loads(str(message))
@@ -207,9 +209,8 @@ class METSRClient(threading.Thread):
     
    
     # QUERY: inspect the state of the simulator
-
     # By default query public vehicles
-    def query_vehicle(self, id = None, prv = False, tran = False):
+    def query_vehicle(self, id = None, private_veh = False, transform_coords = False):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_vehicle"
         if id is None:
@@ -217,8 +218,8 @@ class METSRClient(threading.Thread):
             return self.process_query_message(my_msg)
         else:
             my_msg["ID"] = id
-            my_msg["PRV"] = prv
-            my_msg["TRAN"] = tran
+            my_msg["PRV"] = private_veh
+            my_msg["TRAN"] = transform_coords
             self.send_query_message(my_msg)
             return self.process_query_message_with_id(my_msg)
 
@@ -297,6 +298,13 @@ class METSRClient(threading.Thread):
             self.send_query_message(my_msg)
             return self.process_query_message_with_id(my_msg)
         
+    # query vehicleID within the co-sim road
+    def query_coSimVehicle(self):
+        my_msg = {}
+        my_msg["TYPE"] = "QUERY_coSimVehicle"
+        self.send_query_message(my_msg)
+        return self.process_query_message(my_msg)
+        
     # CONTROL: change the state of the simulator
     # set the road for co-simulation
     def set_cosim_road(self, roadID):
@@ -304,18 +312,34 @@ class METSRClient(threading.Thread):
         my_msg["TYPE"] = "CTRL_setCoSimRoad"
         my_msg["roadID"] = roadID
         return self.send_control_message(my_msg)
+    
+    # release the road for co-simulation
+    def release_cosim_road(self, roadID):
+        my_msg = {}
+        my_msg["TYPE"] = "CTRL_releaseCoSimRoad"
+        my_msg["roadID"] = roadID
+        return self.send_control_message(my_msg)
         
     # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
-    def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, wait = False):
+    def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, private_veh = False, transform_coords = False):
         my_msg = {}
         my_msg["TYPE"] = "CTRL_teleportVeh"
         my_msg["vehID"] = vehID
         my_msg["roadID"] = roadID
         my_msg["laneID"] = laneID
         my_msg["dist"] = dist
-        my_msg["wait"] = wait
+        my_msg["prv"] = private_veh
         my_msg["x"] = x
         my_msg["y"] = y
+        my_msg["TRAN"] = transform_coords
+        return self.send_control_message(my_msg)
+    
+    # enter the next road
+    def enter_next_road(self, vehID, private_veh = False):
+        my_msg = {}
+        my_msg["TYPE"] = "CTRL_enterNextRoad"
+        my_msg["vehID"] = vehID
+        my_msg["prv"] = private_veh
         return self.send_control_message(my_msg)
     
     # generate a vehicle trip
@@ -335,11 +359,12 @@ class METSRClient(threading.Thread):
 
     
     # control vehicle with specified acceleration  
-    def control_vehicle(self, vehID, acc):
+    def control_vehicle(self, vehID, acc, private_veh = False):
         my_msg = {}
         my_msg["TYPE"] = "CTRL_controlVeh"
         my_msg["vehID"] = vehID
         my_msg["acc"] = acc
+        my_msg["prv"] = private_veh
         return self.send_control_message(my_msg)
         
     # override __str__ for logging 

@@ -6,7 +6,7 @@ from runner.CoSimRunner import CoSimRunner
 from utils.util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background
 from utils.carla_util import open_carla
 
-
+# use case: python cosim_example.py -r configs/run_cosim_CARLAT5_win.json -v
 def get_arguments(argv):
     parser = argparse.ArgumentParser(description='METS-R simulation')
     parser.add_argument('-r','--run_config', default='configs/run_cosim_CARLAT5_win.json',
