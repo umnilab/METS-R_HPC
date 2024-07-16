@@ -89,15 +89,19 @@ class CoSimRunner(object):
             metsr_agent_types = cosim_agents['vtype_list']
 
             # if the agent is in the CARLA sim but not in metsr_agents, remove it from CARLA since this means the agent has reached its destination
+            to_remove = []
             for vid in self.carla_vehs.keys():
                   if vid not in metsr_agents:
-                        self.carla_vehs[vid].set_autopilot(False)
-                        while not self.carla_vehs[vid].destroy():
-                              pass
-                        self.carla_vehs.pop(vid)
-                        self.carla_veh_lanes.pop(vid)
-                        if vid in self.carla_waiting_vehs:
-                              self.carla_waiting_vehs.remove(vid)
+                        to_remove.append(vid)
+
+            for vid in to_remove:
+                  self.carla_vehs[vid].set_autopilot(False)
+                  while not self.carla_vehs[vid].destroy():
+                        pass
+                  self.carla_vehs.pop(vid)
+                  self.carla_veh_lanes.pop(vid)
+                  if vid in self.carla_waiting_vehs:
+                        self.carla_waiting_vehs.remove(vid)
 
             for (vid, vtype) in zip(metsr_agents, metsr_agent_types): # go through all private vehicle agents in the co-sim region
                   # if the agent is in the CARLA co-sim, let it move in CARLA and update its location in METS-R
