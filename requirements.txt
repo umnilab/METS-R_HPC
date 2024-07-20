@@ -7,3 +7,5 @@ geopandas
 gurobipy
 websocket-client
 kafka-python
+adtk
+sklearn
