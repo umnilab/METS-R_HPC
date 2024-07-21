@@ -44,7 +44,6 @@ class AnomalyDetector():
             (PcaAD, {"k": 1}),
             ]
  
-        # TODO: finish and test ech anomaly detection function
         for method, params in methods_with_params:
             detector = method(**params)
             if method == ThresholdAD:
