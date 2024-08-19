@@ -9,4 +9,6 @@ websocket-client
 kafka-python
 adtk
 scikit-learn
-carla
+# should be align with your carla version
+carla == 0.9.13
+ujson

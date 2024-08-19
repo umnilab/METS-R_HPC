@@ -1,7 +1,7 @@
 import carla
 import os
 import time
-
+import platform
 
 def open_carla(config):
       try:
@@ -9,7 +9,10 @@ def open_carla(config):
             client.set_timeout(20.0)
             world = client.load_world(config.carla_map)
       except:
-            os.system(f"start {config.carla_dir} -carla-server -carla-rpc-port={config.carla_port} -windowed -ResX=800 -ResY=600")
+            if platform.system() == "Windows":
+                os.system(f"start {config.carla_dir} -carla-server -carla-rpc-port={config.carla_port} -windowed -ResX=800 -ResY=600")
+            else:
+                os.system(f"bash {config.carla_dir} -carla-server -carla-rpc-port={config.carla_port} -windowed -ResX=800 -ResY=600 &")
             time.sleep(10)
             client = carla.Client(config.carla_host, config.carla_port)
             client.set_timeout(20.0)
