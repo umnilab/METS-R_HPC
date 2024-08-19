@@ -157,10 +157,21 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
         f_new.write(l)
     f_new.close()
 
+def force_copytree(src, dst):
+    """
+    Recursively copy a directory tree, overwriting the destination directory if it exists.
+    """
+    # Check if the destination directory exists
+    if os.path.exists(dst):
+        # Remove the destination directory and all its contents
+        shutil.rmtree(dst)
+    
+    # Copy the source directory to the destination
+    shutil.copytree(src, dst)
+
 # Copy necessary files for running the simulation
-# Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
-    src_data_dir = options.sim_dir + "data"
+    src_data_dir = "data"
     if options.template == "NYC":
         if options.full_demand:
             prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request_full")
@@ -187,16 +198,19 @@ def prepare_sim_dirs(options):
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
             os.makedirs(dir_name)
-        shutil.copy(options.sim_dir+"/log4j.properties", dir_name + "/log4j.properties")
+        shutil.copy(src_data_dir+"/log4j.properties", dir_name + "/log4j.properties")
         # copy the simulation config files
-        dest_data_dir = dir_name + "/" + "data" 
+        dest_data_dir = dir_name + "/" + "data"
         options.data_dir = dest_data_dir
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            os.mkdir(dest_data_dir+"/" + options.template)
+            # os.mkdir(dest_data_dir+"/" + options.template)
 
             if options.template == "NYC":
+                # copy the subdirectories
+                force_copytree(src_data_dir+"/NYC", dest_data_dir+"/NYC")
+
                 if options.eco_routing:
                     if options.full_network:
                         shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
@@ -204,6 +218,9 @@ def prepare_sim_dirs(options):
                     else:
                         shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
                         shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+
+            elif options.template == "CARLA":
+                force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
 
@@ -321,7 +338,7 @@ def run_simulations(options):
         else:
             # go to sim directory
             os.chdir(sim_dir)
-            # run simulator on new terminal 
+            # run simulator on new terminal
             sim_command = options.java_path + "java " + \
                     options.java_options + " " + \
                     "-classpath " + \
@@ -358,7 +375,7 @@ def run_simulations_in_background(options):
             # go to sim directory
             os.chdir(sim_dir)
             # run simulator on new terminal 
-            sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
+            sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
                     "-cp " + \
                     get_classpath2(options, False) + ' ' + \
                     "repast.simphony.batch.BatchMain " + \
@@ -370,6 +387,30 @@ def run_simulations_in_background(options):
                 os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
         # go back to test directory
         os.chdir(cwd)
+
+def run_simulation_in_docker(options):
+    container_ids = []
+    for i in range(0, options.num_simulations):
+        cwd = str(os.getcwd())
+        sim_dir = get_sim_dir(options, i)
+        os.chdir(sim_dir)
+
+        sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
+            "-cp " + \
+            get_classpath2(options, False) + ' ' + \
+            "repast.simphony.batch.BatchMain " + \
+            "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
+            "-interactive " + options.sim_dir + "mets_r.rs"
+        
+        docker_command = f'docker run -d --rm --mount src="{os.getcwd()}",target=/home/test,type=bind --net=host ennuilei/mets-r_sim  /bin/bash -c "cd /home/test && ' + sim_command + '"'
+        result = subprocess.run(docker_command, shell=True, text=True, capture_output=True)
+        if options.verbose:
+            print("Container ID:", result.stdout)
+            print("Error msg:", result.stderr)
+        container_id = result.stdout.strip()
+        container_ids.append(container_id)
+        os.chdir(cwd)
+    return container_ids
 
 
 # Get the directory for storing simulation outputs

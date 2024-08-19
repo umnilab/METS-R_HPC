@@ -3,11 +3,11 @@ import os
 import argparse
 import time
 from runner.HPCRunner import HPCRunner
-from utils.util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background
+from utils.util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background, run_simulation_in_docker
 
 """
 This is the entrance for METSR-HPC module
-usage example: python hpc_example.py -s 0 -c 0 -tf 4000 -bf 40 -e -v
+usage example: python hpc_example.py -s 0 -c 0 -tf 4000 -bf 40 -v
 """
 
 # This script is used to run the METS-R simulation for the NYC case:
@@ -20,9 +20,11 @@ usage example: python hpc_example.py -s 0 -c 0 -tf 4000 -bf 40 -e -v
 # Scenario 0 - Sunday pattern, Scenario 1 - Saturday pattern, Scenario 2 - Weekday pattern, Scenario 3 - Anomalies
 
 
+# TODO: this branch's eco-routing is broken, need to fix it later
+
 def get_arguments(argv):
     parser = argparse.ArgumentParser(description='METS-R simulation')
-    parser.add_argument('-r','--run_config', default='configs/run_hpc_NYC_win.json',
+    parser.add_argument('-r','--run_config', default='configs/run_hpc_NYC_docker.json',
                         help='the folder that contains all the input data')
     parser.add_argument('-s','--scenario_index', type=int, 
                         help='the index of to simulate scenario')
@@ -86,8 +88,9 @@ if __name__ ==  "__main__":
 
     # Launch the simulations
     # run_simulations(config) # for debugging
-    run_simulations_in_background(config)
+    # run_simulations_in_background(config)
+    container_ids = run_simulation_in_docker(config)
     
     # Run RDCM (remote data client manager) 
     rdcm = HPCRunner(config)
-    rdcm.run()
+    rdcm.run(container_ids)

@@ -30,7 +30,7 @@ class HPCRunner:
         # Obtain simulation arguments from the configuration file
         args = {}
 
-        with open(os.path.join(config.data_dir, 'Data.properties'), "r") as f:
+        with open(config.data_dir + '/Data.properties', "r") as f:
             for line in f:
                 if "#" in line:
                     continue
@@ -58,7 +58,7 @@ class HPCRunner:
             self.rd_clients.append(ws_client)
         print("Created all clients!")
 
-    def run(self):
+    def run(self, container_ids):
         ''' 
         ---------- OPERATIONAL ALGS START HERE ------------------------------
         Remarks : 
@@ -144,5 +144,8 @@ class HPCRunner:
         finally:
             os.chdir("docker")
             os.system("docker-compose down")
+            for container_id in container_ids:
+                os.system("docker stop " + container_id)
+            
 
 
