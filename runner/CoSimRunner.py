@@ -48,7 +48,7 @@ class CoSimRunner(object):
 
       def get_carla_location(self, veh_inform):
             # given x, y, find the corresponding z values and rotation in CARLA
-            x, y = veh_inform['x'], veh_inform['y']
+            x, y = veh_inform['x'], -veh_inform['y']
             location = carla.Location(x, y, 0)
             location = snap_to_ground(self.carla, location)
             return location
@@ -66,8 +66,8 @@ class CoSimRunner(object):
                         heading = (- heading + 90) % 360
                   else:
                         heading = (- heading + 270) % 360
-            rotation = carla.Rotation(yaw = heading - 180)
-            return rotation, heading - 180
+            rotation = carla.Rotation(yaw = heading)
+            return rotation, heading
 
 
       def is_in_carla_submap(self, x, y):
@@ -138,7 +138,7 @@ class CoSimRunner(object):
                               self.carla_vehs[vid] = tmp_veh
                               tmp_veh.set_autopilot(True)
 
-                              self.carla_tm.ignore_lights_percentage(tmp_veh,100)
+                              self.carla_tm.ignore_lights_percentage(tmp_veh, 100)
 
                               # set the initial speed to be the same as the METS-R
                               tmp_speed = veh_inform['speed']
@@ -162,7 +162,7 @@ class CoSimRunner(object):
                               if self.is_in_carla_submap(carla_veh.get_location().x, carla_veh.get_location().y):
                                     # update the location in METS-R
                                     # vehID, roadID, laneID, dist, x, y, prv = False):
-                                    dist_travelled = self.get_distance(veh_inform['x'], veh_inform['y'], carla_veh.get_location().x, carla_veh.get_location().y)
+                                    dist_travelled = self.get_distance(veh_inform['x'], -veh_inform['y'], carla_veh.get_location().x, carla_veh.get_location().y)
                                     new_dist = veh_inform['dist'] - dist_travelled
                                     tmp_lane = self.carla.get_map().get_waypoint(carla_veh.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving)).lane_id
                                     if tmp_lane != self.carla_veh_lanes[vid]:

@@ -1,5 +1,3 @@
-version: "0.1"
-
 networks:
   bridge:
     driver: bridge

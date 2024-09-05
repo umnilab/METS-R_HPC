@@ -19,12 +19,12 @@
       "synchronized": true,
       "cosim_road": [-47, 17],
       "min_x": -59.37,
-      "min_y": 15.01,
+      "min_y": -74.92,
       "max_x": -40.56,
-      "max_y": 74.92,
+      "max_y": -15.01,
       "camera_x": -49.79,
-      "camera_y": 8.68,
+      "camera_y": -8.68,
       "camera_z": 20,
-      "camera_yaw": 90,
+      "camera_yaw": -90,
       "template": "CARLA"
 }
