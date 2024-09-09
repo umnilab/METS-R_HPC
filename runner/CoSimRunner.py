@@ -127,16 +127,24 @@ class CoSimRunner(object):
 
             # TODO: synchronize the traffic light status in CARLA using METS-R, in this example, we let all veh ignore CARLA's signal
 
-      def run(self):
-            for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
-                  print(t)
-                  if t == 1000:
-                        self.set_carla_camera(self.carla, self.config)
-                  if t % 600 == 0:
-                        # generate 100 random trips every 1 minute
-                        self.generate_random_trips(100, start_vid = int(t // 6))
-                        print(f"Generated 100 random trips at time {t * self.config.sim_step_size // 60} minute!")
-                  self.step()
+      def run(self, container_ids):
+            try:
+                  for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
+                        print("Tick:", t)
+                        if t == 1000:
+                              self.set_carla_camera(self.carla, self.config)
+                        if t % 600 == 0:
+                              # generate 100 random trips every 1 minute
+                              self.generate_random_trips(100, start_vid = int(t // 6))
+                              print(f"Generated 100 random trips at time {t * self.config.sim_step_size // 60} minute!")
+                        self.step()
+            except KeyboardInterrupt:
+                  print("simulation interrupted by user")
+
+            finally:
+                  for container_id in container_ids:
+                        import os
+                        os.system(f"docker container stop {container_id}")
 
       def get_distance(self, x1, y1, x2, y2):
             return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
