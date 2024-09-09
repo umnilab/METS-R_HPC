@@ -205,7 +205,7 @@ def prepare_sim_dirs(options):
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            # os.mkdir(dest_data_dir+"/" + options.template)
+            force_copytree(src_data_dir+"/Empty", dest_data_dir+"/Empty")
 
             if options.template == "NYC":
                 # copy the subdirectories
