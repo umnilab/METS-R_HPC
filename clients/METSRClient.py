@@ -157,7 +157,7 @@ class METSRClient(threading.Thread):
 
     def tick(self): # synchronized, wait until the simulator finish the corresponding step
         while self.current_tick <= self.prev_tick:
-            time.sleep(0.001)
+            time.sleep(0.002)
         self.send_step_message(self.current_tick)
 
     def send_query_message(self, msg): # asynchronized, other tasks can be done while waiting for the answer
