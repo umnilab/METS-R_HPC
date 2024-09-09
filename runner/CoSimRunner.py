@@ -23,7 +23,8 @@ class CoSimRunner(object):
             self.carla = carla_client.get_world()
             self.carla_client = carla_client
             self.carla_tm = tm_client
-            self.set_carla_camera(self.carla, config)
+            # self.set_carla_camera(self.carla, config)
+            self.set_overlook_camera(self.carla)
 
             self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, self, verbose = config.verbose)
             self.metsr.start()
@@ -46,9 +47,19 @@ class CoSimRunner(object):
             transform.rotation.pitch -= 50
             spectator.set_transform(transform)
 
+      def set_overlook_camera(self, world): # set the camera to overlook the whole map
+            spectator = world.get_spectator()
+            transform = carla.Transform()
+            transform.location.x = 0
+            transform.location.y = 0
+            transform.location.z = 300
+            transform.rotation.yaw = -90
+            transform.rotation.pitch = -90
+            spectator.set_transform(transform)
+
       def get_carla_location(self, veh_inform):
             # given x, y, find the corresponding z values and rotation in CARLA
-            x, y = veh_inform['x'], veh_inform['y']
+            x, y = veh_inform['x'], -veh_inform['y']
             location = carla.Location(x, y, 0)
             location = snap_to_ground(self.carla, location)
             return location
@@ -66,8 +77,8 @@ class CoSimRunner(object):
                         heading = (- heading + 90) % 360
                   else:
                         heading = (- heading + 270) % 360
-            rotation = carla.Rotation(yaw = heading - 180)
-            return rotation, heading - 180
+            rotation = carla.Rotation(yaw = heading)
+            return rotation, heading
 
 
       def is_in_carla_submap(self, x, y):
@@ -116,23 +127,16 @@ class CoSimRunner(object):
 
             # TODO: synchronize the traffic light status in CARLA using METS-R, in this example, we let all veh ignore CARLA's signal
 
-      def run(self, container_ids):
-
-            try:
-                  for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
-                        print("Tick:", t)
-                        if t % 600 == 0:
-                              # generate 100 random trips every 1 minute
-                              self.generate_random_trips(100, start_vid = int(t // 6))
-                              print(f"Generated 100 random trips at time {t * self.config.sim_step_size // 60} minute!")
-                        self.step()
-            except KeyboardInterrupt:
-                  print("simulation interrupted by user")
-
-            finally:
-                  for container_id in container_ids:
-                        import os
-                        os.system(f"docker container stop {container_id}")
+      def run(self):
+            for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
+                  print(t)
+                  if t == 1000:
+                        self.set_carla_camera(self.carla, self.config)
+                  if t % 600 == 0:
+                        # generate 100 random trips every 1 minute
+                        self.generate_random_trips(100, start_vid = int(t // 6))
+                        print(f"Generated 100 random trips at time {t * self.config.sim_step_size // 60} minute!")
+                  self.step()
 
       def get_distance(self, x1, y1, x2, y2):
             return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
@@ -140,14 +144,14 @@ class CoSimRunner(object):
       def sync_carla_vehicle(self, vid, private_veh, veh_inform):
             if veh_inform['on_road']:
                   # if in carla agents
-                  if vid not in self.carla_vehs: # not initializaed yet
+                  if vid not in self.carla_vehs: # not initialized yet
                         tmp_rotation, tmp_heading = self.get_carla_rotation(veh_inform)
                         tmp_veh = self.carla.try_spawn_actor(self.carla.get_blueprint_library().find('vehicle.audi.tt'), carla.Transform(self.get_carla_location(veh_inform), tmp_rotation))
                         if tmp_veh is not None:
                               self.carla_vehs[vid] = tmp_veh
                               tmp_veh.set_autopilot(True)
 
-                              self.carla_tm.ignore_lights_percentage(tmp_veh,100)
+                              self.carla_tm.ignore_lights_percentage(tmp_veh, 100)
 
                               # set the initial speed to be the same as the METS-R
                               tmp_speed = veh_inform['speed']
@@ -167,25 +171,27 @@ class CoSimRunner(object):
                               # already initialized, update its location in METS-R
                               # get the veh
                               carla_veh = self.carla_vehs[vid]
+
+                              # print vehicle info for debugging
+                              # print(f"On lane vehicle {vid} in CARLA: {carla_veh.get_location().x}, {carla_veh.get_location().y}; in METS-R: {veh_inform['x']}, {veh_inform['y']}; distance: {veh_inform['dist']}")
                               # case 1: veh still on the co-sim road
                               if self.is_in_carla_submap(carla_veh.get_location().x, carla_veh.get_location().y):
                                     # update the location in METS-R
                                     # vehID, roadID, laneID, dist, x, y, prv = False):
-                                    dist_travelled = self.get_distance(veh_inform['x'], veh_inform['y'], carla_veh.get_location().x, carla_veh.get_location().y)
+                                    dist_travelled = self.get_distance(veh_inform['x'], -veh_inform['y'], carla_veh.get_location().x, carla_veh.get_location().y)
                                     new_dist = veh_inform['dist'] - dist_travelled
                                     tmp_lane = self.carla.get_map().get_waypoint(carla_veh.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving)).lane_id
                                     if tmp_lane != self.carla_veh_lanes[vid]:
-                                          # TODO: figure out is to the left or right
-                                          if tmp_lane < self.carla_veh_lanes[vid]:
-                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] - 1, new_dist, carla_veh.get_location().x, \
-                                                                        carla_veh.get_location().y, private_veh, transform_coords = True)
-                                          else:
+                                          if tmp_lane < self.carla_veh_lanes[vid]: # move to inner lane
                                                 self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] + 1, new_dist, carla_veh.get_location().x, \
-                                                                        carla_veh.get_location().y, private_veh, transform_coords = True)
-                                                
+                                                                        -carla_veh.get_location().y, private_veh, transform_coords = True)
+                                          else: # move to outer lane
+                                                self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'] - 1, new_dist, carla_veh.get_location().x, \
+                                                                        -carla_veh.get_location().y, private_veh, transform_coords = True)
+                                          self.carla_veh_lanes[vid] = tmp_lane
                                     else:
                                           self.metsr.teleport_vehicle(vid, veh_inform['road'], veh_inform['lane'], new_dist, carla_veh.get_location().x, \
-                                                                        carla_veh.get_location().y, private_veh, transform_coords = True)
+                                                                        -carla_veh.get_location().y, private_veh, transform_coords = True)
                               
                               else:
                                     # case 2: veh enter the other road
@@ -210,25 +216,28 @@ class CoSimRunner(object):
                                           if vid not in self.carla_waiting_vehs:
                                                 self.carla_waiting_vehs.append(vid)
                         else: 
+                              carla_veh = self.carla_vehs[vid]
+                              # print(f"Off lane vehicle {vid} in CARLA: {carla_veh.get_location().x}, {carla_veh.get_location().y}; in METS-R: {veh_inform['x']}, {veh_inform['y']}")
+                              
                               print("Vehicle enters the other road, vid = ", vid)
                               # veh at the intersection and waiting to enter the next road
                               success, msg = self.metsr.enter_next_road(vid, private_veh)
                               if success:
                                     # signal the veh to enter the next road
                                     # if success, remove the veh from CARLA
-                                    self.carla_vehs[vid].set_autopilot(False)
-                                    while not self.carla_vehs[vid].destroy():
-                                          pass
+                                    carla_veh.set_autopilot(False)
+                                    while not carla_veh.destroy():
+                                          continue
                                     self.carla_vehs.pop(vid)
                                     self.carla_veh_lanes.pop(vid)
                                     if vid in self.carla_waiting_vehs:
                                           self.carla_waiting_vehs.remove(vid)
                               else:
                                     # if failed, keep the veh in CARLA but set the vehicle to be static
-                                    self.carla_vehs[vid].set_autopilot(False)
-                                    self.carla_vehs[vid].set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
-                                    self.carla_vehs[vid].apply_control(carla.VehicleControl(throttle = 0, brake = 1))
-                                    self.carla_vehs[vid].enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
+                                    carla_veh.set_autopilot(False)
+                                    carla_veh.set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
+                                    carla_veh.apply_control(carla.VehicleControl(throttle = 0, brake = 1))
+                                    carla_veh.enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
                                     if vid not in self.carla_waiting_vehs:
                                           self.carla_waiting_vehs.append(vid)
 
