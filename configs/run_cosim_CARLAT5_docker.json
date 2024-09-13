@@ -5,7 +5,7 @@
       "repast_plugin_dir" : "/home/Eclipse/plugins/",
       "metsr_host": "localhost",
       "metsr_port": [4000],
-      "carla_dir": "/home/lei/CARLA/CarlaUE4.sh",
+      "carla_dir": "G:/CARLA_0.9.13/WindowsNoEditor/CarlaUE4.exe",
       "carla_host": "127.0.0.1",
       "carla_port": 2000,
       "tm_port": 8000,
@@ -25,6 +25,6 @@
       "camera_x": -49.79,
       "camera_y": -8.68,
       "camera_z": 20,
-      "camera_yaw": 90,
+      "camera_yaw": -90,
       "template": "CARLA"
 }

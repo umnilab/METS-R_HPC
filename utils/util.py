@@ -193,6 +193,8 @@ def prepare_sim_dirs(options):
         print("ERROR , cannot specify port number for all simulation instances")
         sys.exit(-1)
 
+
+    dest_data_dirs = []
     for i in range(options.num_simulations):
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
@@ -223,6 +225,9 @@ def prepare_sim_dirs(options):
                 force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
+        dest_data_dirs.append(dest_data_dir)
+
+    return dest_data_dirs
 
 # Function for getting the file name list of demand scenarios
 def prepare_scenario_dict(options, path):

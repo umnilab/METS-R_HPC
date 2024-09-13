@@ -29,7 +29,7 @@ if __name__ == '__main__':
     time.sleep(10) # wait 10s for the Kafka servers to be up
 
     # Prepare simulation directories
-    prepare_sim_dirs(config)
+    dest_data_dirs = prepare_sim_dirs(config)
 
     # Launch the simulations
     # run_simulations(config)
@@ -39,7 +39,7 @@ if __name__ == '__main__':
     # run_co_simulation
     carla_client, carla_tm = open_carla(config)
 
-    runner = CoSimRunner(config, carla_client, carla_tm)
+    runner = CoSimRunner(config, container_ids, carla_client, carla_tm)
     runner.run(container_ids)
 
 

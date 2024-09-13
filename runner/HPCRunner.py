@@ -26,7 +26,7 @@ settings.
 """
 
 class HPCRunner:
-    def __init__(self, config):
+    def __init__(self, config, docker_ids):
         # Obtain simulation arguments from the configuration file
         args = {}
 
@@ -53,7 +53,7 @@ class HPCRunner:
         self.rd_clients = []
     
         for i in range(config.num_simulations):
-            ws_client = METSRClient("localhost", int(config.ports[i]), i, self, verbose = config.verbose)
+            ws_client = METSRClient("localhost", int(config.ports[i]), i, docker_ids[i], self, verbose = config.verbose)
             ws_client.start()
             self.rd_clients.append(ws_client)
         print("Created all clients!")
@@ -140,7 +140,8 @@ class HPCRunner:
         try:  
             # Wait until all rd_clients finish their work
             for rd_client in self.rd_clients:
-                rd_client.join(timeout=10)
+                rd_client.terminate()
+                
         finally:
             os.chdir("docker")
             os.system("docker-compose down")

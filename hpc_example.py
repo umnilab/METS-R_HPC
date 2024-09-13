@@ -84,7 +84,7 @@ if __name__ ==  "__main__":
     time.sleep(10) # wait 10s for the Kafka servers to be up
 
     # Prepare simulation directories
-    prepare_sim_dirs(config)
+    dest_data_dirs = prepare_sim_dirs(config)
 
     # Launch the simulations
     # run_simulations(config) # for debugging
@@ -92,5 +92,5 @@ if __name__ ==  "__main__":
     container_ids = run_simulation_in_docker(config)
     
     # Run RDCM (remote data client manager) 
-    rdcm = HPCRunner(config)
+    rdcm = HPCRunner(config, container_ids)
     rdcm.run(container_ids)

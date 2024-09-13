@@ -17,7 +17,7 @@ data flow between corresponding simulation instances.
 # The visualization of the submap is done in the CARLA simulator
 # The visualization of the rest maps is done in the METS-R SIM
 class CoSimRunner(object):
-      def __init__(self, config, carla_client, tm_client):
+      def __init__(self, config, docker_ids, carla_client, tm_client):
             self.config = config
 
             self.carla = carla_client.get_world()
@@ -26,7 +26,7 @@ class CoSimRunner(object):
             # self.set_carla_camera(self.carla, config)
             self.set_overlook_camera(self.carla)
 
-            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, self, verbose = config.verbose)
+            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, docker_ids[0], self, verbose = config.verbose)
             self.metsr.start()
 
             # set the co-sim region
@@ -131,7 +131,7 @@ class CoSimRunner(object):
             try:
                   for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
                         print("Tick:", t)
-                        if t == 1000:
+                        if t == 300:
                               self.set_carla_camera(self.carla, self.config)
                         if t % 600 == 0:
                               # generate 100 random trips every 1 minute
@@ -142,6 +142,7 @@ class CoSimRunner(object):
                   print("simulation interrupted by user")
 
             finally:
+                  self.metsr.terminate()
                   for container_id in container_ids:
                         import os
                         os.system(f"docker container stop {container_id}")
