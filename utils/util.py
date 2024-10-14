@@ -207,22 +207,25 @@ def prepare_sim_dirs(options):
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            force_copytree(src_data_dir+"/Empty", dest_data_dir+"/Empty")
+            # copy the entire data directory
+            force_copytree(src_data_dir, dest_data_dir)
 
-            if options.template == "NYC":
-                # copy the subdirectories
-                force_copytree(src_data_dir+"/NYC", dest_data_dir+"/NYC")
+            # force_copytree(src_data_dir+"/Empty", dest_data_dir+"/Empty")
 
-                if options.eco_routing:
-                    if options.full_network:
-                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
-                    else:
-                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            # if options.template == "NYC":
+            #     # copy the subdirectories
+            #     force_copytree(src_data_dir+"/NYC", dest_data_dir+"/NYC")
 
-            elif options.template == "CARLA":
-                force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
+            #     if options.eco_routing:
+            #         if options.full_network:
+            #             shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+            #             shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            #         else:
+            #             shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+            #             shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+
+            # elif options.template == "CARLA":
+            #     force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
         dest_data_dirs.append(dest_data_dir)

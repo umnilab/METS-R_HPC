@@ -26,7 +26,7 @@ class CoSimRunner(object):
             # self.set_carla_camera(self.carla, config)
             self.set_overlook_camera(self.carla)
 
-            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, docker_ids[0], self, verbose = config.verbose)
+            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, self, verbose = config.verbose) #docker_ids[0]
             self.metsr.start()
 
             # set the co-sim region

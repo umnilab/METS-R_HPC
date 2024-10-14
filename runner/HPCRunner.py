@@ -53,7 +53,7 @@ class HPCRunner:
         self.rd_clients = []
     
         for i in range(config.num_simulations):
-            ws_client = METSRClient("localhost", int(config.ports[i]), i, docker_ids[i], self, verbose = config.verbose)
+            ws_client = METSRClient("localhost", int(config.ports[i]), i, self, verbose = config.verbose) # docker_ids[i],
             ws_client.start()
             self.rd_clients.append(ws_client)
         print("Created all clients!")

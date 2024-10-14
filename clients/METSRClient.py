@@ -23,7 +23,7 @@ A client directly communicates with a specific METSR-SIM server.
 
 class METSRClient(threading.Thread):
 
-    def __init__(self, host, port, index, docker_id, manager = None, retry_threshold = 10, verbose = False):
+    def __init__(self, host, port, index, manager = None, retry_threshold = 10, verbose = False):
         super().__init__()
 
         # Websocket config
@@ -34,7 +34,7 @@ class METSRClient(threading.Thread):
         self.state = "connecting"
         self.retry_threshold = retry_threshold  # time out for resending the same message if no response
         self.verbose = verbose
-        self.docker_id = docker_id
+        # self.docker_id = docker_id
 
         # a pointer to the manager
         self.manager = manager
@@ -330,11 +330,11 @@ class METSRClient(threading.Thread):
     # reset the simulation with a property file
     def reset(self, prop_file):
         # print current working directory
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Docker ID: {self.docker_id}")
+        # print(f"Current working directory: {os.getcwd()}")
+        # print(f"Docker ID: {self.docker_id}")
         # copy prop_file (a file) to the sim folder
-        docker_cp_command = f"docker cp data/{prop_file} {self.docker_id}:/home/test/data/"
-        subprocess.run(docker_cp_command, shell=True, check=True)
+        # docker_cp_command = f"docker cp data/{prop_file} {self.docker_id}:/home/test/data/"
+        # subprocess.run(docker_cp_command, shell=True, check=True)
 
         my_msg = {}
         my_msg["TYPE"] = "CTRL_reset"
@@ -348,17 +348,17 @@ class METSRClient(threading.Thread):
         # find the property file for the map
         if map_name == "CARLA":
             # copy CARLA data in the sim folder
-            source_path = "data/CARLA"
+            # source_path = "data/CARLA"
             # specify the property file
             prop_file = "Data.properties.CARLA"
         elif map_name == "NYC":
             # copy NYC data in the sim folder
-            source_path = "data/NYC"
+            # source_path = "data/NYC"
             # specify the property file
             prop_file = "Data.properties.NYC"
 
-        docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
-        subprocess.run(docker_cp_command, shell=True, check=True)
+        # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
+        # subprocess.run(docker_cp_command, shell=True, check=True)
             
         # reset the simulation with the property file
         self.reset(prop_file)
