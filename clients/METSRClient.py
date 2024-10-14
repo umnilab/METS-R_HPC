@@ -163,15 +163,25 @@ class METSRClient(threading.Thread):
         self.send_step_message(self.current_tick)
 
     def send_query_message(self, msg): # asynchronized, other tasks can be done while waiting for the answer
-        time.sleep(0.005) # wait for some time to avoid blocking the message pending
+        # time.sleep(0.005) # wait for some time to avoid blocking the message pending
         while not self.ready:
             time.sleep(1)
 
         self.prev_time = time.time()
         self.ws.send(json.dumps(msg))
 
+        ans_type = msg['TYPE'].replace("QUERY", "ANS") 
+        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type):
+            time.sleep(0.001)
+            if time.time() - self.prev_time > self.retry_threshold:
+                return False, f"Query time out, the message is {msg}"
+        res = self.latest_message.copy()
+        self.latest_message = None
+        return True, res
+
+
     def send_control_message(self, msg): # synchronized, wait until receive the answer
-        time.sleep(0.005) # wait for some time to avoid blocking the message pending
+        # time.sleep(0.005) # wait for some time to avoid blocking the message pending
         while not self.ready:
             time.sleep(1)
 
@@ -179,7 +189,7 @@ class METSRClient(threading.Thread):
         sent_time = time.time()
         # wait until receive the answer or time out
         while(self.latest_message is None or self.latest_message['TYPE'] != msg['TYPE']):
-            time.sleep(0.005)
+            time.sleep(0.001)
             if time.time() - sent_time > self.retry_threshold:
                 return False, f"Control time out, the message is {msg}"
         res = self.latest_message.copy()
@@ -188,124 +198,73 @@ class METSRClient(threading.Thread):
             return True, res
         else:
             return False,  f"Control failed, the reply is {res}"
-
-    def process_query_message(self, msg):
-        ans_type = msg['TYPE'].replace("QUERY", "ANS")
-        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type):
-            time.sleep(0.001)
-            if time.time() - self.prev_time > self.retry_threshold:
-                return "Query failed"
-        res = self.latest_message.copy()
-        self.latest_message = None
-        return res
-    
-    def process_query_message_with_id(self, msg):
-        ans_type = msg['TYPE'].replace("QUERY", "ANS")
-        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type or "ID" not in self.latest_message or self.latest_message['ID'] != msg['ID']):
-            time.sleep(0.001)
-            if time.time() - self.prev_time > self.retry_threshold:
-                return "Query failed"
-        res = self.latest_message.copy()
-        self.latest_message = None
-        return res
-    
    
     # QUERY: inspect the state of the simulator
     # By default query public vehicles
     def query_vehicle(self, id = None, private_veh = False, transform_coords = False):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_vehicle"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id
             my_msg["PRV"] = private_veh
             my_msg["TRAN"] = transform_coords
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        return self.send_query_message(my_msg)
 
  
     # query taxi
     def query_taxi(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_taxi"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        return self.send_query_message(my_msg)
         
     # query bus
     def query_bus(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_bus"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        return self.send_query_message(my_msg)
 
         
     # query road
     def query_road(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_road"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        return self.send_query_message(my_msg)
 
     # query zone
     def query_zone(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_zone"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-
+        if id is not None:
             my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        return self.send_query_message(my_msg)
 
     # query signal
     def query_signal(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_signal" 
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
-
+        return self.send_query_message(my_msg)
+    
     # query chargingStation
     def query_chargingStation(self, id = None):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_chargingStation"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
+        if id is not None:
             my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
-        
+        return self.send_query_message(my_msg)
+    
     # query vehicleID within the co-sim road
     def query_coSimVehicle(self):
         my_msg = {}
         my_msg["TYPE"] = "QUERY_coSimVehicle"
-        self.send_query_message(my_msg)
-        return self.process_query_message(my_msg)
+        return self.send_query_message(my_msg)
         
     # CONTROL: change the state of the simulator
     # set the road for co-simulation
