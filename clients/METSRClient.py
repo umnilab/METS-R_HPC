@@ -127,7 +127,7 @@ class METSRClient(threading.Thread):
     # Method for handle messages
     def handle_step_message(self, decoded_msg):
         tick = decoded_msg['TICK']
-        if tick > self.current_tick: # tick less than current_tick is ignored
+        if tick == self.current_tick + 1: # tick not equal to the current_tick + 1 is ignored
             self.current_tick = tick
 
     def handle_answer_message(self, ws, decoded_msg):
@@ -160,6 +160,7 @@ class METSRClient(threading.Thread):
     def tick(self): # synchronized, wait until the simulator finish the corresponding step
         while self.current_tick <= self.prev_tick:
             time.sleep(0.002)
+
         self.send_step_message(self.current_tick)
 
     def send_query_message(self, msg): # asynchronized, other tasks can be done while waiting for the answer
