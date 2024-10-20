@@ -53,21 +53,21 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
         elif (l.startswith("RANDOM_SEED")):
             l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
-        elif (l.startswith("MULTI_THREADING")):
-            if(options.num_threads > 1):
-                l = "MULTI_THREADING = true"  + "\n"
-            else:
-                l = "MULTI_THREADING = false" + "\n" 
-        elif (l.startswith("N_PARTITION")):
-            if(options.num_threads > 1):
-                l = "N_PARTITION = " + str(options.num_threads) + "\n"
-            else:
-                l = "N_PARTITION = 1" + "\n" 
-        elif (l.startswith("N_THREADS")):
-            if(options.num_threads > 1):
-                l = "N_THREADS = " + str(options.num_threads) + "\n"
-            else:
-                l = "N_THREADS = 1" + "\n" 
+        # elif (l.startswith("MULTI_THREADING")):
+        #     if(options.num_threads > 1):
+        #         l = "MULTI_THREADING = true"  + "\n"
+        #     else:
+        #         l = "MULTI_THREADING = false" + "\n" 
+        # elif (l.startswith("N_PARTITION")):
+        #     if(options.num_threads > 1):
+        #         l = "N_PARTITION = " + str(options.num_threads) + "\n"
+        #     else:
+        #         l = "N_PARTITION = 1" + "\n" 
+        # elif (l.startswith("N_THREADS")):
+        #     if(options.num_threads > 1):
+        #         l = "N_THREADS = " + str(options.num_threads) + "\n"
+        #     else:
+        #         l = "N_THREADS = 1" + "\n" 
         elif (l.startswith("SIMULATION_STEP_SIZE")):
             l = "SIMULATION_STEP_SIZE = " + str(options.sim_step_size) + "\n"
         elif (l.startswith("SIMULATION_STOP_TIME")):
@@ -434,7 +434,7 @@ def get_sim_dir(options, i):
         sim_dir += "_pass" if options.sim_passenger=="true" else ""
         sim_dir += "_full" if options.full_demand=="true" else ""
         sim_dir += "_" + str(int(options.demand_factor*100))
-        sim_dir += "_" + str(options.num_threads)
+        # sim_dir += "_" + str(options.num_threads)
     else:
         from datetime import datetime
         sim_dir = "output/"+ options.template + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_seed_" + str(options.random_seeds[i])
