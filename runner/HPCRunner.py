@@ -26,7 +26,7 @@ settings.
 """
 
 class HPCRunner:
-    def __init__(self, config, docker_ids):
+    def __init__(self, config):
         # Obtain simulation arguments from the configuration file
         args = {}
 
@@ -54,7 +54,6 @@ class HPCRunner:
     
         for i in range(config.num_simulations):
             ws_client = METSRClient("localhost", int(config.ports[i]), i, self, verbose = config.verbose) # docker_ids[i],
-            ws_client.start()
             self.rd_clients.append(ws_client)
         print("Created all clients!")
 

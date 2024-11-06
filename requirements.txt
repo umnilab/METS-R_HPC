@@ -5,10 +5,11 @@ psutil
 seaborn
 geopandas
 gurobipy
-websocket-client
+# websocket-client
 kafka-python
 adtk
 scikit-learn
 # should be align with your carla version
 carla == 0.9.13
 ujson
+websockets
