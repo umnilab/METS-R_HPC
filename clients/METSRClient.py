@@ -20,6 +20,9 @@ A client directly communicates with a specific METSR-SIM server.
 Acknowledgement: Eric Vin for helping with the revision of the code
 """
 
+# TODO: 
+# 2. listerize the query and control function by adding a for loop (is list, go for list, otherwise make it a list with one element)
+
 class METSRClient:
 
     def __init__(self, host, port, index, manager = None, max_connection_attempts = 5, timeout = 30, verbose = False):
@@ -117,9 +120,15 @@ class METSRClient:
     def query_vehicle(self, id = None, private_veh = False, transform_coords = False):
         msg = {"TYPE": "QUERY_vehicle"}
         if id is not None:
-            msg["ID"] = id
-            msg["PRV"] = private_veh
-            msg["TRAN"] = transform_coords
+            msg["DATA"] = []
+            if not isinstance(id, list):
+                id = [id]
+            if not isinstance(private_veh, list):
+                private_veh = [private_veh] * len(id)
+            if not isinstance(transform_coords, list):
+                transform_coords = [transform_coords] * len(id)
+            for veh_id, prv, tran in zip(id, private_veh, transform_coords):
+                msg["DATA"].append({"vehID": veh_id, "vehType": prv, "transformCoord": tran})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_vehicle", res["TYPE"]
@@ -129,7 +138,11 @@ class METSRClient:
     def query_taxi(self, id = None):
         my_msg = {"TYPE": "QUERY_taxi"}
         if id is not None:
-            my_msg["ID"] = id
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
 
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_taxi", res["TYPE"]
@@ -139,7 +152,11 @@ class METSRClient:
     def query_bus(self, id = None):
         my_msg = {"TYPE": "QUERY_bus"}
         if id is not None:
-            my_msg["ID"] = id      
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)      
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_bus", res["TYPE"]
         return res
@@ -149,7 +166,11 @@ class METSRClient:
     def query_road(self, id = None):
         my_msg = {"TYPE": "QUERY_road"}
         if id is not None:
-            my_msg["ID"] = id
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_road", res["TYPE"]
         return res
@@ -158,7 +179,11 @@ class METSRClient:
     def query_zone(self, id = None):
         my_msg = {"TYPE": "QUERY_zone"}
         if id is not None:
-            my_msg["ID"] = id     
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)     
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_zone", res["TYPE"] 
         return res
@@ -167,7 +192,11 @@ class METSRClient:
     def query_signal(self, id = None):
         my_msg = {"TYPE": "QUERY_signal"}
         if id is not None:
-            my_msg["ID"] = id
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_signal", res["TYPE"]
         return res
@@ -176,7 +205,11 @@ class METSRClient:
     def query_chargingStation(self, id = None):
         my_msg = {"TYPE": "QUERY_chargingStation"}
         if id is not None:
-            my_msg["ID"] = id      
+            my_msg['DATA'] = id
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)      
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_chargingStation", res["TYPE"]
         return res
@@ -193,12 +226,17 @@ class METSRClient:
     # generate a vehicle trip
     # TODO: make it work for public vehicle (taxi) as well
     def generate_trip(self, vehID, origin = -1, destination = -1):
-        msg = {
-                "TYPE": "CTRL_generateTrip",
-                "vehID": vehID,
-                "origin": origin,
-                "destination": destination,
-              }
+        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(origin, list):
+            origin = [origin] * len(vehID)
+        if not isinstance(destination, list):
+            destination = [destination] * len(vehID)
+
+        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
+        for vehID, origin, destination in zip(vehID, origin, destination):
+            msg["DATA"].append({"vehID": vehID, "vehType": True, "origin": origin, "destination": destination})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
@@ -208,8 +246,12 @@ class METSRClient:
     def set_cosim_road(self, roadID):
         msg = {
                 "TYPE": "CTRL_setCoSimRoad",
-                "roadID": roadID
+                "DATA": [] 
               }
+        if not isinstance(roadID, list):
+            roadID = [roadID]
+        for i in roadID:
+            msg['DATA'].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_setCoSimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -218,8 +260,12 @@ class METSRClient:
     def release_cosim_road(self, roadID):
         msg = {
                 "TYPE": "CTRL_releaseCoSimRoad",
-                "roadID": roadID
+                "DATA": [] 
               }
+        if not isinstance(roadID, list):
+            roadID = [roadID]
+        for i in roadID:
+            msg['DATA'].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_releaseCoSimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -228,15 +274,21 @@ class METSRClient:
     def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, private_veh = False, transform_coords = False):
         msg = {
                 "TYPE": "CTRL_teleportVeh",
-                "vehID": vehID,
-                "roadID": roadID,
-                "laneID": laneID,
-                "dist": dist,
-                "x": x,
-                "y": y,
-                "prv": private_veh,
-                "TRAN": transform_coords
-            }
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            roadID = [roadID]
+            laneID = [laneID]
+            dist = [dist]
+            x = [x]
+            y = [y]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(transform_coords, list):
+            transform_coords = [transform_coords] * len(vehID)
+        for vehID, roadID, laneID, dist, x, y, private_veh, transform_coords in zip(vehID, roadID, laneID, dist, x, y, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "x": x, "y": y, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -245,9 +297,16 @@ class METSRClient:
     def enter_next_road(self, vehID, private_veh = False):
         msg = {
                 "TYPE": "CTRL_enterNextRoad",
-                "vehID": vehID,
-                "prv": private_veh
-            }
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        
+        for vehID, private_veh in zip(vehID, private_veh):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh})
+
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -256,10 +315,15 @@ class METSRClient:
     def control_vehicle(self, vehID, acc, private_veh = False):
         msg = {
                 "TYPE": "CTRL_controlVeh",
-                "vehID": vehID,
-                "acc": acc,
-                "prv": private_veh
-            }
+                "DATA": []
+        }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            acc = [acc]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        for vehID, acc, private_veh in zip(vehID, acc, private_veh):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "acc": acc})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
