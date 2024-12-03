@@ -195,15 +195,16 @@ def prepare_sim_dirs(options):
 
 
     dest_data_dirs = []
+    options.sim_dirs = []
     for i in range(options.num_simulations):
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
             os.makedirs(dir_name)
+        options.sim_dirs.append(dir_name)
         shutil.copy(src_data_dir+"/log4j.properties", dir_name + "/log4j.properties")
         # copy the simulation config files
         dest_data_dir = dir_name + "/" + "data"
-        options.data_dir = dest_data_dir
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
@@ -400,8 +401,7 @@ def run_simulation_in_docker(options):
     container_ids = []
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
-        sim_dir = get_sim_dir(options, i)
-        os.chdir(sim_dir)
+        os.chdir(options.sim_dirs[i])
 
         sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
             "-cp " + \

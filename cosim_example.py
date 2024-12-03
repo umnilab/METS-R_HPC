@@ -40,6 +40,6 @@ if __name__ == '__main__':
     carla_client, carla_tm = open_carla(config)
 
     runner = CoSimRunner(config, container_ids, carla_client, carla_tm)
-    runner.run(container_ids)
+    runner.run()
 
 

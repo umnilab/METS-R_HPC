@@ -236,12 +236,13 @@ class METSRClient:
 
         assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
         for vehID, origin, destination in zip(vehID, origin, destination):
-            msg["DATA"].append({"vehID": vehID, "vehType": True, "origin": origin, "destination": destination})
+            msg["DATA"].append({"vehID": vehID, "vehType": True, "orig": origin, "dest": destination})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
         assert res["TYPE"] == "CTRL_generateTrip", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
 
     def set_cosim_road(self, roadID):
         msg = {
@@ -255,6 +256,7 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_setCoSimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # release the road for co-simulation
     def release_cosim_road(self, roadID):
@@ -269,6 +271,7 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_releaseCoSimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
         
     # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
     def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, private_veh = False, transform_coords = False):
@@ -292,6 +295,7 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # enter the next road
     def enter_next_road(self, vehID, private_veh = False):
@@ -310,6 +314,7 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # control vehicle with specified acceleration  
     def control_vehicle(self, vehID, acc, private_veh = False):
@@ -327,6 +332,7 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # reset the simulation with a property file
     def reset(self, prop_file):
