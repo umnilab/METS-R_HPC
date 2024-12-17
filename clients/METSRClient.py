@@ -4,6 +4,8 @@
 import datetime
 import json
 import time
+import threading
+
 from websockets.sync.client import connect
 
 from utils.util import *
@@ -68,12 +70,15 @@ class METSRClient:
         # (could be ANS_ready or a heartbeat)
         self.receive_msg(ignore_heartbeats=False)
 
+        self.lock = threading.Lock()
+
     def send_msg(self, msg):
         if self.verbose:
             self._logMessage("SENT", msg)
         self.ws.send(json.dumps(msg))
 
-    def receive_msg(self, ignore_heartbeats):
+    def receive_msg(self, ignore_heartbeats, waiting_forever = True):
+        start_time = time.time()
         while True:
             raw_msg = self.ws.recv(timeout = self.timeout)
 
@@ -83,7 +88,7 @@ class METSRClient:
             if self.verbose:
                 self._logMessage("RECEIVED", msg)
             
-            # EVERY decoded msg must have a MST_TYPE field
+            # EVERY decoded msg must have a TYPE field
             assert "TYPE" in msg.keys(), "No type field in received message"
             assert msg["TYPE"].split("_")[0] in {"STEP", "ANS", "CTRL", "ATK"}, "Uknown message type: " + str(msg["TYPE"])
 
@@ -96,9 +101,26 @@ class METSRClient:
             if not ignore_heartbeats or msg["TYPE"] != "STEP":
                 return msg
             
-    def send_receive_msg(self, msg, ignore_heartbeats):
-        self.send_msg(msg)
-        return self.receive_msg(ignore_heartbeats=ignore_heartbeats)
+            if time.time() - start_time > self.timeout and not waiting_forever:
+                print("Timeout while waiting for message.")
+                return None
+            
+    def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5):
+        with self.lock:
+            res = None
+            num_attempts = 0
+            while res is None:
+                num_attempts += 1
+                self.send_msg(msg)
+                if(max_attempts > 0):
+                    res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
+                    if num_attempts >= max_attempts:
+                        print(f"Failed to receive response after {max_attempts} attempts")
+                        break
+                else:
+                    res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
+                
+        return res
 
     def tick(self):
         assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
@@ -223,7 +245,8 @@ class METSRClient:
         
     # CONTROL: change the state of the simulator
     # set the road for co-simulation
-    # generate a vehicle trip
+    
+    # generate a vehicle trip between origin and destination zones
     # TODO: make it work for public vehicle (taxi) as well
     def generate_trip(self, vehID, origin = -1, destination = -1):
         msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
@@ -243,6 +266,28 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_generateTrip", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+    
+    # generate a vehicle trip between origin and destination roads
+    # TODO: make it work for public vehicle (taxi) as well
+    def generate_trip_between_roads(self, vehID, origin, destination):
+        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(origin, list):
+            origin = [origin] * len(vehID)
+        if not isinstance(destination, list):
+            destination = [destination] * len(vehID)
+
+        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
+        for vehID, origin, destination in zip(vehID, origin, destination):
+            msg["DATA"].append({"vehID": vehID, "vehType": True, "orig": origin, "dest": destination})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+
+        assert res["TYPE"] == "CTRL_genTripBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
 
     def set_cosim_road(self, roadID):
         msg = {
@@ -337,7 +382,7 @@ class METSRClient:
     # reset the simulation with a property file
     def reset(self, prop_file):
         msg = {"TYPE": "CTRL_reset", "propertyFile": prop_file}
-        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True, max_attempts=-1)
 
         assert res["TYPE"] == "CTRL_reset", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -359,6 +404,11 @@ class METSRClient:
             # source_path = "data/NYC"
             # specify the property file
             prop_file = "Data.properties.NYC"
+        elif map_name == "UA":
+            # copy UA data in the sim folder
+            # source_path = "data/UA"
+            # specify the property file
+            prop_file = "Data.properties.UA"
 
         # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
         # subprocess.run(docker_cp_command, shell=True, check=True)
