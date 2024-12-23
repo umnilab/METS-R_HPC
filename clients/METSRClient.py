@@ -270,7 +270,7 @@ class METSRClient:
     # generate a vehicle trip between origin and destination roads
     # TODO: make it work for public vehicle (taxi) as well
     def generate_trip_between_roads(self, vehID, origin, destination):
-        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
+        msg = {"TYPE": "CTRL_genTripBwRoads", "DATA": []}
         if not isinstance(vehID, list):
             vehID = [vehID]
         if not isinstance(origin, list):

@@ -30,7 +30,9 @@ class HPCRunner:
         # Obtain simulation arguments from the configuration file
         args = {}
 
-        with open(config.data_dir + '/Data.properties', "r") as f:
+        print(config)
+
+        with open('data/Data.properties', "r") as f:
             for line in f:
                 if "#" in line:
                     continue
@@ -53,7 +55,7 @@ class HPCRunner:
         self.rd_clients = []
     
         for i in range(config.num_simulations):
-            ws_client = METSRClient("localhost", int(config.ports[i]), i, self, verbose = config.verbose) # docker_ids[i],
+            ws_client = METSRClient("localhost", int(config.ports[i]), i, self, verbose = config.verbose)
             self.rd_clients.append(ws_client)
         print("Created all clients!")
 
@@ -94,43 +96,42 @@ class HPCRunner:
         while continue_flag:
             try:
                 for rd_client in self.rd_clients:
-                    if rd_client.state == "connected":
-                        tmp_tick = rd_client.current_tick
-                        if tmp_tick >= 0:
-                            tmp_hour = int((tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) // 3600)
+                    tmp_tick = rd_client.current_tick
+                    if tmp_tick >= 0:
+                        tmp_hour = int((tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) // 3600)
 
-                            if(tmp_tick > rd_client.prev_tick):
-                                if(self.config.eco_routing):
-                                    # Process the link energy data
-                                    self.mab_manager.mab_data_processor.process()
-                                    # Sending back the eco-routing results every 5 minutes
-                                    if (tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) % 300 == 0:
-                                        res = self.mab_manager.predict(tmp_hour, type = "taxi")
-                                        rd_client.ws.send(json.dumps(res))
-                                                
-                                if(self.config.eco_routing_bus):
-                                    # Process the link energy and link travel time data
-                                    self.mab_manager.mab_data_processor.process_bus()
-                                    # Sending back the bus scheduling results every 5 minutes
-                                    if (tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) % 300 == 0:
-                                        res = self.mab_manager.predict(tmp_hour, type = "bus")
-                                        rd_client.ws.send(json.dumps(res))
-                            
-                                if(self.config.bus_scheduling):
-                                    # Sending back the bus scheduling results every 2 hours
-                                    if tmp_tick % self.sim_args.SIMULATION_BUS_REFRESH_INTERVAL == 0:
-                                        res = self.bus_planning_manager.predict(tmp_hour)
-                                        rd_client.ws.send(json.dumps(res))
+                        if(tmp_tick > rd_client.prev_tick):
+                            if(self.config.eco_routing):
+                                # Process the link energy data
+                                self.mab_manager.mab_data_processor.process()
+                                # Sending back the eco-routing results every 5 minutes
+                                if (tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) % 300 == 0:
+                                    res = self.mab_manager.predict(tmp_hour, type = "taxi")
+                                    rd_client.ws.send(json.dumps(res))
+                                            
+                            if(self.config.eco_routing_bus):
+                                # Process the link energy and link travel time data
+                                self.mab_manager.mab_data_processor.process_bus()
+                                # Sending back the bus scheduling results every 5 minutes
+                                if (tmp_tick * self.sim_args.SIMULATION_STEP_SIZE) % 300 == 0:
+                                    res = self.mab_manager.predict(tmp_hour, type = "bus")
+                                    rd_client.ws.send(json.dumps(res))
+                        
+                            if(self.config.bus_scheduling):
+                                # Sending back the bus scheduling results every 2 hours
+                                if tmp_tick % self.sim_args.SIMULATION_BUS_REFRESH_INTERVAL == 0:
+                                    res = self.bus_planning_manager.predict(tmp_hour)
+                                    rd_client.ws.send(json.dumps(res))
 
-                                # More operational models can be added here
-                                rd_client.send_step_message(tmp_tick)
+                            # More operational models can be added here
+                            rd_client.send_step_message(tmp_tick)
 
-                            # Send back the step function if wait for more than 10 seconds
-                            elif (time.time() - rd_client.prev_time > 10):
-                                rd_client.send_step_message(tmp_tick)
+                        # Send back the step function if wait for more than 10 seconds
+                        elif (time.time() - rd_client.prev_time > 10):
+                            rd_client.send_step_message(tmp_tick)
 
-                            else:
-                                time.sleep(0.001)
+                        else:
+                            time.sleep(0.001)
 
             except Exception as e:
                 traceback.print_exc()

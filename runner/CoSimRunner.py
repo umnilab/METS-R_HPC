@@ -117,7 +117,7 @@ class CoSimRunner(object):
                   # if CARLA agent enter the METS-R map, remove the agent from CARLA and update its loc in METS-R
                   if (vid not in self.carla_waiting_vehs) or (self.metsr.current_tick % 10 == 0):
                         veh_inform = self.metsr.query_vehicle(vid, private_veh = vtype, transform_coords = True)['DATA'][0] # the return value of query_vehicle is a list of vehicle information
-                        print(veh_inform)
+                        # print(veh_inform)
                         self.sync_carla_vehicle(vid, vtype, veh_inform)
 
             # TODO: synchronize the traffic light status in CARLA using METS-R, in this example, we let all veh ignore CARLA's signal
@@ -126,7 +126,7 @@ class CoSimRunner(object):
             try:
                   for t in range(int(self.config.sim_minutes * 60 / self.config.sim_step_size)):
                         print("Tick:", t)
-                        if t == 300:
+                        if t == 1500:
                               self.set_carla_camera(self.carla, self.config)
                         if t % 600 == 0:
                               # generate 100 random trips every 1 minute
@@ -177,11 +177,12 @@ class CoSimRunner(object):
                               carla_veh = self.carla_vehs[vid]
 
                               # check if carla_veh is still in carla
-                              try:
-                                    carla_veh.get_location()
-                              except:
-                                    print(f"Vehicle {vid} has been removed from CARLA ...")
-                                    self.carla_vehs.pop(vid)
+                              # try:
+                              #       carla_veh.get_location()
+                              # except:
+                              #       print(f"Vehicle {vid} has been removed from CARLA ...")
+                              #       self.carla_vehs.pop(vid)
+                              #       return
 
                               # print vehicle info for debugging
                               # print(f"On lane vehicle {vid} in CARLA: {carla_veh.get_location().x}, {carla_veh.get_location().y}; in METS-R: {veh_inform['x']}, {veh_inform['y']}; distance: {veh_inform['dist']}")

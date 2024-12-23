@@ -92,5 +92,5 @@ if __name__ ==  "__main__":
     container_ids = run_simulation_in_docker(config)
     
     # Run RDCM (remote data client manager) 
-    rdcm = HPCRunner(config, container_ids)
+    rdcm = HPCRunner(config)
     rdcm.run(container_ids)
