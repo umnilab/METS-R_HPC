@@ -22,12 +22,11 @@ A client directly communicates with a specific METSR-SIM server.
 Acknowledgement: Eric Vin for helping with the revision of the code
 """
 
-# TODO: 
 # 2. listerize the query and control function by adding a for loop (is list, go for list, otherwise make it a list with one element)
 
 class METSRClient:
 
-    def __init__(self, host, port, index, manager = None, max_connection_attempts = 5, timeout = 30, verbose = False):
+    def __init__(self, host, port, sim_folder = None, manager = None, max_connection_attempts = 5, timeout = 30, verbose = False):
         super().__init__()
 
         # Websocket config
@@ -35,14 +34,18 @@ class METSRClient:
         self.port = port
         self.uri = f"ws://{host}:{port}"
 
-        self.index = index
+        self.sim_folder = sim_folder # this is required for open the visualization server
         self.state = "connecting"
         self.timeout = timeout  # time out for resending the same message if no response
         self.verbose = verbose
         self._messagesLog = []
 
-        # a pointer to the manager
+        # a pointer to the manager, for HPC usage that one manager controls multiple clients
         self.manager = manager
+
+        # visualization server and event
+        self.viz_server = None
+        self.viz_event = None
  
         # Track the tick of the corresponding simulator
         self.current_tick = None
@@ -390,6 +393,14 @@ class METSRClient:
         self.current_tick = -1
         self.tick()
         assert self.current_tick == 0
+
+        # if viz is running, stop and restart it
+        if self.viz_server is not None:
+            self.stop_viz()
+
+        time.sleep(1)
+
+        self.start_viz()
     
     # reset the simulation with a map name
     def reset_map(self, map_name):
@@ -412,7 +423,7 @@ class METSRClient:
 
         # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
         # subprocess.run(docker_cp_command, shell=True, check=True)
-            
+        
         # reset the simulation with the property file
         self.reset(prop_file)
 
@@ -430,6 +441,25 @@ class METSRClient:
             self.ws.close()
             self.ws = None
             self.state = "closed"
+
+        if self.viz_server is not None:
+            self.stop_viz()
+
+
+    # open visualization server
+    def start_viz(self):
+        # obtain the latest directory in the sim_folder/trajectory_output
+        # get the latest directory
+        list_of_files = [os.path.join(self.sim_folder + "/trajectory_output", f) for f in os.listdir(self.sim_folder + "/trajectory_output")]
+        # sort the list of files by creation time
+        latest_directory = max(list_of_files, key=os.path.getmtime)
+        # open the visualization server
+        self.viz_event, self.viz_server = run_visualization_server(latest_directory)
+
+    def stop_viz(self):
+        stop_visualization_server(self.viz_event, self.viz_server)
+        self.viz_event = None
+        self.viz_server = None
     
     def _logMessage(self, direction, msg):
         self._messagesLog.append(
@@ -442,7 +472,7 @@ class METSRClient:
         s = f"-----------\n" \
             f"Client INFO\n" \
             f"-----------\n" \
-            f"index :\t {self.index}\n" \
+            f"output folder :\t {self.sim_folder}\n" \
             f"address :\t {self.uri}\n" \
             f"state :\t {self.state}\n" 
         return s

@@ -10,6 +10,9 @@ from contextlib import closing
 from types import SimpleNamespace
 import sys
 import zipfile
+import threading
+from threading import Event
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 """
 Helper functions for METSR-SIM and METSR-HPC
@@ -229,7 +232,7 @@ def prepare_sim_dirs(options):
             #     force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
-        dest_data_dirs.append(dest_data_dir)
+        dest_data_dirs.append(dest_data_dir[:-5]) # -5 to remove the "/data" part
 
     return dest_data_dirs
 
@@ -326,10 +329,9 @@ def get_classpath2(options, includeBin=True, separator=":"):
 def run_simulations(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
-        sim_dir = get_sim_dir(options, i)
         if platform.system() == "Windows":
              # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
 
             # print(get_classpath(options, False, separator = ";"))
             # run the simulation on a new terminal
@@ -346,7 +348,7 @@ def run_simulations(options):
                 subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
             # run simulator on new terminal
             sim_command = options.java_path + "java " + \
                     options.java_options + " " + \
@@ -364,10 +366,9 @@ def run_simulations(options):
 def run_simulations_in_background(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
-        sim_dir = get_sim_dir(options, i)
         if platform.system() == "Windows":
              # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
             # run the simulation on a new terminal
             sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
                     "-cp " + \
@@ -382,7 +383,7 @@ def run_simulations_in_background(options):
                 subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
             # run simulator on new terminal 
             sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
                     "-cp " + \
@@ -398,7 +399,6 @@ def run_simulations_in_background(options):
         os.chdir(cwd)
 
 def run_simulation_in_docker(options):
-    container_ids = []
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
         os.chdir(options.sim_dirs[i])
@@ -415,11 +415,55 @@ def run_simulation_in_docker(options):
         if options.verbose:
             print("Container ID:", result.stdout)
             print("Error msg:", result.stderr)
-        container_id = result.stdout.strip()
-        container_ids.append(container_id)
+        # container_id = result.stdout.strip()
         os.chdir(cwd)
-    return container_ids
 
+class CORSRequestHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        super().end_headers()
+
+def start_cors_http_server(directory, stop_event, port=8000):
+    """Start a CORS-enabled HTTP server for the specified directory."""
+    os.chdir(directory)  # Change to the specified directory
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, CORSRequestHandler)
+
+    # Set a timeout for the server to periodically check the stop_event
+    httpd.timeout = 1  # Timeout in seconds
+
+    def run_server():
+        print(f"Serving {directory} with CORS enabled on port {port}...")
+        while not stop_event.is_set():
+            httpd.timeout = 1  # Timeout in seconds
+            try:
+                httpd.handle_request()
+            except socket.timeout:
+                pass  # Timeout occurs if no request is received, continue checking stop_event
+    
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    return server_thread
+
+
+def run_visualization_server(data_folder, server_port = 8000):
+    # Ensure the data folder exists
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+        print(f"Created data folder: {data_folder}")
+    
+    # Start the HTTP server in a separate thread
+    stop_event = Event() 
+    server_thread = start_cors_http_server(data_folder, stop_event, server_port)
+
+    return stop_event, server_thread
+
+def stop_visualization_server(stop_event, server_thread):
+    stop_event.set()
+    server_thread.join()
+    print("Visualization server stopped.")
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
@@ -439,3 +483,5 @@ def get_sim_dir(options, i):
         from datetime import datetime
         sim_dir = "output/"+ options.template + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_seed_" + str(options.random_seeds[i])
     return sim_dir
+
+# 
