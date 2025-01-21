@@ -108,22 +108,29 @@ class METSRClient:
                 print("Timeout while waiting for message.")
                 return None
             
-    def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5):
+    def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5): 
         with self.lock:
             res = None
             num_attempts = 0
-            while res is None:
-                num_attempts += 1
-                self.send_msg(msg)
-                if(max_attempts > 0):
-                    res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
-                    if num_attempts >= max_attempts:
-                        print(f"Failed to receive response after {max_attempts} attempts")
-                        break
-                else:
-                    res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
-                
-        return res
+            try:
+                while res is None:
+                    num_attempts += 1
+                    self.send_msg(msg)
+                    if(max_attempts > 0):
+                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
+                        if num_attempts >= max_attempts:
+                            print(f"Failed to receive response after {max_attempts} attempts")
+                            break
+                    else:
+                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
+            except KeyboardInterrupt:
+                print("\nKeyboardInterrupt detected. Stopping the current operation but keeping the server active.")
+                # Reset state or resources if necessary to allow future operations
+                return None  # Return None to indicate the operation was interrupted
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
+                # Optional: Handle other types of exceptions if needed
+            return res
 
     def tick(self):
         assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
