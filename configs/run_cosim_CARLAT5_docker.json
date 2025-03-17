@@ -16,7 +16,7 @@
       "sim_step_size": 0.1,
       "standalone": false,
       "synchronized": true,
-      "cosim_road": [-47, 17],
+      "cosim_road": ["-47", "17"],
       "min_x": -59.37,
       "min_y": -75.72,
       "max_x": -40.56,

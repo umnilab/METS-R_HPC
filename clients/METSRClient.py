@@ -97,7 +97,7 @@ class METSRClient:
 
             # Allow tick()
             if msg["TYPE"] in {"ANS_ready"}:
-                self.current_tick = -1
+                self.current_tick = 0
                 continue
 
             # Return decoded message, if it's not an ignored heartbeat
@@ -132,9 +132,9 @@ class METSRClient:
                 # Optional: Handle other types of exceptions if needed
             return res
 
-    def tick(self):
+    def tick(self, step_num = 1):
         assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
-        msg = {"TYPE": "STEP", "TICK": self.current_tick}
+        msg = {"TYPE": "STEP", "TICK": self.current_tick, "NUM": step_num}
         self.send_msg(msg)
 
         while True:
@@ -142,7 +142,7 @@ class METSRClient:
             res = self.receive_msg(ignore_heartbeats=False)
 
             assert res["TYPE"] == "STEP", res["TYPE"]
-            if res["TICK"] == self.current_tick + 1:
+            if res["TICK"] == self.current_tick + step_num:
                 break
 
         self.current_tick = res["TICK"]
@@ -252,12 +252,10 @@ class METSRClient:
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_coSimVehicle", res["TYPE"]
         return res
-        
-    # CONTROL: change the state of the simulator
-    # set the road for co-simulation
     
+
+    # CONTROL: change the state of the simulator
     # generate a vehicle trip between origin and destination zones
-    # TODO: make it work for public vehicle (taxi) as well
     def generate_trip(self, vehID, origin = -1, destination = -1):
         msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
         if not isinstance(vehID, list):
@@ -269,7 +267,7 @@ class METSRClient:
 
         assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
         for vehID, origin, destination in zip(vehID, origin, destination):
-            msg["DATA"].append({"vehID": vehID, "vehType": True, "orig": origin, "dest": destination})
+            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
@@ -278,7 +276,6 @@ class METSRClient:
         return res
     
     # generate a vehicle trip between origin and destination roads
-    # TODO: make it work for public vehicle (taxi) as well
     def generate_trip_between_roads(self, vehID, origin, destination):
         msg = {"TYPE": "CTRL_genTripBwRoads", "DATA": []}
         if not isinstance(vehID, list):
@@ -290,7 +287,7 @@ class METSRClient:
 
         assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
         for vehID, origin, destination in zip(vehID, origin, destination):
-            msg["DATA"].append({"vehID": vehID, "vehType": True, "orig": origin, "dest": destination})
+            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
@@ -299,6 +296,7 @@ class METSRClient:
         return res
 
 
+    # set the road for co-simulation
     def set_cosim_road(self, roadID):
         msg = {
                 "TYPE": "CTRL_setCoSimRoad",
@@ -328,10 +326,32 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
         
-    # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
-    def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, private_veh = False, transform_coords = False):
+    # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
+    def teleport_cosim_vehicle(self, vehID, roadID, x, y, private_veh = False, transform_coords = False):
         msg = {
-                "TYPE": "CTRL_teleportVeh",
+                "TYPE": "CTRL_teleportCoSimVeh",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            roadID = [roadID]
+            x = [x]
+            y = [y]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(transform_coords, list):
+            transform_coords = [transform_coords] * len(vehID)
+        for vehID, roadID, x, y, private_veh, transform_coords in zip(vehID, roadID, x, y, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "x": x, "y": y, "vehType": private_veh, "transformCoord": transform_coords})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
+    def teleport_trace_replay_vehicle(self, vehID, roadID, laneID, dist, private_veh = False, transform_coords = False):
+        msg = {
+                "TYPE": "CTRL_teleportTraceReplayVeh",
                 "DATA": []
                 }
         if not isinstance(vehID, list):
@@ -339,16 +359,14 @@ class METSRClient:
             roadID = [roadID]
             laneID = [laneID]
             dist = [dist]
-            x = [x]
-            y = [y]
         if not isinstance(private_veh, list):
             private_veh = [private_veh] * len(vehID)
         if not isinstance(transform_coords, list):
             transform_coords = [transform_coords] * len(vehID)
-        for vehID, roadID, laneID, dist, x, y, private_veh, transform_coords in zip(vehID, roadID, laneID, dist, x, y, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "x": x, "y": y, "vehType": private_veh, "transformCoord": transform_coords})
+        for vehID, roadID, laneID, dist, private_veh, transform_coords in zip(vehID, roadID, laneID, dist, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_teleportVeh", res["TYPE"]
+        assert res["TYPE"] == "CTRL_teleportTraceReplayVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
@@ -376,7 +394,7 @@ class METSRClient:
         msg = {
                 "TYPE": "CTRL_controlVeh",
                 "DATA": []
-        }
+                }
         if not isinstance(vehID, list):
             vehID = [vehID]
             acc = [acc]
@@ -388,6 +406,132 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+    
+    # dispatch taxi
+    def dispatch_taxi(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_dispatchTaxi",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_dispatchTaxi", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def dispatch_taxi_between_roads(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_dispTaxiBwRoads",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_dispTaxiBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_taxi_requests(self, zoneID, dest, num):
+        msg = {
+                "TYPE": "CTRL_addTaxiRequests",
+                "DATA": []
+                }
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, dest, num in zip(zoneID, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxiRequests", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_taxi_requests_between_roads(self, zoneID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_addTaxiReqBwRoads",
+                "DATA": []
+                }
+        if not isinstance(orig, list):
+            orig = [orig]
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID] * len(orig)
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, orig, dest, num in zip(zoneID, orig, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxiReqBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+
+    # assign bus
+    def assign_request_to_bus(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_assignRequestToBus",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_assignRequestToBus", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_bus_requests(self, zoneID, dest, num):
+        msg = {
+                "TYPE": "CTRL_addBusRequests",
+                "DATA": []
+                }
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, dest, num in zip(zoneID, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBusRequests", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
     
     # reset the simulation with a property file
     def reset(self, prop_file):
