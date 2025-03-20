@@ -132,14 +132,14 @@ class METSRClient:
                 # Optional: Handle other types of exceptions if needed
             return res
 
-    def tick(self, step_num = 1):
+    def tick(self, step_num = 1, wait_forever = False):
         assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
         msg = {"TYPE": "STEP", "TICK": self.current_tick, "NUM": step_num}
         self.send_msg(msg)
 
         while True:
             # Move through messages until we get to an up to date heartbeat
-            res = self.receive_msg(ignore_heartbeats=False)
+            res = self.receive_msg(ignore_heartbeats=False, waiting_forever=wait_forever)
 
             assert res["TYPE"] == "STEP", res["TYPE"]
             if res["TICK"] == self.current_tick + step_num:
@@ -170,7 +170,7 @@ class METSRClient:
     def query_taxi(self, id = None):
         my_msg = {"TYPE": "QUERY_taxi"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -184,7 +184,7 @@ class METSRClient:
     def query_bus(self, id = None):
         my_msg = {"TYPE": "QUERY_bus"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -198,7 +198,7 @@ class METSRClient:
     def query_road(self, id = None):
         my_msg = {"TYPE": "QUERY_road"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -211,7 +211,7 @@ class METSRClient:
     def query_zone(self, id = None):
         my_msg = {"TYPE": "QUERY_zone"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -224,7 +224,7 @@ class METSRClient:
     def query_signal(self, id = None):
         my_msg = {"TYPE": "QUERY_signal"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -237,7 +237,7 @@ class METSRClient:
     def query_chargingStation(self, id = None):
         my_msg = {"TYPE": "QUERY_chargingStation"}
         if id is not None:
-            my_msg['DATA'] = id
+            my_msg['DATA'] = []
             if not isinstance(id, list):
                 id = [id]
             for i in id:
@@ -349,7 +349,7 @@ class METSRClient:
         return res
     
     # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
-    def teleport_trace_replay_vehicle(self, vehID, roadID, laneID, dist, private_veh = False, transform_coords = False):
+    def teleport_trace_replay_vehicle(self, vehID, roadID, laneID, dist, private_veh = False):
         msg = {
                 "TYPE": "CTRL_teleportTraceReplayVeh",
                 "DATA": []
@@ -361,10 +361,8 @@ class METSRClient:
             dist = [dist]
         if not isinstance(private_veh, list):
             private_veh = [private_veh] * len(vehID)
-        if not isinstance(transform_coords, list):
-            transform_coords = [transform_coords] * len(vehID)
-        for vehID, roadID, laneID, dist, private_veh, transform_coords in zip(vehID, roadID, laneID, dist, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "vehType": private_veh, "transformCoord": transform_coords})
+        for vehID, roadID, laneID, dist, private_veh in zip(vehID, roadID, laneID, dist, private_veh):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "vehType": private_veh})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportTraceReplayVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -404,6 +402,25 @@ class METSRClient:
             msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "acc": acc})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # update the sensor type of specified vehicle
+    def update_vehicle_sensor_type(self, vehID, sensorType, private_veh = False):
+        msg = {
+                "TYPE": "CTRL_updateVehicleSensorType",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(sensorType, list):
+            sensorType = [sensorType] * len(vehID)
+        for vehID, sensorType, private_veh in zip(vehID, sensorType, private_veh):
+            msg["DATA"].append({"vehID": vehID, "sensorType": sensorType, "vehType": private_veh})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateVehicleSensorType", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
@@ -549,9 +566,9 @@ class METSRClient:
         if self.viz_server is not None:
             self.stop_viz()
 
-        time.sleep(1)
+            time.sleep(1) # wait for five secs if start viz
 
-        self.start_viz()
+            self.start_viz()
     
     # reset the simulation with a map name
     def reset_map(self, map_name):
@@ -608,7 +625,8 @@ class METSRClient:
         self.viz_event, self.viz_server = run_visualization_server(latest_directory)
 
     def stop_viz(self):
-        stop_visualization_server(self.viz_event, self.viz_server)
+        if self.viz_server is not None:
+            stop_visualization_server(self.viz_event, self.viz_server)
         self.viz_event = None
         self.viz_server = None
     

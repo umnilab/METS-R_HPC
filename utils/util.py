@@ -83,7 +83,9 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
             l = "STANDALONE = "+ str(options.standalone) + "\n"
         elif (l.startswith("SYNCHRONIZED")):
             l = "SYNCHRONIZED = " + str(options.synchronized) + "\n"
-
+        elif (l.startswith("V2X")):
+            l = "V2X = " + str(options.v2x) + "\n"
+            
         if (template  == "NYC"):
             if l.startswith("RH_DEMAND_FILE"):
                 if(options.full_demand):
@@ -449,6 +451,8 @@ def start_cors_http_server(directory, stop_event, port=8000):
 
 
 def run_visualization_server(data_folder, server_port = 8000):
+    # store the current work directory
+    workdir = os.getcwd()
     # Ensure the data folder exists
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
@@ -457,6 +461,9 @@ def run_visualization_server(data_folder, server_port = 8000):
     # Start the HTTP server in a separate thread
     stop_event = Event() 
     server_thread = start_cors_http_server(data_folder, stop_event, server_port)
+
+    # recovery the work directory
+    os.chdir(workdir)
 
     return stop_event, server_thread
 
