@@ -1,14 +1,14 @@
 # remote data client interface. Each RDClient runs in a separate thread
 # run() method  
 
-import websocket
-import ujson as json # faster json according to https://artem.krylysov.com/blog/2015/09/29/benchmark-python-json-libraries/ 
-import threading
-from contextlib import closing
-from threading import Lock
-from utils.util import check_socket, str_list_mapper_gen
+import datetime
+import json
 import time
-import os
+import threading
+
+from websockets.sync.client import connect
+
+from utils.util import *
 
 str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
@@ -18,361 +18,630 @@ str_list_to_float_list = str_list_mapper_gen(float)
 Implementation of the remote data client
 
 A client directly communicates with a specific METSR-SIM server.
+
+Acknowledgement: Eric Vin for helping with the revision of the code
 """
 
-class METSRClient(threading.Thread):
+# 2. listerize the query and control function by adding a for loop (is list, go for list, otherwise make it a list with one element)
 
-    def __init__(self, host, port, index, manager = None, retry_threshold = 10, verbose = False):
+class METSRClient:
+
+    def __init__(self, host, port, sim_folder = None, manager = None, max_connection_attempts = 5, timeout = 30, verbose = False):
         super().__init__()
 
         # Websocket config
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}"
-        self.index = index
-        self.state = "connecting"
-        self.retry_threshold = retry_threshold  # time out for resending the same message if no response
-        self.verbose = verbose
 
-        # a pointer to the manager
+        self.sim_folder = sim_folder # this is required for open the visualization server
+        self.state = "connecting"
+        self.timeout = timeout  # time out for resending the same message if no response
+        self.verbose = verbose
+        self._messagesLog = []
+
+        # a pointer to the manager, for HPC usage that one manager controls multiple clients
         self.manager = manager
+
+        # visualization server and event
+        self.viz_server = None
+        self.viz_event = None
  
         # Track the tick of the corresponding simulator
-        self.current_tick = -1
-        self.prev_tick = -1
-        self.prev_time = time.time()
+        self.current_tick = None
 
-        # latest message from the server
-        self.latest_message = None
+        # Establish connection
+        failed_attempts = 0
+        while True:
+            try:
+                self.ws = connect(self.uri)
+                self.state = "connected"
+                if self.verbose:
+                    print(f"Connected to {self.uri}")
+                break
+            except ConnectionRefusedError:
+                print(f"Attempt to connect to {self.uri} failed. "
+                      f"Waiting for 10 seconds before trying again... "
+                      f"({max_connection_attempts - failed_attempts} attempts remaining)")
+                failed_attempts += 1
+                if failed_attempts >= max_connection_attempts:
+                    self.state = "failed"
+                    raise RuntimeError("Could not connect to METS-R Sim")
+                time.sleep(10)
 
-        # Create a listener socket
-        self.ws = websocket.WebSocketApp(self.uri,
-                                         on_open=self.on_open,
-                                         on_message=self.on_message,
-                                         on_error=self.on_error,
-                                         on_close=self.on_close)
-        
-        # A flag to indicate whether the simulation is ready
-        self.ready = False
+        # Ensure server is initialized by waiting to receive an initial packet
+        # (could be ANS_ready or a heartbeat)
+        self.receive_msg(ignore_heartbeats=False)
 
-        # Data maps can be accessed by both main thread (for ML algorithms)
-        # and RDClient class. Therefore synchronization is needed to avoid data races.
-        # If the main thread only does reads, the lock can be removed safely
-        self.lock = Lock()
+        self.lock = threading.Lock()
 
-
-    # on_message is automatically called when the sever sends a msg
-    def on_message(self, ws, message):
-        # for debugging
+    def send_msg(self, msg):
         if self.verbose:
-            print(f"{self.uri} : {message[0:200]}")
+            self._logMessage("SENT", msg)
+        self.ws.send(json.dumps(msg))
 
-        # Decode the json string
-        decoded_msg = json.loads(str(message))
+    def receive_msg(self, ignore_heartbeats, waiting_forever = True):
+        start_time = time.time()
+        while True:
+            raw_msg = self.ws.recv(timeout = self.timeout)
 
-        # Every decoded msg must have a MSG_TYPE field
-        assert 'TYPE' in decoded_msg.keys(), "No TYPE field in received json string!"
+            # Decode the json string
+            msg = json.loads(str(raw_msg))
 
-        # handle decoded msg based on MSG_TYPE
-        if decoded_msg['TYPE'] == "STEP":
-            self.handle_step_message(decoded_msg)
-        elif decoded_msg['TYPE'].split("_")[0] == "ANS":
-            self.handle_answer_message(ws, decoded_msg)
-            self.latest_message = decoded_msg
-        elif decoded_msg['TYPE'].split("_")[0] == "ATK":
-            self.handle_attack_message(ws, decoded_msg)
-        elif decoded_msg['TYPE'].split("_")[0] == "CTRL":
-            self.latest_message = decoded_msg
+            if self.verbose:
+                self._logMessage("RECEIVED", msg)
             
-    def on_error(self, ws, error):
-        self.state = "error"
-        print(error)
+            # EVERY decoded msg must have a TYPE field
+            assert "TYPE" in msg.keys(), "No type field in received message"
+            assert msg["TYPE"].split("_")[0] in {"STEP", "ANS", "CTRL", "ATK"}, "Uknown message type: " + str(msg["TYPE"])
 
-    def on_close(self, ws, status_code, close_msg):
-        self.state = "closed"
-        print(f"{self.uri} : connection closed")
+            # Allow tick()
+            if msg["TYPE"] in {"ANS_ready"}:
+                self.current_tick = 0
+                continue
 
-    def on_open(self, ws):
-        self.state = "connected"
-        print(f"{self.uri} : connection opened")
+            # Return decoded message, if it's not an ignored heartbeat
+            if not ignore_heartbeats or msg["TYPE"] != "STEP":
+                return msg
+            
+            if time.time() - start_time > self.timeout and not waiting_forever:
+                print("Timeout while waiting for message.")
+                return None
+            
+    def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5): 
+        with self.lock:
+            res = None
+            num_attempts = 0
+            try:
+                while res is None:
+                    num_attempts += 1
+                    self.send_msg(msg)
+                    if(max_attempts > 0):
+                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
+                        if num_attempts >= max_attempts:
+                            print(f"Failed to receive response after {max_attempts} attempts")
+                            break
+                    else:
+                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
+            except KeyboardInterrupt:
+                print("\nKeyboardInterrupt detected. Stopping the current operation but keeping the server active.")
+                # Reset state or resources if necessary to allow future operations
+                return None  # Return None to indicate the operation was interrupted
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
+                # Optional: Handle other types of exceptions if needed
+            return res
 
-    # run() method implements what RemoteDataClient will be doing during its lifetime
-    def run(self):
-        print(f"Waiting until the server is up at {self.uri}")
+    def tick(self, step_num = 1, wait_forever = False):
+        assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
+        msg = {"TYPE": "STEP", "TICK": self.current_tick, "NUM": step_num}
+        self.send_msg(msg)
 
-        # all clients are disconnected
-        wait_time = 0
+        while True:
+            # Move through messages until we get to an up to date heartbeat
+            res = self.receive_msg(ignore_heartbeats=False, waiting_forever=wait_forever)
 
-        # wait until the server is up, or timeout after 60 seconds
-        while not check_socket(self.host, self.port):
-            # count the real-world seconds 
-            wait_time += 1
-            if wait_time > 20:
-                print(f"Waiting for the server to be up at {self.uri}.. time out in {60-wait_time} seconds..")
-            if wait_time > 60:
-                print("Waiting overtime, please check the connection and restart the simulation.")
-                # close the connection
-                self.ws.close()
-                os.chdir("docker")
-                os.system("docker-compose down")
+            assert res["TYPE"] == "STEP", res["TYPE"]
+            if res["TICK"] == self.current_tick + step_num:
                 break
 
-        if wait_time <= 60:
-            print(f"Sever is active at {self.uri},  running client..")
-            self.ws.run_forever()
-
-                    
-    # Method for handle messages
-    def handle_step_message(self, decoded_msg):
-        tick = decoded_msg['TICK']
-        if tick > self.current_tick: # tick less than current_tick is ignored
-            self.current_tick = tick
-
-    def handle_answer_message(self, ws, decoded_msg):
-        if decoded_msg['TYPE'] == "ANS_ready":
-            print("SIM is ready!!")
-            self.ready = True
-        elif decoded_msg['TYPE'] == "ANS_TaxiUCB":
-            size = int(decoded_msg['SIZE'])
-            candidate_paths = {}
-            od = decoded_msg['OD']
-            candidate_paths[od] = decoded_msg['road_lists']
-            self.manager.mab_manager.initialize(candidate_paths, size, type = 'taxi')
-        elif decoded_msg['TYPE'] == "ANS_BusUCB":
-            size = int(decoded_msg['SIZE'])
-            candidate_paths = {}
-            bod = decoded_msg['BOD']
-            candidate_paths[bod] = decoded_msg['road_lists']
-            self.manager.mab_manager.initialize(candidate_paths, size, type = 'bus')
-
-    def handle_attack_message(self, ws, decoded_msg):
-        # placeholder for handling attacker's control
-        pass
-
-    def send_step_message(self, tick): # helper function for sending step message
-        self.prev_tick = tick
-        self.prev_time = time.time()
-        msg = {'TYPE': 'STEP', 'TICK': tick}
-        self.ws.send(json.dumps(msg))
-
-    def tick(self): # synchronized, wait until the simulator finish the corresponding step
-        while self.current_tick <= self.prev_tick:
-            time.sleep(0.002)
-        self.send_step_message(self.current_tick)
-
-    def send_query_message(self, msg): # asynchronized, other tasks can be done while waiting for the answer
-        time.sleep(0.005) # wait for some time to avoid blocking the message pending
-        while not self.ready:
-            time.sleep(1)
-
-        self.prev_time = time.time()
-        self.ws.send(json.dumps(msg))
-
-    def send_control_message(self, msg): # synchronized, wait until receive the answer
-        time.sleep(0.005) # wait for some time to avoid blocking the message pending
-        while not self.ready:
-            time.sleep(1)
-
-        self.ws.send(json.dumps(msg))
-        sent_time = time.time()
-        # wait until receive the answer or time out
-        while(self.latest_message is None or self.latest_message['TYPE'] != msg['TYPE']):
-            time.sleep(0.005)
-            if time.time() - sent_time > self.retry_threshold:
-                return False, f"Control time out, the message is {msg}"
-        res = self.latest_message.copy()
-        self.latest_message = None 
-        if res['CODE'] == "OK":
-            return True, res
-        else:
-            return False,  f"Control failed, the reply is {res}"
-
-    def process_query_message(self, msg):
-        ans_type = msg['TYPE'].replace("QUERY", "ANS")
-        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type):
-            time.sleep(0.001)
-            if time.time() - self.prev_time > self.retry_threshold:
-                return "Query failed"
-        res = self.latest_message.copy()
-        self.latest_message = None
-        return res
-    
-    def process_query_message_with_id(self, msg):
-        ans_type = msg['TYPE'].replace("QUERY", "ANS")
-        while(self.latest_message is None or self.latest_message['TYPE'] != ans_type or "ID" not in self.latest_message or self.latest_message['ID'] != msg['ID']):
-            time.sleep(0.001)
-            if time.time() - self.prev_time > self.retry_threshold:
-                return "Query failed"
-        res = self.latest_message.copy()
-        self.latest_message = None
-        return res
-    
+        self.current_tick = res["TICK"]
    
     # QUERY: inspect the state of the simulator
     # By default query public vehicles
     def query_vehicle(self, id = None, private_veh = False, transform_coords = False):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_vehicle"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id
-            my_msg["PRV"] = private_veh
-            my_msg["TRAN"] = transform_coords
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        msg = {"TYPE": "QUERY_vehicle"}
+        if id is not None:
+            msg["DATA"] = []
+            if not isinstance(id, list):
+                id = [id]
+            if not isinstance(private_veh, list):
+                private_veh = [private_veh] * len(id)
+            if not isinstance(transform_coords, list):
+                transform_coords = [transform_coords] * len(id)
+            for veh_id, prv, tran in zip(id, private_veh, transform_coords):
+                msg["DATA"].append({"vehID": veh_id, "vehType": prv, "transformCoord": tran})
 
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_vehicle", res["TYPE"]
+        return res
  
     # query taxi
     def query_taxi(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_taxi"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        my_msg = {"TYPE": "QUERY_taxi"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
+
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_taxi", res["TYPE"]
+        return res
         
     # query bus
     def query_bus(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_bus"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        my_msg = {"TYPE": "QUERY_bus"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)      
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_bus", res["TYPE"]
+        return res
 
         
     # query road
     def query_road(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_road"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        my_msg = {"TYPE": "QUERY_road"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_road", res["TYPE"]
+        return res
 
     # query zone
     def query_zone(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_zone"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-
-            my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
+        my_msg = {"TYPE": "QUERY_zone"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)     
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_zone", res["TYPE"] 
+        return res
 
     # query signal
     def query_signal(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_signal" 
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
-
+        my_msg = {"TYPE": "QUERY_signal"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_signal", res["TYPE"]
+        return res
+    
     # query chargingStation
     def query_chargingStation(self, id = None):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_chargingStation"
-        if id is None:
-            self.send_query_message(my_msg)
-            return self.process_query_message(my_msg)
-        else:
-            my_msg["ID"] = id      
-            self.send_query_message(my_msg)
-            return self.process_query_message_with_id(my_msg)
-        
+        my_msg = {"TYPE": "QUERY_chargingStation"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)      
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_chargingStation", res["TYPE"]
+        return res
+    
     # query vehicleID within the co-sim road
     def query_coSimVehicle(self):
-        my_msg = {}
-        my_msg["TYPE"] = "QUERY_coSimVehicle"
-        self.send_query_message(my_msg)
-        return self.process_query_message(my_msg)
-        
+        my_msg = {"TYPE": "QUERY_coSimVehicle"}
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_coSimVehicle", res["TYPE"]
+        return res
+    
+
     # CONTROL: change the state of the simulator
+    # generate a vehicle trip between origin and destination zones
+    def generate_trip(self, vehID, origin = -1, destination = -1):
+        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(origin, list):
+            origin = [origin] * len(vehID)
+        if not isinstance(destination, list):
+            destination = [destination] * len(vehID)
+
+        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
+        for vehID, origin, destination in zip(vehID, origin, destination):
+            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+
+        assert res["TYPE"] == "CTRL_generateTrip", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # generate a vehicle trip between origin and destination roads
+    def generate_trip_between_roads(self, vehID, origin, destination):
+        msg = {"TYPE": "CTRL_genTripBwRoads", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(origin, list):
+            origin = [origin] * len(vehID)
+        if not isinstance(destination, list):
+            destination = [destination] * len(vehID)
+
+        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
+        for vehID, origin, destination in zip(vehID, origin, destination):
+            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+
+        assert res["TYPE"] == "CTRL_genTripBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+
     # set the road for co-simulation
     def set_cosim_road(self, roadID):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_setCoSimRoad"
-        my_msg["roadID"] = roadID
-        return self.send_control_message(my_msg)
+        msg = {
+                "TYPE": "CTRL_setCoSimRoad",
+                "DATA": [] 
+              }
+        if not isinstance(roadID, list):
+            roadID = [roadID]
+        for i in roadID:
+            msg['DATA'].append(i)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_setCoSimRoad", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # release the road for co-simulation
     def release_cosim_road(self, roadID):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_releaseCoSimRoad"
-        my_msg["roadID"] = roadID
-        return self.send_control_message(my_msg)
+        msg = {
+                "TYPE": "CTRL_releaseCoSimRoad",
+                "DATA": [] 
+              }
+        if not isinstance(roadID, list):
+            roadID = [roadID]
+        for i in roadID:
+            msg['DATA'].append(i)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_releaseCoSimRoad", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
         
+    # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
+    def teleport_cosim_vehicle(self, vehID, roadID, x, y, private_veh = False, transform_coords = False):
+        msg = {
+                "TYPE": "CTRL_teleportCoSimVeh",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            roadID = [roadID]
+            x = [x]
+            y = [y]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(transform_coords, list):
+            transform_coords = [transform_coords] * len(vehID)
+        for vehID, roadID, x, y, private_veh, transform_coords in zip(vehID, roadID, x, y, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "x": x, "y": y, "vehType": private_veh, "transformCoord": transform_coords})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
     # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
-    def teleport_vehicle(self, vehID, roadID, laneID, dist, x, y, private_veh = False, transform_coords = False):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_teleportVeh"
-        my_msg["vehID"] = vehID
-        my_msg["roadID"] = roadID
-        my_msg["laneID"] = laneID
-        my_msg["dist"] = dist
-        my_msg["prv"] = private_veh
-        my_msg["x"] = x
-        my_msg["y"] = y
-        my_msg["TRAN"] = transform_coords
-        return self.send_control_message(my_msg)
+    def teleport_trace_replay_vehicle(self, vehID, roadID, laneID, dist, private_veh = False):
+        msg = {
+                "TYPE": "CTRL_teleportTraceReplayVeh",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            roadID = [roadID]
+            laneID = [laneID]
+            dist = [dist]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        for vehID, roadID, laneID, dist, private_veh in zip(vehID, roadID, laneID, dist, private_veh):
+            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "vehType": private_veh})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_teleportTraceReplayVeh", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # enter the next road
     def enter_next_road(self, vehID, private_veh = False):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_enterNextRoad"
-        my_msg["vehID"] = vehID
-        my_msg["prv"] = private_veh
-        return self.send_control_message(my_msg)
-    
-    # generate a vehicle trip
-    def generate_trip(self, vehID, origin = None, destination = None):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_generateTrip"
-        my_msg["vehID"] = vehID # if not exists, the sim will generate a new vehicle with this vehID
-        if origin is not None:
-            my_msg["origin"] = origin
-        else:
-            my_msg["origin"] = -1
-        if destination is not None:
-            my_msg["destination"] = destination
-        else:
-            my_msg["destination"] = -1
-        return self.send_control_message(my_msg)
+        msg = {
+                "TYPE": "CTRL_enterNextRoad",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        
+        for vehID, private_veh in zip(vehID, private_veh):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh})
 
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
     
     # control vehicle with specified acceleration  
     def control_vehicle(self, vehID, acc, private_veh = False):
-        my_msg = {}
-        my_msg["TYPE"] = "CTRL_controlVeh"
-        my_msg["vehID"] = vehID
-        my_msg["acc"] = acc
-        my_msg["prv"] = private_veh
-        return self.send_control_message(my_msg)
+        msg = {
+                "TYPE": "CTRL_controlVeh",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            acc = [acc]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        for vehID, acc, private_veh in zip(vehID, acc, private_veh):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "acc": acc})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # update the sensor type of specified vehicle
+    def update_vehicle_sensor_type(self, vehID, sensorType, private_veh = False):
+        msg = {
+                "TYPE": "CTRL_updateVehicleSensorType",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(sensorType, list):
+            sensorType = [sensorType] * len(vehID)
+        for vehID, sensorType, private_veh in zip(vehID, sensorType, private_veh):
+            msg["DATA"].append({"vehID": vehID, "sensorType": sensorType, "vehType": private_veh})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateVehicleSensorType", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # dispatch taxi
+    def dispatch_taxi(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_dispatchTaxi",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_dispatchTaxi", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def dispatch_taxi_between_roads(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_dispTaxiBwRoads",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_dispTaxiBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_taxi_requests(self, zoneID, dest, num):
+        msg = {
+                "TYPE": "CTRL_addTaxiRequests",
+                "DATA": []
+                }
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, dest, num in zip(zoneID, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxiRequests", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_taxi_requests_between_roads(self, zoneID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_addTaxiReqBwRoads",
+                "DATA": []
+                }
+        if not isinstance(orig, list):
+            orig = [orig]
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID] * len(orig)
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, orig, dest, num in zip(zoneID, orig, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxiReqBwRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+
+    # assign bus
+    def assign_request_to_bus(self, vehID, orig, dest, num):
+        msg = {
+                "TYPE": "CTRL_assignRequestToBus",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(orig, list):
+            orig = [orig] * len(vehID)
+        if not isinstance(dest, list):
+            dest = [dest] * len(vehID)
+        if not isinstance(num, list):
+            num = [num] * len(vehID)
+
+        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
+            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_assignRequestToBus", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def add_bus_requests(self, zoneID, dest, num):
+        msg = {
+                "TYPE": "CTRL_addBusRequests",
+                "DATA": []
+                }
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(dest, list):
+            dest = [dest] * len(zoneID)
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+
+        for zoneID, dest, num in zip(zoneID, dest, num):
+            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBusRequests", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    
+    # reset the simulation with a property file
+    def reset(self, prop_file):
+        msg = {"TYPE": "CTRL_reset", "propertyFile": prop_file}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True, max_attempts=-1)
+
+        assert res["TYPE"] == "CTRL_reset", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+
+        self.current_tick = -1
+        self.tick()
+        assert self.current_tick == 0
+
+        # if viz is running, stop and restart it
+        if self.viz_server is not None:
+            self.stop_viz()
+
+            time.sleep(1) # wait for five secs if start viz
+
+            self.start_viz()
+    
+    # reset the simulation with a map name
+    def reset_map(self, map_name):
+        # find the property file for the map
+        if map_name == "CARLA":
+            # copy CARLA data in the sim folder
+            # source_path = "data/CARLA"
+            # specify the property file
+            prop_file = "Data.properties.CARLA"
+        elif map_name == "NYC":
+            # copy NYC data in the sim folder
+            # source_path = "data/NYC"
+            # specify the property file
+            prop_file = "Data.properties.NYC"
+        elif map_name == "UA":
+            # copy UA data in the sim folder
+            # source_path = "data/UA"
+            # specify the property file
+            prop_file = "Data.properties.UA"
+
+        # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
+        # subprocess.run(docker_cp_command, shell=True, check=True)
+        
+        # reset the simulation with the property file
+        self.reset(prop_file)
+
+    # terminate the simulation
+    def terminate(self):
+        msg = {"TYPE": "CTRL_end"}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_end", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        self.close()
+    
+    # close the client but keep the simulator running
+    def close(self):
+        if self.ws is not None:
+            self.ws.close()
+            self.ws = None
+            self.state = "closed"
+
+        if self.viz_server is not None:
+            self.stop_viz()
+
+
+    # open visualization server
+    def start_viz(self):
+        # obtain the latest directory in the sim_folder/trajectory_output
+        # get the latest directory
+        list_of_files = [os.path.join(self.sim_folder + "/trajectory_output", f) for f in os.listdir(self.sim_folder + "/trajectory_output")]
+        # sort the list of files by creation time
+        latest_directory = max(list_of_files, key=os.path.getmtime)
+        # open the visualization server
+        self.viz_event, self.viz_server = run_visualization_server(latest_directory)
+
+    def stop_viz(self):
+        if self.viz_server is not None:
+            stop_visualization_server(self.viz_event, self.viz_server)
+        self.viz_event = None
+        self.viz_server = None
+    
+    def _logMessage(self, direction, msg):
+        self._messagesLog.append(
+            (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), direction, tuple(msg.items()))
+        )
+        print(self._messagesLog[-1])
         
     # override __str__ for logging 
     def __str__(self):
         s = f"-----------\n" \
             f"Client INFO\n" \
             f"-----------\n" \
-            f"index :\t {self.index}\n" \
+            f"output folder :\t {self.sim_folder}\n" \
             f"address :\t {self.uri}\n" \
             f"state :\t {self.state}\n" 
         return s

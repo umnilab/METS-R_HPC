@@ -10,6 +10,9 @@ from contextlib import closing
 from types import SimpleNamespace
 import sys
 import zipfile
+import threading
+from threading import Event
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 """
 Helper functions for METSR-SIM and METSR-HPC
@@ -53,21 +56,21 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
             l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
         elif (l.startswith("RANDOM_SEED")):
             l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
-        elif (l.startswith("MULTI_THREADING")):
-            if(options.num_threads > 1):
-                l = "MULTI_THREADING = true"  + "\n"
-            else:
-                l = "MULTI_THREADING = false" + "\n" 
-        elif (l.startswith("N_PARTITION")):
-            if(options.num_threads > 1):
-                l = "N_PARTITION = " + str(options.num_threads) + "\n"
-            else:
-                l = "N_PARTITION = 1" + "\n" 
-        elif (l.startswith("N_THREADS")):
-            if(options.num_threads > 1):
-                l = "N_THREADS = " + str(options.num_threads) + "\n"
-            else:
-                l = "N_THREADS = 1" + "\n" 
+        # elif (l.startswith("MULTI_THREADING")):
+        #     if(options.num_threads > 1):
+        #         l = "MULTI_THREADING = true"  + "\n"
+        #     else:
+        #         l = "MULTI_THREADING = false" + "\n" 
+        # elif (l.startswith("N_PARTITION")):
+        #     if(options.num_threads > 1):
+        #         l = "N_PARTITION = " + str(options.num_threads) + "\n"
+        #     else:
+        #         l = "N_PARTITION = 1" + "\n" 
+        # elif (l.startswith("N_THREADS")):
+        #     if(options.num_threads > 1):
+        #         l = "N_THREADS = " + str(options.num_threads) + "\n"
+        #     else:
+        #         l = "N_THREADS = 1" + "\n" 
         elif (l.startswith("SIMULATION_STEP_SIZE")):
             l = "SIMULATION_STEP_SIZE = " + str(options.sim_step_size) + "\n"
         elif (l.startswith("SIMULATION_STOP_TIME")):
@@ -80,7 +83,9 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
             l = "STANDALONE = "+ str(options.standalone) + "\n"
         elif (l.startswith("SYNCHRONIZED")):
             l = "SYNCHRONIZED = " + str(options.synchronized) + "\n"
-
+        elif (l.startswith("V2X")):
+            l = "V2X = " + str(options.v2x) + "\n"
+            
         if (template  == "NYC"):
             if l.startswith("RH_DEMAND_FILE"):
                 if(options.full_demand):
@@ -157,10 +162,21 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
         f_new.write(l)
     f_new.close()
 
+def force_copytree(src, dst):
+    """
+    Recursively copy a directory tree, overwriting the destination directory if it exists.
+    """
+    # Check if the destination directory exists
+    if os.path.exists(dst):
+        # Remove the destination directory and all its contents
+        shutil.rmtree(dst)
+    
+    # Copy the source directory to the destination
+    shutil.copytree(src, dst)
+
 # Copy necessary files for running the simulation
-# Note: Need to update this function if the simulation is running on a different machine
 def prepare_sim_dirs(options):
-    src_data_dir = options.sim_dir + "data"
+    src_data_dir = "data"
     if options.template == "NYC":
         if options.full_demand:
             prepare_scenario_dict(options, src_data_dir + "/NYC/demand/request_full")
@@ -182,30 +198,45 @@ def prepare_sim_dirs(options):
         print("ERROR , cannot specify port number for all simulation instances")
         sys.exit(-1)
 
+
+    dest_data_dirs = []
+    options.sim_dirs = []
     for i in range(options.num_simulations):
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
             os.makedirs(dir_name)
-        shutil.copy(options.sim_dir+"/log4j.properties", dir_name + "/log4j.properties")
+        options.sim_dirs.append(dir_name)
+        shutil.copy(src_data_dir+"/log4j.properties", dir_name + "/log4j.properties")
         # copy the simulation config files
-        dest_data_dir = dir_name + "/" + "data" 
-        options.data_dir = dest_data_dir
+        dest_data_dir = dir_name + "/" + "data"
 
         if not path.exists(dest_data_dir):
             os.mkdir(dest_data_dir)
-            os.mkdir(dest_data_dir+"/" + options.template)
+            # copy the entire data directory
+            force_copytree(src_data_dir, dest_data_dir)
 
-            if options.template == "NYC":
-                if options.eco_routing:
-                    if options.full_network:
-                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
-                    else:
-                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
-                        shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            # force_copytree(src_data_dir+"/Empty", dest_data_dir+"/Empty")
+
+            # if options.template == "NYC":
+            #     # copy the subdirectories
+            #     force_copytree(src_data_dir+"/NYC", dest_data_dir+"/NYC")
+
+            #     if options.eco_routing:
+            #         if options.full_network:
+            #             shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+            #             shutil.copy("models/eco_routing/data/full/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+            #         else:
+            #             shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes.ser")
+            #             shutil.copy("models/eco_routing/data/small/candidate_routes.ser", dest_data_dir+"/NYC/candidate_routes_bus.ser")
+
+            # elif options.template == "CARLA":
+            #     force_copytree(src_data_dir+"/CARLA", dest_data_dir+"/CARLA")
 
         modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
+        dest_data_dirs.append(dest_data_dir[:-5]) # -5 to remove the "/data" part
+
+    return dest_data_dirs
 
 # Function for getting the file name list of demand scenarios
 def prepare_scenario_dict(options, path):
@@ -300,10 +331,9 @@ def get_classpath2(options, includeBin=True, separator=":"):
 def run_simulations(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
-        sim_dir = get_sim_dir(options, i)
         if platform.system() == "Windows":
              # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
 
             # print(get_classpath(options, False, separator = ";"))
             # run the simulation on a new terminal
@@ -320,8 +350,8 @@ def run_simulations(options):
                 subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
-            os.chdir(sim_dir)
-            # run simulator on new terminal 
+            os.chdir(options.sim_dirs[i])
+            # run simulator on new terminal
             sim_command = options.java_path + "java " + \
                     options.java_options + " " + \
                     "-classpath " + \
@@ -338,10 +368,9 @@ def run_simulations(options):
 def run_simulations_in_background(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
-        sim_dir = get_sim_dir(options, i)
         if platform.system() == "Windows":
              # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
             # run the simulation on a new terminal
             sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
                     "-cp " + \
@@ -356,9 +385,9 @@ def run_simulations_in_background(options):
                 subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
         else:
             # go to sim directory
-            os.chdir(sim_dir)
+            os.chdir(options.sim_dirs[i])
             # run simulator on new terminal 
-            sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
+            sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
                     "-cp " + \
                     get_classpath2(options, False) + ' ' + \
                     "repast.simphony.batch.BatchMain " + \
@@ -371,6 +400,77 @@ def run_simulations_in_background(options):
         # go back to test directory
         os.chdir(cwd)
 
+def run_simulation_in_docker(options):
+    for i in range(0, options.num_simulations):
+        cwd = str(os.getcwd())
+        os.chdir(options.sim_dirs[i])
+
+        sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
+            "-cp " + \
+            get_classpath2(options, False) + ' ' + \
+            "repast.simphony.batch.BatchMain " + \
+            "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
+            "-interactive " + options.sim_dir + "mets_r.rs"
+        
+        docker_command = f'docker run -d --rm --mount src="{os.getcwd()}",target=/home/test,type=bind --net=host ennuilei/mets-r_sim  /bin/bash -c "cd /home/test && ' + sim_command + '"'
+        result = subprocess.run(docker_command, shell=True, text=True, capture_output=True)
+        if options.verbose:
+            print("Container ID:", result.stdout)
+            print("Error msg:", result.stderr)
+        # container_id = result.stdout.strip()
+        os.chdir(cwd)
+
+class CORSRequestHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        super().end_headers()
+
+def start_cors_http_server(directory, stop_event, port=8000):
+    """Start a CORS-enabled HTTP server for the specified directory."""
+    os.chdir(directory)  # Change to the specified directory
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, CORSRequestHandler)
+
+    # Set a timeout for the server to periodically check the stop_event
+    httpd.timeout = 1  # Timeout in seconds
+
+    def run_server():
+        print(f"Serving {directory} with CORS enabled on port {port}...")
+        while not stop_event.is_set():
+            httpd.timeout = 1  # Timeout in seconds
+            try:
+                httpd.handle_request()
+            except socket.timeout:
+                pass  # Timeout occurs if no request is received, continue checking stop_event
+    
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    return server_thread
+
+
+def run_visualization_server(data_folder, server_port = 8000):
+    # store the current work directory
+    workdir = os.getcwd()
+    # Ensure the data folder exists
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+        print(f"Created data folder: {data_folder}")
+    
+    # Start the HTTP server in a separate thread
+    stop_event = Event() 
+    server_thread = start_cors_http_server(data_folder, stop_event, server_port)
+
+    # recovery the work directory
+    os.chdir(workdir)
+
+    return stop_event, server_thread
+
+def stop_visualization_server(stop_event, server_thread):
+    stop_event.set()
+    server_thread.join()
+    print("Visualization server stopped.")
 
 # Get the directory for storing simulation outputs
 def get_sim_dir(options, i):
@@ -385,8 +485,10 @@ def get_sim_dir(options, i):
         sim_dir += "_pass" if options.sim_passenger=="true" else ""
         sim_dir += "_full" if options.full_demand=="true" else ""
         sim_dir += "_" + str(int(options.demand_factor*100))
-        sim_dir += "_" + str(options.num_threads)
+        # sim_dir += "_" + str(options.num_threads)
     else:
         from datetime import datetime
         sim_dir = "output/"+ options.template + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_seed_" + str(options.random_seeds[i])
     return sim_dir
+
+# 
