@@ -199,19 +199,19 @@ class CoSimRunner(object):
                               if success == 'OK':
                                     # signal the veh to enter the next road
                                     # if success, remove the veh from CARLA
-                                    self.carla_vehs[vid].set_autopilot(False)
-                                    while not self.carla_vehs[vid].destroy():
-                                          pass
+                                    carla_veh.set_autopilot(False)
+                                    while not carla_veh.destroy():
+                                          continue
                                     self.carla_vehs.pop(vid)
                                     self.carla_veh_lanes.pop(vid)
                                     if vid in self.carla_waiting_vehs:
                                           self.carla_waiting_vehs.remove(vid)
                               else:
                                     # if failed, keep the veh in CARLA but set the vehicle to be static
-                                    self.carla_vehs[vid].set_autopilot(False)
-                                    self.carla_vehs[vid].set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
-                                    self.carla_vehs[vid].apply_control(carla.VehicleControl(throttle = 0, brake = 1))
-                                    self.carla_vehs[vid].enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
+                                    carla_veh.set_autopilot(False)
+                                    carla_veh.set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
+                                    carla_veh.apply_control(carla.VehicleControl(throttle = 0, brake = 1))
+                                    carla_veh.enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
                                     if vid not in self.carla_waiting_vehs:
                                           self.carla_waiting_vehs.append(vid)
                   else: 
