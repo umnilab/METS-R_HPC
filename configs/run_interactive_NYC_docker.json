@@ -23,5 +23,6 @@
       "bus_fleet_size": 20,
       "taxi_fleet_size": 2000,
       "verbose": false,
-      "demand_factor": 0.1
+      "demand_factor": 0.1,
+      "v2x": false
 }
