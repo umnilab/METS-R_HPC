@@ -3,3 +3,6 @@ simulation_*/
 *.pyc
 output/*
 *.log
+/data/IN
+/data/UA
+/data/Birmingham

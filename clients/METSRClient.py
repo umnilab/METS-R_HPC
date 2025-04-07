@@ -1,13 +1,8 @@
-# remote data client interface. Each RDClient runs in a separate thread
-# run() method  
-
-import datetime
 import json
 import time
 import threading
-
+from datetime import datetime
 from websockets.sync.client import connect
-
 from utils.util import *
 
 str_list_to_int_list = str_list_mapper_gen(int)
@@ -551,8 +546,8 @@ class METSRClient:
     
     
     # reset the simulation with a property file
-    def reset(self, prop_file):
-        msg = {"TYPE": "CTRL_reset", "propertyFile": prop_file}
+    def reset(self):
+        msg = {"TYPE": "CTRL_reset"}
         res = self.send_receive_msg(msg, ignore_heartbeats=True, max_attempts=-1)
 
         assert res["TYPE"] == "CTRL_reset", res["TYPE"]
@@ -570,30 +565,31 @@ class METSRClient:
 
             self.start_viz()
     
-    # reset the simulation with a map name
-    def reset_map(self, map_name):
-        # find the property file for the map
-        if map_name == "CARLA":
-            # copy CARLA data in the sim folder
-            # source_path = "data/CARLA"
-            # specify the property file
-            prop_file = "Data.properties.CARLA"
-        elif map_name == "NYC":
-            # copy NYC data in the sim folder
-            # source_path = "data/NYC"
-            # specify the property file
-            prop_file = "Data.properties.NYC"
-        elif map_name == "UA":
-            # copy UA data in the sim folder
-            # source_path = "data/UA"
-            # specify the property file
-            prop_file = "Data.properties.UA"
+    # Deprecated: reset the simulation with a property file
+    # # reset the simulation with a map name
+    # def reset_map(self, map_name):
+    #     # find the property file for the map
+    #     if map_name == "CARLA":
+    #         # copy CARLA data in the sim folder
+    #         # source_path = "data/CARLA"
+    #         # specify the property file
+    #         prop_file = "Data.properties.CARLA"
+    #     elif map_name == "NYC":
+    #         # copy NYC data in the sim folder
+    #         # source_path = "data/NYC"
+    #         # specify the property file
+    #         prop_file = "Data.properties.NYC"
+    #     elif map_name == "UA":
+    #         # copy UA data in the sim folder
+    #         # source_path = "data/UA"
+    #         # specify the property file
+    #         prop_file = "Data.properties.UA"
 
-        # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
-        # subprocess.run(docker_cp_command, shell=True, check=True)
+    #     # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
+    #     # subprocess.run(docker_cp_command, shell=True, check=True)
         
-        # reset the simulation with the property file
-        self.reset(prop_file)
+    #     # reset the simulation with the property file
+    #     self.reset(prop_file)
 
     # terminate the simulation
     def terminate(self):
@@ -632,7 +628,7 @@ class METSRClient:
     
     def _logMessage(self, direction, msg):
         self._messagesLog.append(
-            (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), direction, tuple(msg.items()))
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), direction, tuple(msg.items()))
         )
         print(self._messagesLog[-1])
         
