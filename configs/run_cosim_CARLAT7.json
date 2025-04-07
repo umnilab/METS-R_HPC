@@ -22,7 +22,7 @@
       "rh_share_file":null,
       "rh_demand_factor":1.0,
       "bus_schedule":null,
-      "num_etaxi":10,
+      "num_etaxi":0,
       "num_ebus":0,
       "private_ev_demand_file":null,
       "private_gv_demand_file":null,

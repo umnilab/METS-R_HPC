@@ -68,7 +68,10 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
         elif (l.startswith("SYNCHRONIZED")):
             l = "SYNCHRONIZED = true\n"
         elif (l.startswith("V2X")):
-            l = "V2X = " + str(options.v2x) + "\n"  
+            if options.v2x:
+                l = "V2X = true\n"
+            else:
+                l = "V2X = false\n"  
         elif l.startswith("RH_DEMAND_FILE") and options.rh_demand_file is not None:
             l = "RH_DEMAND_FILE = " + str(options.rh_demand_file) + "\n"
         # elif l.startswith("ROADS_SHAPEFILE"):
@@ -359,29 +362,29 @@ def run_simulation_in_docker(options):
         os.chdir(cwd)
 
 class CORSRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, directory=None, **kwargs):
+            self.custom_directory = directory
+            super().__init__(*args, directory=directory, **kwargs)
+
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         super().end_headers()
+    
+    def do_OPTIONS(self):
+        self.send_response(200, "ok")
+        self.end_headers()
 
 def start_cors_http_server(directory, stop_event, port=8000):
     """Start a CORS-enabled HTTP server for the specified directory."""
-    os.chdir(directory)  # Change to the specified directory
+    handler_class = lambda *args, **kwargs: CORSRequestHandler(*args, directory=directory, **kwargs)
     server_address = ('', port)
-    httpd = HTTPServer(server_address, CORSRequestHandler)
-
-    # Set a timeout for the server to periodically check the stop_event
-    httpd.timeout = 1  # Timeout in seconds
+    httpd = HTTPServer(server_address, handler_class)
 
     def run_server():
-        print(f"Serving {directory} with CORS enabled on port {port}...")
         while not stop_event.is_set():
-            httpd.timeout = 1  # Timeout in seconds
-            try:
-                httpd.handle_request()
-            except socket.timeout:
-                pass  # Timeout occurs if no request is received, continue checking stop_event
+            httpd.handle_request()
     
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
@@ -389,23 +392,33 @@ def start_cors_http_server(directory, stop_event, port=8000):
 
 def run_visualization_server(data_folder, server_port = 8000):
     # store the current work directory
-    workdir = os.getcwd()
+    # workdir = os.getcwd()
     # Ensure the data folder exists
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
         print(f"Created data folder: {data_folder}")
     
     # Start the HTTP server in a separate thread
+    # os.chdir(data_folder)  # Change to the specified directory
     stop_event = Event() 
     server_thread = start_cors_http_server(data_folder, stop_event, server_port)
+    print(f"Serving {data_folder} with CORS enabled on port {server_port}...")
 
     # recovery the work directory
-    os.chdir(workdir)
+    # os.chdir(workdir)
 
     return stop_event, server_thread
 
-def stop_visualization_server(stop_event, server_thread):
+def stop_visualization_server(stop_event, server_thread, port=8000):
     stop_event.set()
+
+    # Send dummy request to unblock handle_request()
+    try:
+        with socket.create_connection(("localhost", port), timeout=1) as sock:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    except Exception as e:
+        print(f"Dummy request to unblock server failed (probably fine): {e}")
+
     server_thread.join()
     print("Visualization server stopped.")
 
