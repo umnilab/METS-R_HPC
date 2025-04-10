@@ -33,5 +33,5 @@
       "carla_port": 2000,
       "carla_map": "Town05",
       "tm_port": 8000,
-      "sim_minutes": 60
+      "sim_minutes": 10
 }

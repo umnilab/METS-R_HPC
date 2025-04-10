@@ -13,7 +13,7 @@
       "v2x": true,
       "initial_x": -73,
       "initial_y": 40,
-      "network_file":null,
+      "network_file":"data/NYC/facility/road/nyc.net.xml",
       "zone_file":"data/NYC/facility/zone/zone_centroid",
       "charging_station_file":"data/NYC/facility/charging_station/L_0_120000",
       "rh_demand_file":"data/NYC/demand/request/scenario2/demand_2019-04-25.json",
@@ -26,6 +26,6 @@
       "private_ev_demand_file":null,
       "private_gv_demand_file":null,
       "private_ev_charging_preference":null,
-      "bt_event_file":"data/NYC/operation/speed/scenario2/speed_2019-04-25.csv",
-      "bt_event_std_file":"data/NYC/operation/speed/scenario2/speed_std_2019-04-25.csv"
+      "bt_event_file":null,
+      "bt_event_std_file":null
 }
