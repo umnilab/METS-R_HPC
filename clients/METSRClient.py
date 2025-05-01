@@ -130,7 +130,7 @@ class METSRClient:
             return res
 
     def tick(self, step_num = 1, wait_forever = False):
-        assert self.current_tick is not None, "self.current_tick is None. Reset should be called first"
+        assert self.current_tick is not None, "self.current_tick is None. Maybe there is another METS-R SIM instance unclosed."
         msg = {"TYPE": "STEP", "TICK": self.current_tick, "NUM": step_num}
         self.send_msg(msg)
 
@@ -324,22 +324,24 @@ class METSRClient:
         return res
         
     # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
-    def teleport_cosim_vehicle(self, vehID, roadID, x, y, private_veh = False, transform_coords = False):
+    def teleport_cosim_vehicle(self, vehID, x, y, bearing, private_veh = False, transform_coords = False):
         msg = {
                 "TYPE": "CTRL_teleportCoSimVeh",
                 "DATA": []
                 }
         if not isinstance(vehID, list):
             vehID = [vehID]
-            roadID = [roadID]
             x = [x]
             y = [y]
+            bearing = [bearing]
+        if not isinstance(bearing, list):
+            bearing = [bearing] * len(vehID)
         if not isinstance(private_veh, list):
             private_veh = [private_veh] * len(vehID)
         if not isinstance(transform_coords, list):
             transform_coords = [transform_coords] * len(vehID)
-        for vehID, roadID, x, y, private_veh, transform_coords in zip(vehID, roadID, x, y, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "x": x, "y": y, "vehType": private_veh, "transformCoord": transform_coords})
+        for vehID, x, y, bearing, private_veh, transform_coords in zip(vehID, x, y, bearing, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "bearing": bearing, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -381,6 +383,49 @@ class METSRClient:
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # exit cosim region
+    def exit_cosim_region(self, vehID, x, y, private_veh = False, transform_coord = False):
+        msg = {
+                "TYPE": "CTRL_exitCoSimRegion",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            x = [x]
+            y = [y]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(vehID)
+        
+        for vehID, private_veh, transform_coord, x, y in zip(vehID, private_veh, transform_coord, x, y):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "transformCoord": transform_coord, "x": x, "y": y})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_exitCoSimRegion", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        
+        return res
+
+    # reach destination
+    def reach_dest(self, vehID, private_veh = False):
+        msg = {
+                "TYPE": "CTRL_reachDest",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        
+        for vehID, private_veh in zip(vehID, private_veh):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_reachDest", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
