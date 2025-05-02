@@ -106,6 +106,9 @@ class CoSimRunner(object):
                   else:
                         veh_info = self.metsr.query_vehicle(cosim_veh['ID'], private_veh=cosim_veh['v_type'], transform_coords=True)['DATA'][0]
                         if veh_info['state'] > 0:
+                              if cosim_veh['ID'] in self.other_vehs:
+                                    # remove the vehicle from the other_vehs if it is in the co-sim area
+                                    self.destroy_carla_vehicle(cosim_veh['ID'])
                               self.spawn_carla_vehicle(cosim_veh['ID'], cosim_veh['v_type'], veh_info, display_only=False)
                               # add carla coordMap to the carla_vehs
                               self.carla_coordMaps[cosim_veh['ID']] = cosim_veh['coord_map'] # add carla coordMap to the carla_vehs
@@ -234,14 +237,13 @@ class CoSimRunner(object):
                                     carla_veh.set_transform(
                                           carla.Transform(self.get_carla_location(target[0], target[1]), tmp_rotation)
                                     )
-                                    tmp_speed = max(veh_inform['speed'], 1) # set a minimum speed to avoid stopping
+                                    tmp_speed = max(veh_inform['speed'], 0.5) # set a minimum speed to avoid stopping
                                     tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
                                     tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
                                     carla_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
                         else:
                               # Destroy vehicle
                               success = self.metsr.reach_dest(vid)['DATA'][0]['STATUS']
-                              print(success)
                               print(f"Vehicle {vid} failed to enter co-sim area; remove it.")
                               assert success == 'OK', f"Vehicle {vid} failed to reach destination."
                               
