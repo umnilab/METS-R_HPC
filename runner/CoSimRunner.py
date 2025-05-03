@@ -90,46 +90,55 @@ class CoSimRunner(object):
 
             cosim_vehs = self.metsr.query_coSimVehicle()['DATA']
 
+            cosim_ids = [v['ID'] for v in cosim_vehs]
+            private_flags = [v['v_type'] for v in cosim_vehs]
+            all_data = self.metsr.query_vehicle(cosim_ids, private_flags, transform_coords=True)['DATA']
             # Update co-sim vehicles in CARLA
-            for cosim_veh in cosim_vehs:
-                  if cosim_veh['ID'] in self.carla_vehs:
-                        if cosim_veh['ID'] not in self.carla_waiting_vehs:
-                              veh_info = self.metsr.query_vehicle(cosim_veh['ID'], private_veh=cosim_veh['v_type'], transform_coords=True)['DATA'][0]
-                              self.sync_carla_vehicle(cosim_veh['ID'], cosim_veh['v_type'], veh_info)
+
+            for cosim_id, cosim_veh, private_flag, veh_info in zip(cosim_ids, cosim_vehs, private_flags, all_data):
+                  if cosim_id in self.carla_vehs:
+                        if cosim_id not in self.carla_waiting_vehs:
+                              self.sync_carla_vehicle(cosim_id, private_flag, veh_info)
                         else:
                               if self.metsr.current_tick % 10 == 0:
-                                    success = self.metsr.enter_next_road(cosim_veh['ID'], True)['DATA'][0]['STATUS']
+                                    success = self.metsr.enter_next_road(cosim_id, private_flag)['DATA'][0]['STATUS']
                                     if success == 'OK':
-                                          print(f"Vehicle {cosim_veh['ID']} exited co-sim area.")
-                                          self.destroy_carla_vehicle(cosim_veh['ID'])
+                                          print(f"Vehicle {cosim_id} exited co-sim area.")
+                                          self.destroy_carla_vehicle(cosim_id)
                                     
                   else:
-                        veh_info = self.metsr.query_vehicle(cosim_veh['ID'], private_veh=cosim_veh['v_type'], transform_coords=True)['DATA'][0]
                         if veh_info['state'] > 0:
-                              if cosim_veh['ID'] in self.other_vehs:
+                              if cosim_id in self.other_vehs:
                                     # remove the vehicle from the other_vehs if it is in the co-sim area
-                                    self.destroy_carla_vehicle(cosim_veh['ID'])
-                              self.spawn_carla_vehicle(cosim_veh['ID'], cosim_veh['v_type'], veh_info, display_only=False)
+                                    self.destroy_carla_vehicle(cosim_id)
+                              self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                               # add carla coordMap to the carla_vehs
-                              self.carla_coordMaps[cosim_veh['ID']] = cosim_veh['coord_map'] # add carla coordMap to the carla_vehs
+                              self.carla_coordMaps[cosim_id] = cosim_veh['coord_map'] # add carla coordMap to the carla_vehs
                               # add carla nextRoad to the carla_vehs
-                              self.carla_route[cosim_veh['ID']] = cosim_veh['route']
+                              self.carla_route[cosim_id] = cosim_veh['route']
                               # add carla destRoad to the carla_vehs
-                              self.carla_destRoad[cosim_veh['ID']] = cosim_veh['route'][-1]
-                              self.carla_entered[cosim_veh['ID']] = False
+                              self.carla_destRoad[cosim_id] = cosim_veh['route'][-1]
+                              self.carla_entered[cosim_id] = False
             if self.display_all:
                   private_agents = self.metsr.query_vehicle()['private_vids']
 
-                  for vid in private_agents:
-                        veh_info = self.metsr.query_vehicle(vid, private_veh=True, transform_coords=True)['DATA'][0]
-                        if vid not in self.carla_vehs and vid not in self.other_vehs:
-                              if veh_info['state'] > 0:
-                                    self.spawn_carla_vehicle(vid, True, veh_info, display_only=True)
-                        elif vid in self.other_vehs:
-                              if veh_info['state'] > 0:
-                                    self.update_display_only_vehicle(vid, veh_info)
-                              else:
-                                    self.destroy_carla_vehicle(vid)
+                  # Process display-only vehicles in batches to avoid blocking
+                  batch_size = 10
+                  for i in range(0, len(private_agents), batch_size):
+                        batch_ids = private_agents[i:i+batch_size]
+                        batch_infos = self.metsr.query_vehicle(batch_ids, private_veh=True, transform_coords=True)['DATA']
+
+                        for vid, veh_info in zip(batch_ids, batch_infos):
+                              if vid not in self.carla_vehs and vid not in self.other_vehs:
+                                    if veh_info['state'] > 0:
+                                          self.spawn_carla_vehicle(vid, True, veh_info, display_only=True)
+                              elif vid in self.other_vehs:
+                                    if veh_info['state'] > 0:
+                                          import time
+                                          time.sleep(0.001)  # Add a small delay to avoid blocking
+                                          self.update_display_only_vehicle(vid, veh_info)
+                                    else:
+                                          self.destroy_carla_vehicle(vid)
      
       def run(self):
             try:
@@ -237,7 +246,7 @@ class CoSimRunner(object):
                                     carla_veh.set_transform(
                                           carla.Transform(self.get_carla_location(target[0], target[1]), tmp_rotation)
                                     )
-                                    tmp_speed = max(veh_inform['speed'], 0.5) # set a minimum speed to avoid stopping
+                                    tmp_speed = max(veh_inform['speed'], 0.1) # set a minimum speed to avoid stopping
                                     tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
                                     tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
                                     carla_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
