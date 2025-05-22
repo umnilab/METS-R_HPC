@@ -35,7 +35,7 @@ if __name__ == '__main__':
     carla_client, carla_tm = open_carla(config)
 
     to_add_config = {"metsr_road": ["-47", "17", "-1", "1", "-0", "0", "40", "-18"],
-                     "carla_road": [47, 17, 1, 0 , 40, 18, 1, 1522, 1551, 1552, 1481, 1439,\
+                     "carla_road": [47, 17, 1, 0 , 40, 18, 1522, 1551, 1552, 1481, 1439,\
                                     1438, 1512, 1516, 1504, 1464, 1489, 1473]}
 
     # to_add_config = {"metsr_road": [],

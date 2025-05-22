@@ -15,6 +15,9 @@ class KafkaDataProcessor:
             # Subscribe to the topic
             self.consumer.subscribe(["link_tt", "link_energy", "bsm"])
 
+
+            
+
       def process(self):
             messages = self.consumer.poll(timeout_ms=5)
 
@@ -25,3 +28,12 @@ class KafkaDataProcessor:
                         for record in records:
                               res.append(record.value)
                   return res
+            
+      def clear(self):
+            # clear up itself
+            count = 0 
+            while count < 100:
+                  if self.process() is not None:
+                        count = 0
+                  else:
+                        count += 1
