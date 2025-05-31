@@ -7,7 +7,7 @@
       "metsr_host": "localhost",
       "num_simulations" : 1,
       "random_seeds": [42],
-      "sim_step_size": 0.1,
+      "sim_step_size": 0.2,
       "template": "Template",
       "verbose": false,
       "v2x": true,
