@@ -304,8 +304,8 @@ class METSRClient:
         return res
     
     # query bus route
-    def query_bus_schedule(self, routeID = None):
-        msg = {"TYPE": "QUERY_getBusSchedule"}
+    def query_bus_route(self, routeID = None):
+        msg = {"TYPE": "QUERY_getBusRoute"}
         if routeID is not None:
             msg["DATA"] = []
             if not isinstance(routeID, list):
@@ -313,9 +313,21 @@ class METSRClient:
             for i in routeID:
                 msg["DATA"].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "ANS_getBusSchedule", res["TYPE"]
+        assert res["TYPE"] == "ANS_getBusRoute", res["TYPE"]
         return res
     
+    # find bus with route
+    def query_route_bus(self, routeID = None):
+        msg = {"TYPE": "QUERY_getBusWithRoute"}
+        if routeID is not None:
+            msg["DATA"] = []
+            if not isinstance(routeID, list):
+                routeID = [routeID]
+            for i in routeID:
+                msg["DATA"].append(i)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_getBusWithRoute", res["TYPE"]
+        return res
 
     # CONTROL: change the state of the simulator
     # generate a vehicle trip between origin and destination zones
@@ -614,21 +626,35 @@ class METSRClient:
         return res
     
     # assign bus
-    def add_bus_route(self, routeName, zone, road, paths):
-        msg = {
-                "TYPE": "CTRL_addBusRoute",
-                "DATA": []
-                }
+    def add_bus_route(self, routeName, zone, road, paths = None):
+        if paths is None:
+            msg = {
+                    "TYPE": "CTRL_addBusRoute",
+                    "DATA": []
+                    }
+        else:
+            msg = {
+                    "TYPE": "CTRL_addBusRouteWithPath",
+                    "DATA": []
+                    }
         if not isinstance(routeName, list):
             routeName = [routeName]
             zone = [zone]
             road = [road]
-            paths = [paths]
-
-        for routeName, zone, road, paths in zip(routeName, zone, road, paths):
-            msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road, "paths": paths})
+            if path != None:
+                paths = [paths]
+        if paths is None:
+            for routeName, zone, road, paths in zip(routeName, zone, road, paths):
+                msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road})
+        else:
+            for routeName, zone, road, paths in zip(routeName, zone, road, paths):
+                msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road, "paths": paths})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_addBusRoute", res["TYPE"]
+
+        if paths is None:
+            assert res["TYPE"] == "CTRL_addBusRoute", res["TYPE"]
+        else:
+            assert res["TYPE"] == "CTRL_addBusRouteWithPath", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
 
