@@ -15,7 +15,7 @@
       "initial_y": 40,
       "network_file":"data/NYC/facility/road/nyc.net.xml",
       "zone_file":"data/NYC/facility/zone/zone_centroid",
-      "charging_station_file":"data/NYC/facility/charging_station/L_0_120000",
+      "charging_station_file":"data/NYC/facility/charging_station/Real",
       "rh_demand_file":"data/NYC/demand/request/scenario2/demand_2019-04-25.json",
       "rh_wait_file":"data/NYC/demand/wait/scenario2/demand_2019-04-25.csv",
       "rh_share_file":"data/NYC/demand/share/scenario2/demand_2019-04-25.json",

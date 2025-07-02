@@ -87,6 +87,7 @@ NUM_OF_BUS = 0
 
 ## Battery Capacity, unit: kWh
 EV_BATTERY = 50
+TAXI_BATTERY = 50
 BUS_BATTERY = 250
 
 ## Event File, specify event like road closure or traffic regulation
@@ -99,14 +100,14 @@ EVENT_CHECK_FREQUENCY = 10
 # Operation Options
 #-----------------------------#
 K_SHORTEST_PATH = false
-COLLABORATIVE_EV = false
-BUS_PLANNING = false
 PROACTIVE_RELOCATION = true
 
 ## Vehicle charging
 PROACTIVE_CHARGING = false
 RECHARGE_LEVEL_LOW = 0.2
 RECHARGE_LEVEL_HIGH = 0.8
+TAXI_RECHARGE_LEVEL_LOW = 0.2
+TAXI_RECHARGE_LEVEL_HIGH = 0.8
 BUS_RECHARGE_LEVEL_LOW = 0.5
 BUS_RECHARGE_LEVEL_HIGH = 0.8
 

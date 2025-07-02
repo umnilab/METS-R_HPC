@@ -303,6 +303,19 @@ class METSRClient:
         assert res["TYPE"] == "ANS_getEdgeWeight", res["TYPE"]
         return res
     
+    # query bus route
+    def query_bus_schedule(self, routeID = None):
+        msg = {"TYPE": "QUERY_getBusSchedule"}
+        if routeID is not None:
+            msg["DATA"] = []
+            if not isinstance(routeID, list):
+                routeID = [routeID]
+            for i in routeID:
+                msg["DATA"].append(i)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_getBusSchedule", res["TYPE"]
+        return res
+    
 
     # CONTROL: change the state of the simulator
     # generate a vehicle trip between origin and destination zones
@@ -600,8 +613,41 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-
     # assign bus
+    def add_bus_route(self, routeName, zone, road, paths):
+        msg = {
+                "TYPE": "CTRL_addBusRoute",
+                "DATA": []
+                }
+        if not isinstance(routeName, list):
+            routeName = [routeName]
+            zone = [zone]
+            road = [road]
+            paths = [paths]
+
+        for routeName, zone, road, paths in zip(routeName, zone, road, paths):
+            msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road, "paths": paths})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBusRoute", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    def add_bus_run(self, routeName, departTime):
+        msg = {
+                "TYPE": "CTRL_addBusRun",
+                "DATA": []
+                }
+        if not isinstance(routeName, list):
+            routeName = [routeName]
+            departTime = [departTime]
+
+        for routeName, departTime in zip(routeName, departTime):
+            msg["DATA"].append({"routeName": routeName, "departTime": departTime})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBusRun", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
     def assign_request_to_bus(self, vehID, orig, dest, num):
         msg = {
                 "TYPE": "CTRL_assignRequestToBus",
@@ -623,7 +669,7 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    def add_bus_requests(self, zoneID, dest, num):
+    def add_bus_requests(self, zoneID, dest, routeName, num):
         msg = {
                 "TYPE": "CTRL_addBusRequests",
                 "DATA": []
@@ -634,9 +680,11 @@ class METSRClient:
             dest = [dest] * len(zoneID)
         if not isinstance(num, list):
             num = [num] * len(zoneID)
+        if not isinstance(routeName, list):
+            routeName = [routeName] * len(zoneID)
 
-        for zoneID, dest, num in zip(zoneID, dest, num):
-            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        for zoneID, dest, num, routeName in zip(zoneID, dest, num, routeName):
+            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num, "routeName": routeName})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addBusRequests", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -696,7 +744,7 @@ class METSRClient:
             time.sleep(1) # wait for five secs if start viz
 
             self.start_viz()
-    
+
     # Deprecated: reset the simulation with a property file
     # # reset the simulation with a map name
     # def reset_map(self, map_name):
