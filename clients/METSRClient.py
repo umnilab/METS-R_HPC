@@ -673,6 +673,45 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_addBusRun", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+    
+    def insert_bus_stop(self, busID, routeName, zoneID, roadName, stopIndex):
+        msg = {
+                "TYPE": "CTRL_insertStopToRoute",
+                "DATA": []
+                }
+        if not isinstance(busID, list):
+            busID = [busID]
+            routeName = [routeName] * len(busID)
+            zoneID = [zoneID] * len(busID)
+            roadName = [roadName] * len(busID)
+            stopIndex = [stopIndex] * len(busID)
+
+        for busID, routeName, zoneID, roadName, stopIndex in zip(busID, routeName, zoneID, roadName, stopIndex):
+            msg["DATA"].append({"busID": busID, "routeName": routeName, "zoneID": zoneID, "roadName": roadName, "stopIndex": stopIndex})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_insertStopToRoute", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    def remove_bus_stop(self, busID, routeName, stopIndex):
+        msg = {
+                "TYPE": "CTRL_removeStopFromRoute",
+                "DATA": []
+                }
+        if not isinstance(busID, list):
+            busID = [busID]
+            routeName = [routeName] * len(busID)
+            stopIndex = [stopIndex] * len(busID)
+
+        for busID, routeName, stopIndex in zip(busID, routeName, stopIndex):
+            msg["DATA"].append({"busID": busID, "routeName": routeName, "stopIndex": stopIndex})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_removeStopFromRoute", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
 
     def assign_request_to_bus(self, vehID, orig, dest, num):
         msg = {
