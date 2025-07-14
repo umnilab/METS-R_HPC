@@ -687,7 +687,7 @@ class METSRClient:
             stopIndex = [stopIndex] * len(busID)
 
         for busID, routeName, zoneID, roadName, stopIndex in zip(busID, routeName, zoneID, roadName, stopIndex):
-            msg["DATA"].append({"busID": busID, "routeName": routeName, "zoneID": zoneID, "roadName": roadName, "stopIndex": stopIndex})
+            msg["DATA"].append({"busID": busID, "routeName": routeName, "zone": zoneID, "road": roadName, "stopIndex": stopIndex})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_insertStopToRoute", res["TYPE"]
