@@ -8,7 +8,7 @@ def open_carla(config):
             client = carla.Client(config.carla_host, config.carla_port)
             client.set_timeout(20.0)
             world = client.load_world(config.carla_map)
-      except:
+      except Exception as e:
             if platform.system() == "Windows":
                 os.system(f"start {config.carla_dir} -carla-server -carla-rpc-port={config.carla_port} -windowed -ResX=800 -ResY=600")
             else:
@@ -16,9 +16,8 @@ def open_carla(config):
             time.sleep(10)
             client = carla.Client(config.carla_host, config.carla_port)
             client.set_timeout(20.0)
-            time.sleep(5)
             world = client.load_world(config.carla_map)
-
+            time.sleep(5)
       time.sleep(5)
 
       # get traffic manager

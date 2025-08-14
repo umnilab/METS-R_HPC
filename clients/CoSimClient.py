@@ -7,17 +7,17 @@ from utils.carla_util import snap_to_ground
 from clients.METSRClient import METSRClient
 
 """
-Implementation of the CoSim Runner
+Implementation of the CoSim Client
 
-A CoSim runner communicates with one METSRClient and one CARLA client to manage the 
+A CoSim client communicates with one METSRClient and one CARLA client to manage the 
 data flow between corresponding simulation instances.
 """
 
 # Co-simulation 1: The carla control a submap, and the METS-R SIM control the rest maps
 # The visualization of the submap is done in the CARLA simulator
 # The visualization of the rest maps is done in the METS-R SIM
-class CoSimRunner(object):
-      def __init__(self, config, docker_ids, carla_client, tm_client):
+class CoSimClient(object):
+      def __init__(self, config, carla_client, tm_client):
             self.config = config
 
             self.carla = carla_client.get_world()
@@ -30,8 +30,9 @@ class CoSimRunner(object):
 
             self.display_all = config.display_all # display all the vehicles in the CARLA map
 
-            # set the co-sim region
-            for road in self.config.metsr_road:
+            # set the co-sim region - default to empty list if not specified
+            metsr_roads = getattr(config, 'metsr_road', [])
+            for road in metsr_roads:
                   self.metsr.set_cosim_road(road)
 
             self.carla_vehs = {} # id of agent and vehicle instance in carla
@@ -51,6 +52,16 @@ class CoSimRunner(object):
             transform.location.x = 0
             transform.location.y = 0
             transform.location.z = 300
+            transform.rotation.yaw = -90
+            transform.rotation.pitch = -90
+            spectator.set_transform(transform)
+
+      def set_custom_camera(self, x, y, z):
+            spectator = self.carla.get_spectator()
+            transform = carla.Transform()
+            transform.location.x = x
+            transform.location.y = y
+            transform.location.z = z
             transform.rotation.yaw = -90
             transform.rotation.pitch = -90
             spectator.set_transform(transform)
@@ -135,7 +146,7 @@ class CoSimRunner(object):
                               elif vid in self.other_vehs:
                                     if veh_info['state'] > 0:
                                           import time
-                                          time.sleep(0.001)  # Add a small delay to avoid blocking
+                                          time.sleep(0.0001)  # Add a small delay to avoid blocking
                                           self.update_display_only_vehicle(vid, veh_info)
                                     else:
                                           self.destroy_carla_vehicle(vid)
@@ -283,15 +294,4 @@ class CoSimRunner(object):
 
 
       def generate_random_trips(self, num_trips, start_vid = 0):
-            self.metsr.generate_trip(list(range(start_vid, start_vid+num_trips)))
-
-
-
-
-
-
-            
-             
-    
-
- 
+            self.metsr.generate_trip(list(range(start_vid, start_vid+num_trips))) 

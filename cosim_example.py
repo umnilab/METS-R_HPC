@@ -2,7 +2,7 @@ import sys
 import os
 import argparse
 import time
-from runner.CoSimRunner import CoSimRunner
+from clients.CoSimClient import CoSimClient
 from utils.util import read_run_config, prepare_sim_dirs, run_simulations, run_simulations_in_background, run_simulation_in_docker 
 from utils.carla_util import open_carla
 
@@ -48,7 +48,7 @@ if __name__ == '__main__':
     # run_simulations_in_background(config)
     container_ids = run_simulation_in_docker(config)
 
-    runner = CoSimRunner(config, container_ids, carla_client, carla_tm)
-    runner.run()
+    client = CoSimClient(config, carla_client, carla_tm)
+    client.run()
 
 
