@@ -788,6 +788,24 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_updateEdgeWeight", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+    
+    # update charging station prices
+    def update_charging_prices(self, stationID, stationType, price):
+        msg = {"TYPE": "CTRL_updateChargingPrice", "DATA": []}
+        if not isinstance(stationID, list):
+            stationID = [stationID]
+            stationType = [stationType]
+            price = [price]
+        if not isinstance(stationType, list):
+            stationType = [stationType] * len(stationID)
+        if not isinstance(price, list):
+            price = [price] * len(stationID)
+        for stationID, stationType, price in zip(stationID, stationType, price):
+            msg["DATA"].append({"chargerID": stationID, "chargerType": stationType, "weight": price})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateChargingPrice", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
      
     
     # reset the simulation with a property file
