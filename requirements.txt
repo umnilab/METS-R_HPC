@@ -1,4 +1,4 @@
-# python == 3.8.19
+# python == 3.10
 networkx
 shapely
 psutil
@@ -10,6 +10,6 @@ kafka-python
 adtk
 scikit-learn
 # should be align with your carla version
-carla == 0.9.13
+carla == 0.9.16
 ujson
 websockets

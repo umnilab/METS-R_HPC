@@ -49,7 +49,7 @@ class METSRClient:
         failed_attempts = 0
         while True:
             try:
-                self.ws = connect(self.uri, max_size=10 * 1024 * 1024)
+                self.ws = connect(self.uri, max_size = 10 * 1024 * 1024, ping_interval = None, ping_timeout = None)
                 self.state = "connected"
                 if self.verbose:
                     print(f"Connected to {self.uri}")
