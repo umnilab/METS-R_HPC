@@ -80,13 +80,17 @@ class METSRClient:
     def receive_msg(self, ignore_heartbeats, waiting_forever = True):
         start_time = time.time()
         while True:
-            raw_msg = self.ws.recv(timeout = 30)
 
-            # Decode the json string
-            msg = json.loads(str(raw_msg))
+            try:
+                raw_msg = self.ws.recv(timeout = 30)
 
-            if self.verbose:
-                self._logMessage("RECEIVED", msg)
+                # Decode the json string
+                msg = json.loads(str(raw_msg))
+
+                if self.verbose:
+                    self._logMessage("RECEIVED", msg)
+            except:
+                pass
             
             # EVERY decoded msg must have a TYPE field
             assert "TYPE" in msg.keys(), "No type field in received message"
