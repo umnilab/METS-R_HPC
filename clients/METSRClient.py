@@ -80,7 +80,6 @@ class METSRClient:
     def receive_msg(self, ignore_heartbeats, waiting_forever = True):
         start_time = time.time()
         while True:
-
             try:
                 raw_msg = self.ws.recv(timeout = 30)
 
@@ -89,21 +88,21 @@ class METSRClient:
 
                 if self.verbose:
                     self._logMessage("RECEIVED", msg)
+
+                # EVERY decoded msg must have a TYPE field
+                assert "TYPE" in msg.keys(), "No type field in received message"
+                assert msg["TYPE"].split("_")[0] in {"STEP", "ANS", "CTRL", "ATK"}, "Uknown message type: " + str(msg["TYPE"])
+
+                # Allow tick()
+                if msg["TYPE"] in {"ANS_ready"}:
+                    self.current_tick = 0
+                    continue
+
+                # Return decoded message, if it's not an ignored heartbeat
+                if not ignore_heartbeats or msg["TYPE"] != "STEP":
+                    return msg
             except:
                 pass
-            
-            # EVERY decoded msg must have a TYPE field
-            assert "TYPE" in msg.keys(), "No type field in received message"
-            assert msg["TYPE"].split("_")[0] in {"STEP", "ANS", "CTRL", "ATK"}, "Uknown message type: " + str(msg["TYPE"])
-
-            # Allow tick()
-            if msg["TYPE"] in {"ANS_ready"}:
-                self.current_tick = 0
-                continue
-
-            # Return decoded message, if it's not an ignored heartbeat
-            if not ignore_heartbeats or msg["TYPE"] != "STEP":
-                return msg
             
             if time.time() - start_time > self.timeout and not waiting_forever:
                 print("Timeout while waiting for message.")
