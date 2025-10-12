@@ -80,7 +80,7 @@ class METSRClient:
     def receive_msg(self, ignore_heartbeats, waiting_forever = True):
         start_time = time.time()
         while True:
-            raw_msg = self.ws.recv(timeout = self.timeout)
+            raw_msg = self.ws.recv(timeout = 30)
 
             # Decode the json string
             msg = json.loads(str(raw_msg))
