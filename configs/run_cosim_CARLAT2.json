@@ -28,7 +28,7 @@
       "private_gv_demand_file":null,
       "private_ev_charging_preference":null,
       "metsr_port": [4000],
-      "carla_dir": "G:/CARLA_0.9.13/WindowsNoEditor/CarlaUE4.exe",
+      "carla_dir": "G:/CARLA_0.9.15/WindowsNoEditor/CarlaUE4.exe",
       "carla_host": "127.0.0.1",
       "carla_port": 2000,
       "carla_map": "Town02",
