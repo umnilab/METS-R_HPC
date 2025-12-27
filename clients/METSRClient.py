@@ -233,6 +233,22 @@ class METSRClient:
         assert res["TYPE"] == "ANS_signal", res["TYPE"]
         return res
     
+    # query signal for connection between two consecutive roads
+    def query_signal_between_roads(self, upstream_road, downstream_road):
+        msg = {"TYPE": "QUERY_signalForConnection", "DATA": []}
+        if not isinstance(upstream_road, list):
+            upstream_road = [upstream_road]
+        if not isinstance(downstream_road, list):
+            downstream_road = [downstream_road] * len(upstream_road)
+        assert len(upstream_road) == len(downstream_road), "Length of upstream_road and downstream_road must be the same"
+        
+        for up_road, down_road in zip(upstream_road, downstream_road):
+            msg["DATA"].append({"upStreamRoad": up_road, "downStreamRoad": down_road})
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_signalForConnection", res["TYPE"]
+        return res
+    
     # query chargingStation
     def query_chargingStation(self, id = None):
         my_msg = {"TYPE": "QUERY_chargingStation"}
@@ -808,6 +824,142 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_updateChargingPrice", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        return res
+    
+    # Traffic signal phase control
+    # Update the signal phase given signal ID and target phase (optionally with phase time offset)
+    # If only phase is provided, starts from the beginning of that phase (phaseTime = 0)
+    def update_signal(self, signalID, targetPhase, phaseTime = None):
+        msg = {"TYPE": "CTRL_updateSignal", "DATA": []}
+        if not isinstance(signalID, list):
+            signalID = [signalID]
+            targetPhase = [targetPhase]
+        if not isinstance(targetPhase, list):
+            targetPhase = [targetPhase] * len(signalID)
+        if phaseTime is None:
+            phaseTime = [None] * len(signalID)
+        elif not isinstance(phaseTime, list):
+            phaseTime = [phaseTime] * len(signalID)
+        else:
+            # If phaseTime is a list, ensure it matches the length
+            if len(phaseTime) != len(signalID):
+                phaseTime = phaseTime * (len(signalID) // len(phaseTime) + 1)
+                phaseTime = phaseTime[:len(signalID)]
+        
+        assert len(signalID) == len(targetPhase) == len(phaseTime), "Length of signalID, targetPhase, and phaseTime must be the same"
+        
+        for sig_id, tgt_phase, ph_time in zip(signalID, targetPhase, phaseTime):
+            signal_data = {"signalID": sig_id, "targetPhase": tgt_phase}
+            if ph_time is not None:
+                signal_data["phaseTime"] = ph_time
+            msg["DATA"].append(signal_data)
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateSignal", res["TYPE"]
+        return res
+    
+    # Update signal phase timing (green, yellow, red durations)
+    def update_signal_timing(self, signalID, greenTime, yellowTime, redTime):
+        msg = {"TYPE": "CTRL_updateSignalTiming", "DATA": []}
+        if not isinstance(signalID, list):
+            signalID = [signalID]
+            greenTime = [greenTime]
+            yellowTime = [yellowTime]
+            redTime = [redTime]
+        if not isinstance(greenTime, list):
+            greenTime = [greenTime] * len(signalID)
+        if not isinstance(yellowTime, list):
+            yellowTime = [yellowTime] * len(signalID)
+        if not isinstance(redTime, list):
+            redTime = [redTime] * len(signalID)
+        
+        assert len(signalID) == len(greenTime) == len(yellowTime) == len(redTime), "Length of signalID, greenTime, yellowTime, and redTime must be the same"
+        
+        for sig_id, green, yellow, red in zip(signalID, greenTime, yellowTime, redTime):
+            msg["DATA"].append({"signalID": sig_id, "greenTime": green, "yellowTime": yellow, "redTime": red})
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateSignalTiming", res["TYPE"]
+        return res
+    
+    # Set a complete new phase plan for a signal (phase timing + starting state + offset)
+    # Time values are in seconds
+    def set_signal_phase_plan(self, signalID, greenTime, yellowTime, redTime, startPhase, phaseOffset = None):
+        msg = {"TYPE": "CTRL_setSignalPhasePlan", "DATA": []}
+        if not isinstance(signalID, list):
+            signalID = [signalID]
+            greenTime = [greenTime]
+            yellowTime = [yellowTime]
+            redTime = [redTime]
+            startPhase = [startPhase]
+        if not isinstance(greenTime, list):
+            greenTime = [greenTime] * len(signalID)
+        if not isinstance(yellowTime, list):
+            yellowTime = [yellowTime] * len(signalID)
+        if not isinstance(redTime, list):
+            redTime = [redTime] * len(signalID)
+        if not isinstance(startPhase, list):
+            startPhase = [startPhase] * len(signalID)
+        if phaseOffset is None:
+            phaseOffset = [None] * len(signalID)
+        elif not isinstance(phaseOffset, list):
+            phaseOffset = [phaseOffset] * len(signalID)
+        else:
+            # If phaseOffset is a list, ensure it matches the length
+            if len(phaseOffset) != len(signalID):
+                phaseOffset = phaseOffset * (len(signalID) // len(phaseOffset) + 1)
+                phaseOffset = phaseOffset[:len(signalID)]
+        
+        assert len(signalID) == len(greenTime) == len(yellowTime) == len(redTime) == len(startPhase) == len(phaseOffset), "Length of all parameters must match"
+        
+        for sig_id, green, yellow, red, start_phase, ph_offset in zip(signalID, greenTime, yellowTime, redTime, startPhase, phaseOffset):
+            signal_data = {"signalID": sig_id, "greenTime": green, "yellowTime": yellow, "redTime": red, "startPhase": start_phase}
+            if ph_offset is not None:
+                signal_data["phaseOffset"] = ph_offset
+            msg["DATA"].append(signal_data)
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_setSignalPhasePlan", res["TYPE"]
+        return res
+    
+    # Set a complete new phase plan with tick-level precision
+    # Time values are in simulation ticks for more precise control
+    def set_signal_phase_plan_ticks(self, signalID, greenTicks, yellowTicks, redTicks, startPhase, tickOffset = None):
+        msg = {"TYPE": "CTRL_setSignalPhasePlanTicks", "DATA": []}
+        if not isinstance(signalID, list):
+            signalID = [signalID]
+            greenTicks = [greenTicks]
+            yellowTicks = [yellowTicks]
+            redTicks = [redTicks]
+            startPhase = [startPhase]
+        if not isinstance(greenTicks, list):
+            greenTicks = [greenTicks] * len(signalID)
+        if not isinstance(yellowTicks, list):
+            yellowTicks = [yellowTicks] * len(signalID)
+        if not isinstance(redTicks, list):
+            redTicks = [redTicks] * len(signalID)
+        if not isinstance(startPhase, list):
+            startPhase = [startPhase] * len(signalID)
+        if tickOffset is None:
+            tickOffset = [None] * len(signalID)
+        elif not isinstance(tickOffset, list):
+            tickOffset = [tickOffset] * len(signalID)
+        else:
+            # If tickOffset is a list, ensure it matches the length
+            if len(tickOffset) != len(signalID):
+                tickOffset = tickOffset * (len(signalID) // len(tickOffset) + 1)
+                tickOffset = tickOffset[:len(signalID)]
+        
+        assert len(signalID) == len(greenTicks) == len(yellowTicks) == len(redTicks) == len(startPhase) == len(tickOffset), "Length of all parameters must match"
+        
+        for sig_id, green, yellow, red, start_phase, tck_offset in zip(signalID, greenTicks, yellowTicks, redTicks, startPhase, tickOffset):
+            signal_data = {"signalID": sig_id, "greenTicks": green, "yellowTicks": yellow, "redTicks": red, "startPhase": start_phase}
+            if tck_offset is not None:
+                signal_data["tickOffset"] = tck_offset
+            msg["DATA"].append(signal_data)
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_setSignalPhasePlanTicks", res["TYPE"]
         return res
      
     
