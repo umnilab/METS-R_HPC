@@ -497,46 +497,24 @@ class METSRClient:
         return res
     
     # enter the next road
-    def enter_next_road(self, vehID, private_veh = False):
+    def enter_next_road(self, vehID, roadID="", private_veh = False):
         msg = {
-                "TYPE": "CTRL_enterNextRoad",
+                "TYPE": "CTRL_enterNextRoad", 
                 "DATA": []
                 }
         if not isinstance(vehID, list):
             vehID = [vehID]
         if not isinstance(private_veh, list):
             private_veh = [private_veh] * len(vehID)
+        if not isinstance(roadID, list):
+            roadID = [roadID] * len(vehID)
         
-        for vehID, private_veh in zip(vehID, private_veh):
-            msg["DATA"].append({"vehID": vehID, "vehType": private_veh})
+        for vehID, private_veh, roadID in zip(vehID, private_veh, roadID):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "roadID": roadID})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
-        return res
-    
-    # exit cosim region
-    def exit_cosim_region(self, vehID, x, y, private_veh = False, transform_coord = False):
-        msg = {
-                "TYPE": "CTRL_exitCoSimRegion",
-                "DATA": []
-                }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-            x = [x]
-            y = [y]
-        if not isinstance(private_veh, list):
-            private_veh = [private_veh] * len(vehID)
-        if not isinstance(transform_coord, list):
-            transform_coord = [transform_coord] * len(vehID)
-        
-        for vehID, private_veh, transform_coord, x, y in zip(vehID, private_veh, transform_coord, x, y):
-            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "transformCoord": transform_coord, "x": x, "y": y})
-
-        res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_exitCoSimRegion", res["TYPE"]
-        assert res["CODE"] == "OK", res["CODE"]
-        
         return res
 
     # reach destination
