@@ -49,6 +49,7 @@ class METSRClient:
         failed_attempts = 0
         while True:
             try:
+                time.sleep(10)
                 self.ws = connect(self.uri, max_size = 10 * 1024 * 1024, ping_interval = None, ping_timeout = None)
                 self.state = "connected"
                 if self.verbose:
@@ -62,7 +63,7 @@ class METSRClient:
                 if failed_attempts >= max_connection_attempts:
                     self.state = "failed"
                     raise RuntimeError("Could not connect to METS-R SIM")
-                time.sleep(10)
+                
 
         print("Connection established!")
 

@@ -1,15 +1,17 @@
-# python == 3.10
+# python >= 3.10
 networkx
 shapely
 psutil
 seaborn
 geopandas
-gurobipy
-# websocket-client
-kafka-python
-adtk
-scikit-learn
-# should be align with your carla version
-carla == 0.9.15
 ujson
 websockets
+
+# Optional
+# gurobipy
+# kafka-python
+# adtk
+# scikit-learn
+# should be align with your carla version
+# carla == 0.9.15
+

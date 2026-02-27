@@ -357,7 +357,7 @@ def run_simulation_in_docker(options):
         result = subprocess.run(docker_command, shell=True, text=True, capture_output=True)
         if options.verbose:
             print("Container ID:", result.stdout)
-            print("Error msg:", result.stderr)
+            # print("Error msg:", result.stderr)
         # container_id = result.stdout.strip()
         os.chdir(cwd)
 
