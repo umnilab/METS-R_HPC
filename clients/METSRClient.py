@@ -994,31 +994,22 @@ class METSRClient:
 
             self.start_viz()
 
-    # Deprecated: reset the simulation with a property file
-    # # reset the simulation with a map name
-    # def reset_map(self, map_name):
-    #     # find the property file for the map
-    #     if map_name == "CARLA":
-    #         # copy CARLA data in the sim folder
-    #         # source_path = "data/CARLA"
-    #         # specify the property file
-    #         prop_file = "Data.properties.CARLA"
-    #     elif map_name == "NYC":
-    #         # copy NYC data in the sim folder
-    #         # source_path = "data/NYC"
-    #         # specify the property file
-    #         prop_file = "Data.properties.NYC"
-    #     elif map_name == "UA":
-    #         # copy UA data in the sim folder
-    #         # source_path = "data/UA"
-    #         # specify the property file
-    #         prop_file = "Data.properties.UA"
-
-    #     # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
-    #     # subprocess.run(docker_cp_command, shell=True, check=True)
+    # save the simulation instance to zip
+    def save(self, filename):
+        msg = {"TYPE": "CTRL_save", "DATA": {"path": filename}}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
         
-    #     # reset the simulation with the property file
-    #     self.reset(prop_file)
+        assert res["TYPE"] == "CTRL_save", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # load the simulation instance to zip
+    def load(self, filename):
+        msg = {"TYPE": "CTRL_load", "DATA": {"path": filename}}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_load", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
 
     # terminate the simulation
     def terminate(self):
