@@ -474,7 +474,7 @@ class METSRClient:
         if not isinstance(transform_coords, list):
             transform_coords = [transform_coords] * len(vehID)
         for vehID, x, y, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, bearing, speed, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "bearing": bearing, "vehType": private_veh, "transformCoord": transform_coords})
+            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
