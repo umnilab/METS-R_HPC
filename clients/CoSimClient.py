@@ -26,9 +26,22 @@ class CoSimClient(object):
             # self.set_carla_camera(self.carla, config)
             self.set_overlook_camera(self.carla)
 
-            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, self, verbose = config.verbose)
+            sim_folder = None
+            if getattr(config, "sim_dirs", None):
+                  sim_folder = config.sim_dirs[0]
+            else:
+                  sim_folder = getattr(config, "sim_folder", None)
 
-            self.display_all = config.display_all # display all the vehicles in the CARLA map
+            self.metsr = METSRClient(
+                  host=config.metsr_host,
+                  port=int(config.ports[0]),
+                  sim_folder=sim_folder,
+                  manager=self,
+                  timeout=getattr(config, "timeout", 30),
+                  verbose=getattr(config, "verbose", False),
+            )
+
+            self.display_all = getattr(config, "display_all", False) # display all the vehicles in the CARLA map
 
             # set the co-sim region - default to empty list if not specified
             metsr_roads = getattr(config, 'metsr_road', [])
@@ -45,6 +58,12 @@ class CoSimClient(object):
 
             self.carla_waiting_vehs = [] # vehicles waiting to enter the other road, should be visited in every 10 ticks
             self.waypoints = self.carla.get_map().generate_waypoints(2.0) # generate all waypoints at 2-meter intervals
+
+      def __getattr__(self, name):
+            metsr = self.__dict__.get("metsr")
+            if metsr is not None and hasattr(metsr, name):
+                  return getattr(metsr, name)
+            raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
       def set_overlook_camera(self, world): # set the camera to overlook the whole map
             spectator = world.get_spectator()
@@ -93,7 +112,7 @@ class CoSimClient(object):
       def is_in_carla_submap(self, x, y):
             # project x, y to the nearest road in CARLA and check if the road ID is in the co-sim road
             road_id = self.carla.get_map().get_waypoint(carla.Location(x, y), project_to_road=True, lane_type=(carla.LaneType.Driving)).road_id
-            return road_id in self.config.carla_road
+            return road_id in getattr(self.config, "carla_road", [])
             
       def step(self):
             self.carla.tick()
@@ -103,7 +122,13 @@ class CoSimClient(object):
 
             cosim_ids = [v['ID'] for v in cosim_vehs]
             private_flags = [v['v_type'] for v in cosim_vehs]
-            all_data = self.metsr.query_vehicle(cosim_ids, private_flags, transform_coords=True)['DATA']
+            all_data = []
+            if cosim_ids:
+                  all_data = self.metsr.query_vehicle(
+                        id=cosim_ids,
+                        private_veh=private_flags,
+                        transform_coords=True,
+                  )['DATA']
             # Update co-sim vehicles in CARLA
 
             for cosim_id, cosim_veh, private_flag, veh_info in zip(cosim_ids, cosim_vehs, private_flags, all_data):
@@ -112,7 +137,10 @@ class CoSimClient(object):
                               self.sync_carla_vehicle(cosim_id, private_flag, veh_info)
                         else:
                               if self.metsr.current_tick % 10 == 0:
-                                    success = self.metsr.enter_next_road(cosim_id, private_flag)['DATA'][0]['STATUS']
+                                    success = self.metsr.enter_next_road(
+                                          vehID=cosim_id,
+                                          private_veh=private_flag,
+                                    )['DATA'][0]['STATUS']
                                     if success == 'OK':
                                           print(f"Vehicle {cosim_id} exited co-sim area.")
                                           self.destroy_carla_vehicle(cosim_id)
@@ -123,21 +151,26 @@ class CoSimClient(object):
                                     # remove the vehicle from the other_vehs if it is in the co-sim area
                                     self.destroy_carla_vehicle(cosim_id)
                               self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
+                              route = cosim_veh.get('route', [])
                               # add carla coordMap to the carla_vehs
-                              self.carla_coordMaps[cosim_id] = cosim_veh['coord_map'] # add carla coordMap to the carla_vehs
+                              self.carla_coordMaps[cosim_id] = cosim_veh.get('coord_map', []) # add carla coordMap to the carla_vehs
                               # add carla nextRoad to the carla_vehs
-                              self.carla_route[cosim_id] = cosim_veh['route']
+                              self.carla_route[cosim_id] = route
                               # add carla destRoad to the carla_vehs
-                              self.carla_destRoad[cosim_id] = cosim_veh['route'][-1]
+                              self.carla_destRoad[cosim_id] = route[-1] if route else None
                               self.carla_entered[cosim_id] = False
             if self.display_all:
-                  private_agents = self.metsr.query_vehicle()['private_vids']
+                  private_agents = self.metsr.query_vehicle().get('private_vids', [])
 
                   # Process display-only vehicles in batches to avoid blocking
                   batch_size = 10
                   for i in range(0, len(private_agents), batch_size):
                         batch_ids = private_agents[i:i+batch_size]
-                        batch_infos = self.metsr.query_vehicle(batch_ids, private_veh=True, transform_coords=True)['DATA']
+                        batch_infos = self.metsr.query_vehicle(
+                              id=batch_ids,
+                              private_veh=True,
+                              transform_coords=True,
+                        )['DATA']
 
                         for vid, veh_info in zip(batch_ids, batch_infos):
                               if vid not in self.carla_vehs and vid not in self.other_vehs:
@@ -229,7 +262,16 @@ class CoSimClient(object):
                   carla_veh = self.carla_vehs[vid]
                   loc = carla_veh.get_location()
             bearing = self.get_metsr_rotation(carla_veh.get_transform().rotation.yaw)
-            self.metsr.teleport_cosim_vehicle(vid, loc.x, -loc.y, bearing, 0.0, loc.z, private_veh, transform_coords=True)
+            self.metsr.teleport_cosim_vehicle(
+                  vehID=vid,
+                  x=loc.x,
+                  y=-loc.y,
+                  z=loc.z,
+                  bearing=bearing,
+                  speed=0.0,
+                  private_veh=private_veh,
+                  transform_coords=True,
+            )
             # Now vehicle is considered on co-sim road
             if self.is_in_carla_submap(loc.x, loc.y):
                   if self.carla_entered[vid] == False:
@@ -263,7 +305,10 @@ class CoSimClient(object):
                                     carla_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
                         else:
                               # Destroy vehicle
-                              success = self.metsr.reach_dest(vid)['DATA'][0]['STATUS']
+                              success = self.metsr.reach_dest(
+                                    vehID=vid,
+                                    private_veh=private_veh,
+                              )['DATA'][0]['STATUS']
                               print(f"Vehicle {vid} failed to enter co-sim area; remove it.")
                               assert success == 'OK', f"Vehicle {vid} failed to reach destination."
                               
@@ -271,16 +316,22 @@ class CoSimClient(object):
                   else:
                         print("Vehicle " + str(vid) + " has left the co-sim area.")
                         # case 2: vehicle has entered the co-sim area
-                        if self.carla_destRoad[vid] in self.config.metsr_road:
+                        if self.carla_destRoad[vid] in getattr(self.config, "metsr_road", []):
                               # case 2.1: vehicle's destination is within the co-sim area
-                              success = self.metsr.reach_dest(vid, private_veh)['DATA'][0]['STATUS']
+                              success = self.metsr.reach_dest(
+                                    vehID=vid,
+                                    private_veh=private_veh,
+                              )['DATA'][0]['STATUS']
                               assert success == 'OK', f"Vehicle {vid} failed to reach destination."
                               if success == 'OK':
                                     print(f"Vehicle {vid} reached destination.")
                                     self.destroy_carla_vehicle(vid)
                         else:
                               # case 2.2: vehicle's destination is outside the co-sim area
-                              success = self.metsr.exit_cosim_region(vid, loc.x, -loc.y, private_veh, True)['DATA'][0]['STATUS']
+                              success = self.metsr.enter_next_road(
+                                    vehID=vid,
+                                    private_veh=private_veh,
+                              )['DATA'][0]['STATUS']
                               if success == 'OK':
                                     print(f"Vehicle {vid} exited co-sim area.")
                                     self.destroy_carla_vehicle(vid)
@@ -289,9 +340,9 @@ class CoSimClient(object):
                                     carla_veh.set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
                                     carla_veh.apply_control(carla.VehicleControl(throttle=0, brake=1))
                                     carla_veh.enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
-                              if vid not in self.carla_waiting_vehs:
-                                    self.carla_waiting_vehs.append(vid)
+                                    if vid not in self.carla_waiting_vehs:
+                                          self.carla_waiting_vehs.append(vid)
 
 
       def generate_random_trips(self, num_trips, start_vid = 0):
-            self.metsr.generate_trip(list(range(start_vid, start_vid+num_trips))) 
+            self.metsr.generate_trip(vehID=list(range(start_vid, start_vid+num_trips))) 

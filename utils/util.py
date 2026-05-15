@@ -72,6 +72,12 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
                 l = "V2X = true\n"
             else:
                 l = "V2X = false\n"  
+        elif l.startswith("DISPATCHING_CONTROLLED_BY_CONTROL_APIS"):
+            l = "DISPATCHING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "dispatching_controlled_by_control_apis", False)).lower() + "\n"
+        elif l.startswith("REPOSITIONING_CONTROLLED_BY_CONTROL_APIS"):
+            l = "REPOSITIONING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "repositioning_controlled_by_control_apis", False)).lower() + "\n"
+        elif l.startswith("CHARGING_CONTROLLED_BY_CONTROL_APIS"):
+            l = "CHARGING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "charging_controlled_by_control_apis", False)).lower() + "\n"
         elif l.startswith("RH_DEMAND_FILE") and options.rh_demand_file is not None:
             l = "RH_DEMAND_FILE = " + str(options.rh_demand_file) + "\n"
         elif l.startswith("ENABLE_JSON_WRITE"):

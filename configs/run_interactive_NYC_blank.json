@@ -4,5 +4,8 @@
       "sim_step_size": 0.2,
       "network_file": "data/NYC/facility/road/nyc.net.xml",
       "zone_file": "data/Empty/facility/zone/empty_zone",
-      "charging_station_file": "data/Empty/facility/charging_station/empyt_cs"
+      "charging_station_file": "data/Empty/facility/charging_station/empyt_cs",
+      "dispatching_controlled_by_control_apis": true,
+      "repositioning_controlled_by_control_apis": true,
+      "charging_controlled_by_control_apis": true
 }

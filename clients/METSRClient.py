@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import threading
 from datetime import datetime
@@ -22,7 +23,18 @@ Acknowledgement: Eric Vin for helping with the revision of the code
 
 class METSRClient:
 
-    def __init__(self, host, port, sim_folder = None, manager = None, max_connection_attempts = 5, timeout = 30, verbose = False):
+    def __init__(
+            self,
+            host,
+            port,
+            sim_folder = None,
+            manager = None,
+            max_connection_attempts = 5,
+            timeout = 30,
+            verbose = False,
+            connection_retry_interval = 0.5,
+            connection_open_timeout = 1,
+            max_connection_wait = None):
         super().__init__()
 
         # Websocket config
@@ -47,43 +59,99 @@ class METSRClient:
         self.current_tick = None
 
         # Establish connection
+        connection_start = time.time()
+        max_connection_wait = (
+            max_connection_wait
+            if max_connection_wait is not None
+            else max_connection_attempts * 10
+        )
         failed_attempts = 0
         while True:
             try:
-                time.sleep(10)
-                self.ws = connect(self.uri, max_size = 10 * 1024 * 1024, ping_interval = None, ping_timeout = None)
+                self.ws = connect(
+                    self.uri,
+                    max_size = 10 * 1024 * 1024,
+                    ping_interval = None,
+                    ping_timeout = None,
+                    open_timeout = connection_open_timeout,
+                )
                 self.state = "connected"
                 if self.verbose:
                     print(f"Connected to {self.uri}")
                 break
-            except ConnectionRefusedError:
-                print(f"Attempt to connect to {self.uri} failed. "
-                      f"Waiting for 10 seconds before trying again... "
-                      f"({max_connection_attempts - failed_attempts} attempts remaining)")
+            except OSError as exc:
                 failed_attempts += 1
-                if failed_attempts >= max_connection_attempts:
+                elapsed = time.time() - connection_start
+                if elapsed >= max_connection_wait:
                     self.state = "failed"
-                    raise RuntimeError("Could not connect to METS-R SIM")
+                    raise RuntimeError(
+                        f"Could not connect to METS-R SIM at {self.uri} "
+                        f"after {elapsed:.1f} seconds and {failed_attempts} attempts"
+                    ) from exc
+
+                sleep_seconds = min(connection_retry_interval, max_connection_wait - elapsed)
+                if self.verbose:
+                    print(
+                        f"Attempt {failed_attempts} to connect to {self.uri} failed. "
+                        f"Retrying in {sleep_seconds:.1f} seconds..."
+                    )
+                time.sleep(sleep_seconds)
                 
 
         print("Connection established!")
 
         # Ensure server is initialized by waiting to receive an initial packet
         # (could be ANS_ready or a heartbeat)
-        self.receive_msg(ignore_heartbeats=False)
+        self.receive_msg(ignore_heartbeats=False, return_ready=True)
 
         self.lock = threading.Lock()
+
+    def _fatal_log_error(self):
+        if not self.sim_folder:
+            return None
+
+        log_path = os.path.join(self.sim_folder, "logs", "mets_r.log")
+        try:
+            with open(log_path, "rb") as log_file:
+                log_file.seek(0, os.SEEK_END)
+                size = log_file.tell()
+                log_file.seek(max(0, size - 65536))
+                tail = log_file.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+        if "FATAL JVM ERROR" not in tail and "Unresolved compilation problem" not in tail:
+            return None
+
+        lines = tail.splitlines()
+        marker_index = 0
+        for index, line in enumerate(lines):
+            if "FATAL JVM ERROR" in line or "Unresolved compilation problem" in line:
+                marker_index = index
+
+        excerpt = "\n".join(lines[marker_index:marker_index + 8])
+        guidance = ""
+        if "maxWaitingTime cannot be resolved or is not a field" in tail:
+            guidance = (
+                "\n\nThis matches a METS-R_SIM build issue in the maxWaitingTime "
+                "Control API change. Add an Integer maxWaitingTime field to "
+                "MessageClass.ZoneIDOrigDestRouteNameNum and rebuild METS-R_SIM."
+            )
+        return f"METS-R simulator reported a fatal JVM error in {log_path}:\n{excerpt}{guidance}"
 
     def send_msg(self, msg):
         if self.verbose:
             self._logMessage("SENT", msg)
         self.ws.send(json.dumps(msg))
 
-    def receive_msg(self, ignore_heartbeats, waiting_forever = True):
+    def receive_msg(self, ignore_heartbeats, waiting_forever = True, return_ready = False):
         start_time = time.time()
         while True:
+            fatal_error = self._fatal_log_error()
+            if fatal_error:
+                raise RuntimeError(fatal_error)
             try:
-                raw_msg = self.ws.recv(timeout = 30)
+                raw_msg = self.ws.recv(timeout = min(5, max(1, self.timeout)))
 
                 # Decode the json string
                 msg = json.loads(str(raw_msg))
@@ -98,6 +166,8 @@ class METSRClient:
                 # Allow tick()
                 if msg["TYPE"] in {"ANS_ready"}:
                     self.current_tick = 0
+                    if return_ready:
+                        return msg
                     continue
 
                 # Allow error message
@@ -108,8 +178,12 @@ class METSRClient:
                 # Return decoded message, if it's not an ignored heartbeat
                 if not ignore_heartbeats or msg["TYPE"] != "STEP":
                     return msg
-            except:
-                pass
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                fatal_error = self._fatal_log_error()
+                if fatal_error:
+                    raise RuntimeError(fatal_error)
             
             if time.time() - start_time > self.timeout and not waiting_forever:
                 print("Timeout while waiting for message.")
@@ -267,6 +341,22 @@ class METSRClient:
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_taxi", res["TYPE"]
         return res
+
+    def query_available_taxis(self, zoneID = None):
+        """Query taxis currently available for dispatch.
+
+        Without ``zoneID`` returns available taxis across all zones. With a
+        zone ID, returns only the available-taxi pool for that zone.
+
+        Each entry in ``DATA`` includes the taxi ID, the pool zone ID, state,
+        position, battery level, battery feasibility, and passenger count.
+        """
+        msg = {"TYPE": "QUERY_availableTaxis"}
+        if zoneID is not None:
+            msg["DATA"] = zoneID
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_availableTaxis", res["TYPE"]
+        return res
         
     def query_bus(self, id = None):
         """Query the state of one or more electric buses.
@@ -406,7 +496,15 @@ class METSRClient:
                                      in this zone at this tick,
               'x':           <float> centroid x coordinate (network CRS),
               'y':           <float> centroid y coordinate (network CRS),
-              'z':           <float> centroid elevation
+              'z':           <float> centroid elevation,
+              'leftTaxiRequests':    <int> cumulative taxi requests that
+                                           abandoned after waiting too long,
+              'leftTaxiPassengers':  <int> cumulative passengers in those
+                                           abandoned taxi requests,
+              'leftBusRequests':     <int> cumulative bus requests that
+                                           abandoned after waiting too long,
+              'leftBusPassengers':   <int> cumulative passengers in those
+                                           abandoned bus requests
             }
 
         Parameters
@@ -423,6 +521,32 @@ class METSRClient:
                 my_msg['DATA'].append(i)     
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_zone", res["TYPE"] 
+        return res
+
+    def query_pending_requests(self, zoneID = None):
+        """Query pending taxi and bus requests.
+
+        Without ``zoneID`` returns pending requests across all zones. With a
+        zone ID, returns pending requests in that zone. Request records include
+        ``ID`` (the request ID used by ``dispatch_taxi``), origin/destination
+        zones and roads, party size, waiting-time fields, and a queue status.
+        """
+        msg = {"TYPE": "QUERY_pendingRequests"}
+        if zoneID is not None:
+            msg["DATA"] = zoneID
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_pendingRequests", res["TYPE"]
+        return res
+
+    def query_request(self, reqID):
+        """Query one or more ride-hailing or bus request records by ID."""
+        msg = {"TYPE": "QUERY_request", "DATA": []}
+        if not isinstance(reqID, list):
+            reqID = [reqID]
+        for rid in reqID:
+            msg["DATA"].append(rid)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_request", res["TYPE"]
         return res
 
     def query_signal(self, id = None):
@@ -1099,50 +1223,59 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    # dispatch taxi
-    def dispatch_taxi(self, vehID, orig, dest, num):
+    # Match available taxi(s) to existing pending request(s).
+    def dispatch_taxi(self, vehID, reqID):
+        """Dispatch taxi(s) to serve already-pending request(s).
+
+        The latest METS-R SIM Control API separates request creation from
+        dispatching. Use ``add_taxi_requests`` or
+        ``add_taxi_requests_between_roads`` first, read the returned ``reqID``,
+        then pass ``vehID`` and ``reqID`` here.
+        """
         msg = {
                 "TYPE": "CTRL_dispatchTaxi",
                 "DATA": []
                 }
         if not isinstance(vehID, list):
             vehID = [vehID]
-        if not isinstance(orig, list):
-            orig = [orig] * len(vehID)
-        if not isinstance(dest, list):
-            dest = [dest] * len(vehID)
-        if not isinstance(num, list):
-            num = [num] * len(vehID)
+        if not isinstance(reqID, list):
+            reqID = [reqID] * len(vehID)
+        assert len(vehID) == len(reqID), "vehID and reqID must have the same length"
 
-        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
-            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        for vehID, reqID in zip(vehID, reqID):
+            msg["DATA"].append({"vehID": vehID, "reqID": reqID})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_dispatchTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
-    
-    def dispatch_taxi_between_roads(self, vehID, orig, dest, num):
-        msg = {
-                "TYPE": "CTRL_dispTaxiBwRoads",
-                "DATA": []
-                }
+
+    def reposition_taxi(self, vehID, zoneID):
+        """Reposition idle/cruising taxi(s) to destination zone(s)."""
+        msg = {"TYPE": "CTRL_repositionTaxi", "DATA": []}
         if not isinstance(vehID, list):
             vehID = [vehID]
-        if not isinstance(orig, list):
-            orig = [orig] * len(vehID)
-        if not isinstance(dest, list):
-            dest = [dest] * len(vehID)
-        if not isinstance(num, list):
-            num = [num] * len(vehID)
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID] * len(vehID)
+        assert len(vehID) == len(zoneID), "vehID and zoneID must have the same length"
 
-        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
-            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        for vehID, zoneID in zip(vehID, zoneID):
+            msg["DATA"].append({"vehID": vehID, "zoneID": zoneID})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_dispTaxiBwRoads", res["TYPE"]
+        assert res["TYPE"] == "CTRL_repositionTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    def add_taxi_requests(self, zoneID, dest, num):
+    def add_taxi_requests(self, zoneID, dest, num, max_waiting_time = None, maxWaitingTime = None):
+        """Add one or more pending taxi requests.
+
+        ``max_waiting_time`` is optional and uses simulation ticks. It maps to
+        the API field ``maxWaitingTime``. When it is positive, the simulator
+        overrides the request's default waiting tolerance; omitted, ``None``,
+        or non-positive values keep the simulator default.
+        """
+        if max_waiting_time is None and maxWaitingTime is not None:
+            max_waiting_time = maxWaitingTime
+
         msg = {
                 "TYPE": "CTRL_addTaxiRequests",
                 "DATA": []
@@ -1153,9 +1286,18 @@ class METSRClient:
             dest = [dest] * len(zoneID)
         if not isinstance(num, list):
             num = [num] * len(zoneID)
+        if max_waiting_time is None:
+            max_waiting_time = [None] * len(zoneID)
+        elif not isinstance(max_waiting_time, list):
+            max_waiting_time = [max_waiting_time] * len(zoneID)
+        assert len(zoneID) == len(dest) == len(num) == len(max_waiting_time), \
+            "zoneID, dest, num, and max_waiting_time must have the same length"
 
-        for zoneID, dest, num in zip(zoneID, dest, num):
-            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num})
+        for zoneID, dest, num, max_wait in zip(zoneID, dest, num, max_waiting_time):
+            record = {"zoneID": zoneID, "dest": dest, "num": num}
+            if max_wait is not None:
+                record["maxWaitingTime"] = max_wait
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addTaxiRequests", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -1268,28 +1410,40 @@ class METSRClient:
         return res
 
 
-    def assign_request_to_bus(self, vehID, orig, dest, num):
+    def assign_request_to_bus(self, busID, reqID):
+        """Match existing pending bus request(s) to bus(es).
+
+        The latest METS-R SIM Control API separates bus-request creation from
+        assignment. Use ``add_bus_requests`` first, read the returned
+        ``reqID``, then pass ``busID`` and ``reqID`` here.
+        """
         msg = {
                 "TYPE": "CTRL_assignRequestToBus",
                 "DATA": []
                 }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(orig, list):
-            orig = [orig] * len(vehID)
-        if not isinstance(dest, list):
-            dest = [dest] * len(vehID)
-        if not isinstance(num, list):
-            num = [num] * len(vehID)
+        if not isinstance(busID, list):
+            busID = [busID]
+        if not isinstance(reqID, list):
+            reqID = [reqID] * len(busID)
+        assert len(busID) == len(reqID), "busID and reqID must have the same length"
 
-        for vehID, orig, dest, num in zip(vehID, orig, dest, num):
-            msg["DATA"].append({"vehID": vehID, "orig": orig, "dest": dest, "num": num})
+        for bus_id, req_id in zip(busID, reqID):
+            msg["DATA"].append({"busID": bus_id, "reqID": req_id})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_assignRequestToBus", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    def add_bus_requests(self, zoneID, dest, routeName, num):
+    def add_bus_requests(self, zoneID, dest, routeName, num, max_waiting_time = None, maxWaitingTime = None):
+        """Add one or more pending bus requests.
+
+        ``max_waiting_time`` is optional and uses simulation ticks. It maps to
+        the API field ``maxWaitingTime``. When it is positive, the simulator
+        overrides the request's default waiting tolerance.
+        """
+        if max_waiting_time is None and maxWaitingTime is not None:
+            max_waiting_time = maxWaitingTime
+
         msg = {
                 "TYPE": "CTRL_addBusRequests",
                 "DATA": []
@@ -1302,9 +1456,18 @@ class METSRClient:
             num = [num] * len(zoneID)
         if not isinstance(routeName, list):
             routeName = [routeName] * len(zoneID)
+        if max_waiting_time is None:
+            max_waiting_time = [None] * len(zoneID)
+        elif not isinstance(max_waiting_time, list):
+            max_waiting_time = [max_waiting_time] * len(zoneID)
+        assert len(zoneID) == len(dest) == len(num) == len(routeName) == len(max_waiting_time), \
+            "zoneID, dest, num, routeName, and max_waiting_time must have the same length"
 
-        for zoneID, dest, num, routeName in zip(zoneID, dest, num, routeName):
-            msg["DATA"].append({"zoneID": zoneID, "dest": dest, "num": num, "routeName": routeName})
+        for zoneID, dest, num, routeName, max_wait in zip(zoneID, dest, num, routeName, max_waiting_time):
+            record = {"zoneID": zoneID, "dest": dest, "num": num, "routeName": routeName}
+            if max_wait is not None:
+                record["maxWaitingTime"] = max_wait
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addBusRequests", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
