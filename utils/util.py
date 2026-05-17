@@ -1,6 +1,7 @@
 import socket
 import json
 import os
+import re
 import subprocess
 import time
 import shutil
@@ -36,6 +37,143 @@ def str_list_mapper_gen(func):
         return [func(str) for str in str_list]
     return str_list_mapper
 
+_PROPERTY_RE = re.compile(r"^(\s*)([A-Za-z0-9_]+)\s*=\s*(.*?)(\r?\n?)$")
+_MISSING = object()
+
+_PROPERTY_OPTION_ALIASES = {
+    "SIMULATION_STEP_SIZE": ("sim_step_size",),
+    "ENABLE_JSON_WRITE": ("json_output",),
+    "NUM_OF_EV": ("num_etaxi",),
+    "NUM_OF_BUS": ("num_ebus",),
+    "RH_SHARE_PERCENTAGE": ("rh_share_file",),
+    "RH_WAITING_TIME": ("rh_wait_file",),
+    "BT_STD_FILE": ("bt_event_std_file",),
+    "EV_DEMAND_FILE": ("private_ev_demand_file",),
+    "GV_DEMAND_FILE": ("private_gv_demand_file",),
+    "EV_CHARGING_PREFERENCE": ("private_ev_charging_preference",),
+}
+
+
+def _camel_to_snake(name):
+    """Return a config-friendly lowercase form for mixed-case property names."""
+    name = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return name.lower()
+
+
+def _config_names_for_property(property_name):
+    names = [property_name.lower(), _camel_to_snake(property_name)]
+    names.extend(_PROPERTY_OPTION_ALIASES.get(property_name, ()))
+
+    deduped = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def _get_option(options, name):
+    if isinstance(options, dict):
+        return options.get(name, _MISSING)
+    return getattr(options, name, _MISSING)
+
+
+def _first_option_value(options, names):
+    for name in names:
+        value = _get_option(options, name)
+        if value is not _MISSING and value is not None:
+            return True, value
+    return False, None
+
+
+def _format_property_value(value):
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _property_line(key, value, newline):
+    newline = newline or "\n"
+    return f"{key} = {_format_property_value(value)}{newline}"
+
+
+def _ensure_extension(value, extension):
+    value = str(value)
+    if value.lower().endswith(extension):
+        return value
+    return value + extension
+
+
+def _rewrite_data_path(line, src_data_dir):
+    if "data/" not in line:
+        return line
+    src_data_dir = src_data_dir.replace("\\", "/").rstrip("/")
+    return line.replace("data/", src_data_dir + "/")
+
+
+def _property_override_value(key, options, port, instance):
+    """Find the value that should be written for a Data.properties key.
+
+    Most properties are now mapped automatically from the lowercase key name
+    used in JSON configs, for example CAR_FOLLOWING_MODEL -> car_following_model.
+    Existing HPC config names are kept as aliases so old configs still work.
+    """
+    if key == "NETWORK_LISTEN_PORT":
+        return True, port
+    if key == "RANDOM_SEED":
+        found, seeds = _first_option_value(options, ("random_seeds",))
+        if found:
+            return True, seeds[instance]
+        return False, None
+    if key == "STANDALONE":
+        return True, False
+    if key == "SYNCHRONIZED":
+        return True, True
+    if key == "AGG_DEFAULT_PATH":
+        return True, "agg_output"
+    if key == "JSON_DEFAULT_PATH":
+        return True, "trajectory_output"
+
+    if key == "ZONES_SHAPEFILE":
+        found, value = _first_option_value(options, ("zones_shapefile",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("zone_file",))
+        if found:
+            return True, _ensure_extension(value, ".shp")
+    elif key == "ZONES_CSV":
+        found, value = _first_option_value(options, ("zones_csv",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("zone_file",))
+        if found:
+            return True, _ensure_extension(value, ".csv")
+    elif key == "CHARGER_SHAPEFILE":
+        found, value = _first_option_value(options, ("charger_shapefile",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("charging_station_file",))
+        if found:
+            return True, _ensure_extension(value, ".shp")
+    elif key == "CHARGER_CSV":
+        found, value = _first_option_value(options, ("charger_csv",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("charging_station_file",))
+        if found:
+            return True, _ensure_extension(value, ".csv")
+    elif key == "RH_DEMAND_SHARABLE":
+        found, value = _first_option_value(options, _config_names_for_property(key))
+        if found:
+            return True, value
+        found, _ = _first_option_value(options, ("rh_wait_file", "rh_waiting_time"))
+        if found:
+            return True, True
+        return False, None
+
+    return _first_option_value(options, _config_names_for_property(key))
+
+
 # Function for modifying simulation properties
 def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, template):
     fname = src_data_dir + "/Data.properties." + template
@@ -43,93 +181,19 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
         print("ERROR, cannot find the property template file at ", fname)
         sys.exit(-1)
 
-    if options.template == "NYC":
-        scenario = options.scenario_index
-        case = options.case_index
-
     f = open(fname, "r")
     lines = f.readlines()
     f.close()
     fname = dest_data_dir + "/Data.properties"
     f_new = open(fname, "w")
     for l in lines:
-        if l.startswith("NETWORK_LISTEN_PORT"):
-            l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
-        elif (l.startswith("RANDOM_SEED")):
-            l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
-        elif (l.startswith("SIMULATION_STEP_SIZE")):
-            l = "SIMULATION_STEP_SIZE = " + str(options.sim_step_size) + "\n"
-        elif (l.startswith("AGG_DEFAULT_PATH")):
-            l = "AGG_DEFAULT_PATH = agg_output" + "\n"
-        elif (l.startswith("JSON_DEFAULT_PATH")):
-            l = "JSON_DEFAULT_PATH = trajectory_output" + "\n"
-        elif (l.startswith("STANDALONE")):
-            l = "STANDALONE = false\n"
-        elif (l.startswith("SYNCHRONIZED")):
-            l = "SYNCHRONIZED = true\n"
-        elif (l.startswith("V2X")):
-            if options.v2x:
-                l = "V2X = true\n"
-            else:
-                l = "V2X = false\n"  
-        elif l.startswith("DISPATCHING_CONTROLLED_BY_CONTROL_APIS"):
-            l = "DISPATCHING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "dispatching_controlled_by_control_apis", False)).lower() + "\n"
-        elif l.startswith("REPOSITIONING_CONTROLLED_BY_CONTROL_APIS"):
-            l = "REPOSITIONING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "repositioning_controlled_by_control_apis", False)).lower() + "\n"
-        elif l.startswith("CHARGING_CONTROLLED_BY_CONTROL_APIS"):
-            l = "CHARGING_CONTROLLED_BY_CONTROL_APIS = " + str(getattr(options, "charging_controlled_by_control_apis", False)).lower() + "\n"
-        elif l.startswith("RH_DEMAND_FILE") and options.rh_demand_file is not None:
-            l = "RH_DEMAND_FILE = " + str(options.rh_demand_file) + "\n"
-        elif l.startswith("ENABLE_JSON_WRITE"):
-            l = "ENABLE_JSON_WRITE = " + str(options.json_output).lower() + "\n"
-        # elif l.startswith("ROADS_SHAPEFILE"):
-        #     l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
-        # elif l.startswith("LANES_SHAPEFILE"):
-        #     l = "LANES_SHAPEFILE = data/NYC/facility/road/lane_fileNYC.shp\n"
-        # elif l.startswith("ROADS_CSV"):
-        #         l = "ROADS_CSV = data/NYC/facility/road/road_fileNYC.csv\n"
-        # elif l.startswith("LANES_CSV"):
-        #     l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
-        elif l.startswith("NETWORK_FILE") and options.network_file is not None:
-            l = "NETWORK_FILE = " + str(options.network_file) + "\n"
-        elif l.startswith("RH_SHARE_PERCENTAGE") and options.rh_share_file is not None:
-            l = "RH_SHARE_PERCENTAGE = " + str(options.rh_share_file)+ "\n"
-        elif l.startswith("BT_EVENT_FILE") and options.bt_event_file is not None:
-            l = "BT_EVENT_FILE = " + options.bt_event_file+ "\n"
-        elif l.startswith("BT_STD_FILE") and options.bt_event_std_file:
-            l = "BT_STD_FILE = " + options.bt_event_std_file + "\n"
-        elif l.startswith("RH_WAITING_TIME") and options.rh_wait_file is not None:
-            l = "RH_WAITING_TIME = " + options.rh_wait_file + "\n"
-        elif l.startswith("NUM_OF_EV"):
-            l = "NUM_OF_EV = " + str(options.num_etaxi) + "\n"
-        elif l.startswith("NUM_OF_BUS"):
-            l = "NUM_OF_BUS = " + str(options.num_ebus) + "\n"
-        elif l.startswith("RH_DEMAND_SHARABLE") and options.rh_wait_file is not None:
-            l = "RH_DEMAND_SHARABLE = true \n"
-        elif l.startswith("RH_DEMAND_FACTOR"):
-            l = "RH_DEMAND_FACTOR = " + str(options.rh_demand_factor) + "\n"
-        elif (l.startswith("BUS_SCHEDULE")) and options.bus_schedule is not None:
-            l = "BUS_SCHEDULE = " +  str(options.bus_schedule) + "\n"
-        elif l.startswith("ZONES_SHAPEFILE"):
-            l = "ZONES_SHAPEFILE = " + str(options.zone_file) + ".shp\n"
-        elif l.startswith("ZONES_CSV"):
-            l = "ZONES_CSV = " + str(options.zone_file) + ".csv\n"
-        elif l.startswith("CHARGER_SHAPEFILE"):
-            l = "CHARGER_SHAPEFILE = " + str(options.charging_station_file) + ".shp\n"
-        elif l.startswith("CHARGER_CSV"):
-            l = "CHARGER_CSV = " + str(options.charging_station_file) + ".csv\n"
-        elif l.startswith("EV_DEMAND_FILE") and options.private_ev_demand_file is not None:
-            l = "EV_DEMAND_FILE = " + str(options.private_ev_demand_file) + "\n"
-        elif l.startswith("GV_DEMAND_FILE") and options.private_gv_demand_file is not None:
-            l = "GV_DEMAND_FILE = " + str(options.private_gv_demand_file) + "\n"
-        elif l.startswith("EV_CHARGING_PREFERENCE") and options.private_ev_charging_preference is not None:
-            l = "EV_CHARGING_PREFERENCE = " + str(options.private_ev_charging_preference) + "\n"
-        elif l.startswith("INITIAL_X"):
-            l = "INITIAL_X = " + str(options.initial_x) + "\n"
-        elif l.startswith("INITIAL_Y"):
-            l = "INITIAL_Y = " + str(options.initial_y) + "\n"
-        if "data/" in l:
-            l = l.replace('data/', src_data_dir + '/')
+        match = _PROPERTY_RE.match(l)
+        if match:
+            _, key, _, newline = match.groups()
+            found, value = _property_override_value(key, options, port, instance)
+            if found:
+                l = _property_line(key, value, newline)
+        l = _rewrite_data_path(l, src_data_dir)
         
         f_new.write(l)
     f_new.close()

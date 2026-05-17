@@ -11,6 +11,140 @@ str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
 
 
+def _is_sequence(value):
+    return isinstance(value, (list, tuple))
+
+
+def _as_list(value):
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _broadcast(value, length):
+    if length == 1:
+        return [value]
+    if _is_sequence(value) and len(value) == length:
+        return list(value)
+    return [value] * length
+
+
+def _looks_like_centerline(value):
+    if not _is_sequence(value) or len(value) == 0:
+        return False
+    first_point = value[0]
+    if not _is_sequence(first_point) or len(first_point) < 2:
+        return False
+    return not _is_sequence(first_point[0])
+
+
+def _set_road_reference(record, field_prefix, value):
+    if value is None:
+        return
+    if _is_sequence(value) and not isinstance(value, str):
+        record[field_prefix + "Roads"] = list(value)
+    else:
+        record[field_prefix + "Road"] = value
+
+
+def _read_property_values(properties_path):
+    values = {}
+    try:
+        with open(properties_path, "r") as properties_file:
+            for raw_line in properties_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _resolve_trajectory_root(sim_folder, configured_path):
+    if not configured_path:
+        return None
+    configured_path = os.path.normpath(configured_path)
+    if os.path.isabs(configured_path):
+        return configured_path
+    return os.path.join(sim_folder, configured_path)
+
+
+def _configured_trajectory_roots(sim_folder):
+    properties = _read_property_values(os.path.join(sim_folder, "data", "Data.properties"))
+    roots = []
+    for key in ("TRAJECTORY_BINARY_DEFAULT_PATH", "JSON_DEFAULT_PATH"):
+        root = _resolve_trajectory_root(sim_folder, properties.get(key))
+        if root and root not in roots:
+            roots.append(root)
+
+    default_root = os.path.join(sim_folder, "trajectory_output")
+    if default_root not in roots:
+        roots.append(default_root)
+    return roots
+
+
+def _trajectory_format_score(directory):
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+
+    if "manifest.json" in names:
+        return 3
+    lowered = [name.lower() for name in names]
+    if any(name.endswith(".bin") for name in lowered):
+        return 2
+    if any(name.endswith(".json") for name in lowered):
+        return 1
+    return 0
+
+
+def _trajectory_format_name(directory):
+    score = _trajectory_format_score(directory)
+    if score >= 2:
+        return "binary"
+    if score == 1:
+        return "JSON"
+    return "trajectory"
+
+
+def _latest_trajectory_directory(root, prefer_binary=True):
+    if root is None or not os.path.isdir(root):
+        return None
+
+    candidates = []
+    root_score = _trajectory_format_score(root)
+    if root_score > 0:
+        candidates.append((root_score, os.path.getmtime(root), root))
+
+    for name in os.listdir(root):
+        candidate = os.path.join(root, name)
+        if not os.path.isdir(candidate):
+            continue
+        score = _trajectory_format_score(candidate)
+        if score > 0:
+            candidates.append((score, os.path.getmtime(candidate), candidate))
+
+    if not candidates:
+        subdirs = [
+            os.path.join(root, name)
+            for name in os.listdir(root)
+            if os.path.isdir(os.path.join(root, name))
+        ]
+        if not subdirs:
+            return None
+        return max(subdirs, key=os.path.getmtime)
+
+    if prefer_binary:
+        binary_candidates = [candidate for candidate in candidates if candidate[0] >= 2]
+        if binary_candidates:
+            return max(binary_candidates, key=lambda item: item[1])[2]
+
+    return max(candidates, key=lambda item: item[1])[2]
+
+
 """
 Implementation of the remote data client
 
@@ -54,6 +188,7 @@ class METSRClient:
         # visualization server and event
         self.viz_server = None
         self.viz_event = None
+        self.viz_port = None
  
         # Track the tick of the corresponding simulator
         self.current_tick = None
@@ -371,6 +506,7 @@ class METSRClient:
               'ID':            <int>   internal vehicle ID,
               'route':         <str>   name of the current bus route
                                        (empty string if the bus is idle),
+              'stopZones':     <list>  zone IDs in the assigned stop sequence,
               'current_stop':  <int>   index of the last completed stop
                                        in the route's stop list (0-based),
               'pass_num':      <int>   number of passengers currently on board,
@@ -1688,6 +1824,86 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
 
+    # Dynamically add one or more roads and generated lanes.
+    # centerline: [[x, y], ...] or [[x, y, z], ...] per road.
+    # upstream_road/downstream_road: road orig_id string or list of orig_id strings.
+    # Pass roads=[{...}] to send fully formed simulator records directly.
+    def add_roads(self, centerline=None, upstream_road=None, downstream_road=None,
+                  orig_id=None, road_type=None, control_type=None,
+                  upstream_control_type=None, downstream_control_type=None,
+                  num_lanes=1, lane_width=None, transform_coord=False, roads=None):
+        msg = {"TYPE": "CTRL_addRoads", "DATA": []}
+
+        if roads is not None:
+            msg["DATA"] = _as_list(roads)
+        else:
+            if centerline is None:
+                raise ValueError("centerline is required when roads is not provided")
+            if upstream_road is None or downstream_road is None:
+                raise ValueError("upstream_road and downstream_road are required")
+
+            centerlines = [centerline] if _looks_like_centerline(centerline) else list(centerline)
+            if len(centerlines) == 0:
+                raise ValueError("At least one road centerline is required")
+
+            count = len(centerlines)
+            orig_ids = _broadcast(orig_id, count)
+            upstream_roads = _broadcast(upstream_road, count)
+            downstream_roads = _broadcast(downstream_road, count)
+            road_types = _broadcast(road_type, count)
+            control_types = _broadcast(control_type, count)
+            upstream_control_types = _broadcast(upstream_control_type, count)
+            downstream_control_types = _broadcast(downstream_control_type, count)
+            lane_counts = _broadcast(num_lanes, count)
+            lane_widths = _broadcast(lane_width, count)
+            transform_coords = _broadcast(transform_coord, count)
+
+            for cl, oid, up, down, r_type, c_type, up_control, down_control, lane_count, width, tc in zip(
+                    centerlines, orig_ids, upstream_roads, downstream_roads, road_types,
+                    control_types, upstream_control_types, downstream_control_types,
+                    lane_counts, lane_widths, transform_coords):
+                record = {
+                    "centerline": cl,
+                    "numLanes": lane_count,
+                    "transformCoord": tc,
+                }
+                if oid is not None:
+                    record["origID"] = oid
+                _set_road_reference(record, "upStream", up)
+                _set_road_reference(record, "downStream", down)
+                if r_type is not None:
+                    record["roadType"] = r_type
+                if c_type is not None:
+                    record["controlType"] = c_type
+                if up_control is not None:
+                    record["upStreamControlType"] = up_control
+                if down_control is not None:
+                    record["downStreamControlType"] = down_control
+                if width is not None:
+                    record["laneWidth"] = width
+                msg["DATA"].append(record)
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addRoads", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    def remove_zone(self, zoneID):
+        """Dynamically remove one or more zones by internal zone ID."""
+        msg = {"TYPE": "CTRL_removeZone", "DATA": _as_list(zoneID)}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_removeZone", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    def remove_road(self, roadID):
+        """Dynamically remove one or more roads by SUMO/original road ID."""
+        msg = {"TYPE": "CTRL_removeRoad", "DATA": _as_list(roadID)}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_removeRoad", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
     # Dynamically add one or more charging stations at given coordinates.
     # num_l2/l3/bus: charger counts; price_l2/l3: per-unit prices;
     # z: elevation (default 0.0);
@@ -1718,6 +1934,16 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_addChargingStation", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def remove_charging_station(self, stationID):
+        """Dynamically remove one or more charging stations by station ID."""
+        msg = {"TYPE": "CTRL_removeChargingStation", "DATA": _as_list(stationID)}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_removeChargingStation", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    remove_chargingStation = remove_charging_station
 
     # Spawn e-taxis parked at given zone(s).
     # zoneID: zone ID or list of zone IDs; num: number of taxis to spawn per zone.
@@ -1834,28 +2060,71 @@ class METSRClient:
             self.stop_viz()
 
 
+    def latest_trajectory_output_dir(self, trajectory_output_dir=None, prefer_binary=True, wait_seconds=0):
+        """Return the newest trajectory output directory for visualization.
+
+        The latest METS-R SIM writes binary trajectory chunks with a
+        ``manifest.json`` file by default. Older runs may still write JSON
+        chunks, so this method accepts both formats and prefers binary output
+        when available.
+        """
+        if not self.sim_folder:
+            raise ValueError("sim_folder is required to locate trajectory output")
+
+        if trajectory_output_dir is not None:
+            roots = [_resolve_trajectory_root(self.sim_folder, trajectory_output_dir)]
+        else:
+            roots = _configured_trajectory_roots(self.sim_folder)
+
+        deadline = time.time() + wait_seconds
+        while True:
+            candidates = []
+            for root in roots:
+                latest = _latest_trajectory_directory(root, prefer_binary=prefer_binary)
+                if latest is not None:
+                    candidates.append(latest)
+
+            if candidates:
+                if prefer_binary:
+                    binary_candidates = [
+                        directory for directory in candidates
+                        if _trajectory_format_score(directory) >= 2
+                    ]
+                    if binary_candidates:
+                        return max(binary_candidates, key=os.path.getmtime)
+                return max(candidates, key=os.path.getmtime)
+
+            if wait_seconds <= 0 or time.time() >= deadline:
+                roots_text = ", ".join(root for root in roots if root)
+                raise FileNotFoundError(
+                    "No trajectory output directory found under " + roots_text
+                )
+            time.sleep(0.5)
+
     # open visualization server
-    def start_viz(self):
-        # obtain the latest directory in the sim_folder/trajectory_output
-        # get the latest directory
-        # Find the latest subdirectory (not file)
-        traj_output_dir = os.path.join(self.sim_folder, "trajectory_output")
-        list_of_dirs = [os.path.join(traj_output_dir, d) for d in os.listdir(traj_output_dir) 
-                        if os.path.isdir(os.path.join(traj_output_dir, d))]
+    def start_viz(self, trajectory_output_dir=None, server_port=8000, prefer_binary=True, wait_seconds=0):
+        latest_directory = self.latest_trajectory_output_dir(
+            trajectory_output_dir=trajectory_output_dir,
+            prefer_binary=prefer_binary,
+            wait_seconds=wait_seconds,
+        )
 
-        if not list_of_dirs:
-            raise FileNotFoundError("No subdirectories found in trajectory_output")
+        if self.viz_server is not None:
+            self.stop_viz()
 
-        latest_directory = max(list_of_dirs, key=os.path.getmtime)
-
-        # open the visualization server
-        self.viz_event, self.viz_server = run_visualization_server(latest_directory)
+        print(
+            f"Starting visualization server for {_trajectory_format_name(latest_directory)} "
+            f"trajectory output: {latest_directory}"
+        )
+        self.viz_event, self.viz_server = run_visualization_server(latest_directory, server_port)
+        self.viz_port = server_port
 
     def stop_viz(self):
         if self.viz_server is not None:
-            stop_visualization_server(self.viz_event, self.viz_server)
+            stop_visualization_server(self.viz_event, self.viz_server, self.viz_port or 8000)
         self.viz_event = None
         self.viz_server = None
+        self.viz_port = None
     
     def _logMessage(self, direction, msg):
         self._messagesLog.append(

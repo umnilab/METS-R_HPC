@@ -8,6 +8,8 @@
       "num_simulations" : 1,
       "random_seeds": [42],
       "sim_step_size": 0.1,
+      "car_following_model": "HERMAN",
+      "lane_changing_model": "AHMED",
       "template": "Template",
       "verbose": false,
       "v2x": true,
@@ -31,5 +33,6 @@
       "private_ev_charging_preference":null,
       "bt_event_file":null,
       "bt_event_std_file":null,
-      "json_output": true
+      "json_output": false,
+      "enable_trajectory_binary_write": true
 }
