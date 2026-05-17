@@ -62,6 +62,15 @@ def _read_property_values(properties_path):
     return values
 
 
+def _read_trajectory_manifest(directory):
+    manifest_path = os.path.join(directory, "manifest.json")
+    try:
+        with open(manifest_path, "r") as manifest_file:
+            return json.load(manifest_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _resolve_trajectory_root(sim_folder, configured_path):
     if not configured_path:
         return None
@@ -102,12 +111,59 @@ def _trajectory_format_score(directory):
 
 
 def _trajectory_format_name(directory):
+    manifest = _read_trajectory_manifest(directory)
+    if manifest is not None:
+        output_format = manifest.get("format", "binary")
+        version = manifest.get("version")
+        if version is not None:
+            return f"{output_format} v{version}"
+        return output_format
+
     score = _trajectory_format_score(directory)
     if score >= 2:
         return "binary"
     if score == 1:
         return "JSON"
     return "trajectory"
+
+
+def _trajectory_manifest_summary(directory, manifest):
+    chunks = manifest.get("chunks", [])
+    active_chunk = manifest.get("activeChunk", {})
+    road_dictionary = manifest.get("roadIdDictionary", [])
+    zone_dictionary = manifest.get("zoneDictionary", [])
+    charging_station_dictionary = manifest.get("chargingStationDictionary", [])
+    schemas = manifest.get("schemas", {})
+    frame_groups = manifest.get("frameGroups", [])
+
+    return {
+        "directory": directory,
+        "manifest_path": os.path.join(directory, "manifest.json"),
+        "format": manifest.get("format"),
+        "version": manifest.get("version"),
+        "byte_order": manifest.get("byteOrder"),
+        "coord_scale": manifest.get("coordScale"),
+        "initial_x": manifest.get("initialX"),
+        "initial_y": manifest.get("initialY"),
+        "tick_interval": manifest.get("tickInterval"),
+        "link_snapshot_interval": manifest.get("linkSnapshotInterval"),
+        "chunk_tick_limit": manifest.get("chunkTickLimit"),
+        "chunk_count": len(chunks),
+        "active_chunk": active_chunk,
+        "road_count": len(road_dictionary),
+        "zone_count": len(zone_dictionary),
+        "charging_station_count": len(charging_station_dictionary),
+        "frame_groups": frame_groups,
+        "schema_names": sorted(schemas.keys()),
+        "has_zone_attributes": bool(zone_dictionary) or "zone" in schemas,
+        "has_charging_station_attributes": (
+            bool(charging_station_dictionary) or "chargingStation" in schemas
+        ),
+        "has_split_energy_fields": (
+            "frameHeader" in schemas
+            and any("energyPrivateEV" in field for field in schemas["frameHeader"])
+        ),
+    }
 
 
 def _latest_trajectory_directory(root, prefer_binary=True):
@@ -2098,8 +2154,53 @@ class METSRClient:
                 roots_text = ", ".join(root for root in roots if root)
                 raise FileNotFoundError(
                     "No trajectory output directory found under " + roots_text
-                )
+            )
             time.sleep(0.5)
+
+    def get_trajectory_manifest(self, trajectory_output_dir=None, prefer_binary=True, wait_seconds=0):
+        """Return the manifest for the latest binary trajectory output.
+
+        METS-R SIM binary trajectory format v3 adds ``zoneDictionary``,
+        ``chargingStationDictionary``, ``frameGroups``, and split fleet-energy
+        fields. This helper exposes those fields without making callers locate
+        or parse ``manifest.json`` manually.
+        """
+        latest_directory = self.latest_trajectory_output_dir(
+            trajectory_output_dir=trajectory_output_dir,
+            prefer_binary=prefer_binary,
+            wait_seconds=wait_seconds,
+        )
+        manifest = _read_trajectory_manifest(latest_directory)
+        if manifest is None:
+            raise FileNotFoundError(
+                "No manifest.json found in trajectory output directory: "
+                + latest_directory
+            )
+
+        manifest = dict(manifest)
+        manifest["_directory"] = latest_directory
+        manifest["_manifest_path"] = os.path.join(latest_directory, "manifest.json")
+        return manifest
+
+    def get_trajectory_summary(self, trajectory_output_dir=None, prefer_binary=True, wait_seconds=0):
+        """Return high-level metadata for the latest trajectory output."""
+        latest_directory = self.latest_trajectory_output_dir(
+            trajectory_output_dir=trajectory_output_dir,
+            prefer_binary=prefer_binary,
+            wait_seconds=wait_seconds,
+        )
+        manifest = _read_trajectory_manifest(latest_directory)
+        if manifest is not None:
+            return _trajectory_manifest_summary(latest_directory, manifest)
+
+        return {
+            "directory": latest_directory,
+            "format": _trajectory_format_name(latest_directory),
+            "version": None,
+            "has_zone_attributes": False,
+            "has_charging_station_attributes": False,
+            "has_split_energy_fields": False,
+        }
 
     # open visualization server
     def start_viz(self, trajectory_output_dir=None, server_port=8000, prefer_binary=True, wait_seconds=0):
