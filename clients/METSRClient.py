@@ -501,6 +501,15 @@ class METSRClient:
                 if res["TYPE"] != "STEP":
                     raise RuntimeError(f"Expected STEP while ticking, received {res['TYPE']}")
 
+                if res.get("CODE") == "KO":
+                    if not wait_forever:
+                        raise RuntimeError(
+                            f"METS-R SIM rejected STEP request for tick {target_tick}; "
+                            f"server reported tick {self.current_tick}"
+                        )
+                    send_step_request()
+                    continue
+
                 step_tick = int(res["TICK"])
                 if step_tick < int(self.current_tick):
                     continue
