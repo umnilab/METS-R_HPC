@@ -611,7 +611,9 @@ class METSRClient:
               'avg_travel_time':  <float> recent mean travel time (s),
               'length':           <float> road length (m),
               'energy_consumed':  <float> cumulative energy consumed on this road (kWh),
-              'down_stream_road': <list>  list of downstream road orig-IDs
+              'down_stream_road': <list>  list of downstream road orig-IDs,
+              'enteringVehicleQueue': <list[int]> vehicle IDs waiting to enter
+                                         this road, useful for co-sim roads
             }
 
         Parameters
@@ -629,6 +631,32 @@ class METSRClient:
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_road", res["TYPE"]
         return res
+
+    def query_entering_vehicle_queue(self, roadID = None):
+        """Query vehicles waiting in one or more road entering queues.
+
+        Co-simulation roads hold this queue until the external simulator calls
+        :meth:`enter_road_from_queue`. Without ``roadID`` the server returns
+        the road index. With road IDs, each record includes ``enteringVehicleIDs``
+        and detailed queue entries with visible/private IDs, internal IDs,
+        vehicle type, departure tick, and readiness.
+        """
+        msg = {"TYPE": "QUERY_enteringVehicleQueue"}
+        if roadID is not None:
+            msg["DATA"] = _as_list(roadID)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_enteringVehicleQueue", res["TYPE"]
+        return res
+
+    def query_cosim_entering_vehicle_queue(self):
+        """Query entering queues for every road currently marked as co-sim."""
+        msg = {"TYPE": "QUERY_coSimEnteringVehicleQueue"}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_coSimEnteringVehicleQueue", res["TYPE"]
+        return res
+
+    query_coSim_entering_vehicle_queue = query_cosim_entering_vehicle_queue
+    query_cosim_enteringVehicleQueue = query_cosim_entering_vehicle_queue
     
     def query_centerline(self, id, lane_index = -1, transform_coords = False):
         """Query the geometric center-line of a road or a specific lane.
@@ -1287,6 +1315,73 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_releaseCosimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def enter_road_from_queue(self, vehID = None, roadID = None, private_veh = None,
+                              internal_vehicle_id = None, requests = None):
+        """Release queued vehicle(s) onto co-simulation road(s).
+
+        The latest METS-R SIM keeps vehicles from automatically spawning onto
+        roads marked ``Road.COSIM``. Query the queue with
+        :meth:`query_entering_vehicle_queue` or
+        :meth:`query_cosim_entering_vehicle_queue`, then call this method when
+        the external simulator is ready to spawn a queued vehicle.
+
+        Parameters
+        ----------
+        vehID : int | list[int] | None
+            Visible vehicle ID. For private EV/GV this is the private/external
+            ID returned by the co-sim bridge; for taxis/buses it is the internal
+            vehicle ID. If omitted with ``roadID``, the road queue head is
+            released.
+        roadID : str | list[str] | None
+            Optional SUMO/original road ID. If omitted, all co-sim entering
+            queues are searched for ``vehID``.
+        private_veh : bool | list[bool] | None
+            Optional vehicle-type filter. ``True`` means private EV/GV,
+            ``False`` means public taxi/bus.
+        internal_vehicle_id : int | list[int] | None
+            Optional internal METS-R vehicle ID, useful when visible private IDs
+            are not available.
+        requests : dict | list[dict] | None
+            Fully formed simulator request record(s). When provided, other
+            parameters are ignored.
+        """
+        msg = {"TYPE": "CTRL_enterRoadFromQueue", "DATA": []}
+        if requests is not None:
+            msg["DATA"] = _as_list(requests)
+        else:
+            if vehID is None and roadID is None and internal_vehicle_id is None:
+                raise ValueError("vehID, roadID, internal_vehicle_id, or requests is required")
+
+            lengths = [
+                len(value) for value in (vehID, roadID, private_veh, internal_vehicle_id)
+                if _is_sequence(value) and not isinstance(value, str)
+            ]
+            count = max(lengths) if lengths else 1
+            veh_ids = _broadcast(vehID, count)
+            road_ids = _broadcast(roadID, count)
+            private_flags = _broadcast(private_veh, count)
+            internal_ids = _broadcast(internal_vehicle_id, count)
+
+            for vid, rid, prv, internal_id in zip(veh_ids, road_ids, private_flags, internal_ids):
+                record = {}
+                if vid is not None:
+                    record["vehID"] = vid
+                if internal_id is not None:
+                    record["internalVehicleID"] = internal_id
+                if prv is not None:
+                    record["vehType"] = prv
+                if rid is not None:
+                    record["roadID"] = rid
+                msg["DATA"].append(record)
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_enterRoadFromQueue", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    allow_road_vehicle_enter = enter_road_from_queue
+    release_entering_vehicle = enter_road_from_queue
         
     # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
     def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, z = 0.0, private_veh = False, transform_coords = False):
