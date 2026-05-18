@@ -23,3 +23,9 @@ python carla_viz_example.py
 ```
 
 For detailed documentation, see [CARLA_VISUALIZATION_README.md](CARLA_VISUALIZATION_README.md).
+
+## License
+
+Copyright (c) 2026 UMNILAB.
+
+This repository is licensed by UMNILAB under the Creative Commons Attribution 4.0 International License. See [LICENSE](LICENSE).
