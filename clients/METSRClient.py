@@ -351,8 +351,10 @@ class METSRClient:
                     self._logMessage("RECEIVED", msg)
 
                 # EVERY decoded msg must have a TYPE field
-                assert "TYPE" in msg.keys(), "No type field in received message"
-                assert msg["TYPE"].split("_")[0] in {"STEP", "ANS", "CTRL", "ATK"}, "Uknown message type: " + str(msg["TYPE"])
+                if "TYPE" not in msg.keys():
+                    raise RuntimeError("No type field in received message")
+                if msg["TYPE"].split("_")[0] not in {"STEP", "ANS", "CTRL", "ATK"}:
+                    raise RuntimeError("Uknown message type: " + str(msg["TYPE"]))
 
                 # Allow tick()
                 if msg["TYPE"] in {"ANS_ready"}:
@@ -371,10 +373,14 @@ class METSRClient:
                     return msg
             except KeyboardInterrupt:
                 raise
-            except Exception:
+            except TimeoutError:
+                pass
+            except Exception as exc:
                 fatal_error = self._fatal_log_error()
                 if fatal_error:
-                    raise RuntimeError(fatal_error)
+                    raise RuntimeError(fatal_error) from exc
+                self.state = "failed"
+                raise RuntimeError(f"Error while receiving message from METS-R SIM at {self.uri}: {exc}") from exc
             
             if time.time() - start_time > self.timeout and not waiting_forever:
                 print("Timeout while waiting for message.")
@@ -399,20 +405,82 @@ class METSRClient:
                 return None  # Return None to indicate the operation was interrupted
             return res
 
-    def tick(self, step_num = 1, wait_forever = False):
+    def tick(self, step_num = 1, wait_forever = False, retry_interval = None, max_wait_seconds = None):
+        """Advance the simulator and wait until the requested tick is reached."""
         assert self.current_tick is not None, "self.current_tick is None. Maybe there is another METS-R SIM instance unclosed."
-        msg = {"TYPE": "STEP", "TICK": self.current_tick, "NUM": step_num}
-        self.send_msg(msg)
 
-        while True:
-            # Move through messages until we get to an up to date heartbeat
-            res = self.receive_msg(ignore_heartbeats=False, waiting_forever=wait_forever)
+        step_num = int(step_num)
+        if step_num < 1:
+            raise ValueError("step_num must be a positive integer")
 
-            assert res["TYPE"] == "STEP", res["TYPE"]
-            if res["TICK"] == self.current_tick + step_num:
-                break
+        with self.lock:
+            start_tick = int(self.current_tick)
+            target_tick = start_tick + step_num
+            overall_start = time.time()
+            last_progress_time = overall_start
+            last_send_time = overall_start
 
-        self.current_tick = res["TICK"]
+            if retry_interval is None:
+                retry_interval = self.timeout
+
+            def send_step_request():
+                nonlocal last_send_time
+                remaining_steps = target_tick - int(self.current_tick)
+                if remaining_steps <= 0:
+                    return
+                msg = {"TYPE": "STEP", "TICK": int(self.current_tick), "NUM": remaining_steps}
+                self.send_msg(msg)
+                last_send_time = time.time()
+
+            send_step_request()
+
+            while True:
+                if int(self.current_tick) >= target_tick:
+                    break
+
+                if max_wait_seconds is not None and time.time() - overall_start > max_wait_seconds:
+                    raise TimeoutError(
+                        f"Timed out waiting for METS-R SIM to reach tick {target_tick}; "
+                        f"last received tick was {self.current_tick}"
+                    )
+
+                # Always use a bounded receive here so wait_forever=True can still retry
+                # the STEP request instead of blocking forever on a missed heartbeat.
+                res = self.receive_msg(ignore_heartbeats=False, waiting_forever=False)
+                now = time.time()
+
+                if int(self.current_tick) >= target_tick:
+                    break
+
+                if res is None:
+                    if not wait_forever:
+                        raise TimeoutError(
+                            f"Timed out waiting for METS-R SIM to reach tick {target_tick}; "
+                            f"last received tick was {self.current_tick}"
+                        )
+
+                    if retry_interval is not None and now - max(last_send_time, last_progress_time) >= retry_interval:
+                        if self.verbose:
+                            print(
+                                f"Still waiting for STEP tick {target_tick}; "
+                                f"last received tick was {self.current_tick}. Retrying STEP request."
+                            )
+                        send_step_request()
+                    continue
+
+                if res["TYPE"] != "STEP":
+                    raise RuntimeError(f"Expected STEP while ticking, received {res['TYPE']}")
+
+                step_tick = int(res["TICK"])
+                if step_tick < int(self.current_tick):
+                    continue
+
+                if step_tick > int(self.current_tick):
+                    self.current_tick = step_tick
+                    last_progress_time = now
+
+                if step_tick >= target_tick:
+                    break
    
     # QUERY: inspect the state of the simulator
     # By default query public vehicles
@@ -1379,9 +1447,6 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_enterRoadFromQueue", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
-
-    allow_road_vehicle_enter = enter_road_from_queue
-    release_entering_vehicle = enter_road_from_queue
         
     # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
     def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, z = 0.0, private_veh = False, transform_coords = False):
