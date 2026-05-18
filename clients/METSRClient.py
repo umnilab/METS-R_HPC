@@ -115,9 +115,11 @@ def _trajectory_format_name(directory):
     if manifest is not None:
         output_format = manifest.get("format", "binary")
         version = manifest.get("version")
+        sparse_frame_groups = manifest.get("sparseFrameGroups") or []
+        sparse_suffix = " sparse" if sparse_frame_groups else ""
         if version is not None:
-            return f"{output_format} v{version}"
-        return output_format
+            return f"{output_format} v{version}{sparse_suffix}"
+        return f"{output_format}{sparse_suffix}"
 
     score = _trajectory_format_score(directory)
     if score >= 2:
@@ -135,6 +137,8 @@ def _trajectory_manifest_summary(directory, manifest):
     charging_station_dictionary = manifest.get("chargingStationDictionary", [])
     schemas = manifest.get("schemas", {})
     frame_groups = manifest.get("frameGroups", [])
+    sparse_frame_groups = manifest.get("sparseFrameGroups") or []
+    sparse_frame_group_mode = manifest.get("sparseFrameGroupMode")
 
     return {
         "directory": directory,
@@ -154,6 +158,11 @@ def _trajectory_manifest_summary(directory, manifest):
         "zone_count": len(zone_dictionary),
         "charging_station_count": len(charging_station_dictionary),
         "frame_groups": frame_groups,
+        "sparse_frame_groups": sparse_frame_groups,
+        "sparse_frame_group_mode": sparse_frame_group_mode,
+        "has_sparse_frame_groups": bool(sparse_frame_groups),
+        "has_sparse_zone_frames": "zone" in sparse_frame_groups,
+        "has_sparse_charging_station_frames": "chargingStation" in sparse_frame_groups,
         "schema_names": sorted(schemas.keys()),
         "has_zone_attributes": bool(zone_dictionary) or "zone" in schemas,
         "has_charging_station_attributes": (
@@ -2320,10 +2329,10 @@ class METSRClient:
     def get_trajectory_manifest(self, trajectory_output_dir=None, prefer_binary=True, wait_seconds=0):
         """Return the manifest for the latest binary trajectory output.
 
-        METS-R SIM binary trajectory format v3 adds ``zoneDictionary``,
-        ``chargingStationDictionary``, ``frameGroups``, and split fleet-energy
-        fields. This helper exposes those fields without making callers locate
-        or parse ``manifest.json`` manually.
+        METS-R SIM binary trajectory format v6 writes zone and charging-station
+        frames as sparse deltas. This helper exposes the manifest, including
+        ``sparseFrameGroups`` and ``sparseFrameGroupMode``, without making
+        callers locate or parse ``manifest.json`` manually.
         """
         latest_directory = self.latest_trajectory_output_dir(
             trajectory_output_dir=trajectory_output_dir,
@@ -2357,6 +2366,11 @@ class METSRClient:
             "directory": latest_directory,
             "format": _trajectory_format_name(latest_directory),
             "version": None,
+            "sparse_frame_groups": [],
+            "sparse_frame_group_mode": None,
+            "has_sparse_frame_groups": False,
+            "has_sparse_zone_frames": False,
+            "has_sparse_charging_station_frames": False,
             "has_zone_attributes": False,
             "has_charging_station_attributes": False,
             "has_split_energy_fields": False,
