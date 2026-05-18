@@ -344,7 +344,14 @@ class METSRClient:
             self._logMessage("SENT", msg)
         self.ws.send(json.dumps(msg))
 
-    def receive_msg(self, ignore_heartbeats, waiting_forever = True, return_ready = False):
+    def _update_current_tick_from_step(self, msg):
+        if msg.get("TYPE") != "STEP" or "TICK" not in msg:
+            return
+        step_tick = int(msg["TICK"])
+        if self.current_tick is None or step_tick > int(self.current_tick):
+            self.current_tick = step_tick
+
+    def receive_msg(self, ignore_heartbeats, waiting_forever = True, return_ready = False, print_timeout = True):
         start_time = time.time()
         while True:
             fatal_error = self._fatal_log_error()
@@ -364,6 +371,8 @@ class METSRClient:
                     raise RuntimeError("No type field in received message")
                 if msg["TYPE"].split("_")[0] not in {"STEP", "ANS", "CTRL", "ATK"}:
                     raise RuntimeError("Uknown message type: " + str(msg["TYPE"]))
+
+                self._update_current_tick_from_step(msg)
 
                 # Allow tick()
                 if msg["TYPE"] in {"ANS_ready"}:
@@ -392,7 +401,8 @@ class METSRClient:
                 raise RuntimeError(f"Error while receiving message from METS-R SIM at {self.uri}: {exc}") from exc
             
             if time.time() - start_time > self.timeout and not waiting_forever:
-                print("Timeout while waiting for message.")
+                if print_timeout:
+                    print("Timeout while waiting for message.")
                 return None
             
     def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5): 
@@ -404,9 +414,16 @@ class METSRClient:
                     num_attempts += 1
                     self.send_msg(msg)
                     if(max_attempts > 0):
-                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
+                        res = self.receive_msg(
+                            ignore_heartbeats=ignore_heartbeats,
+                            waiting_forever=False,
+                            print_timeout=False,
+                        )
                         if num_attempts >= max_attempts:
-                            raise TimeoutError(f"No response received for '{msg.get('TYPE', 'unknown')}' after {max_attempts} attempts")
+                            raise TimeoutError(
+                                f"No response received for '{msg.get('TYPE', 'unknown')}' "
+                                f"after {max_attempts} attempts; last STEP tick seen was {self.current_tick}"
+                            )
                     else:
                         res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
             except KeyboardInterrupt:
@@ -455,7 +472,11 @@ class METSRClient:
 
                 # Always use a bounded receive here so wait_forever=True can still retry
                 # the STEP request instead of blocking forever on a missed heartbeat.
-                res = self.receive_msg(ignore_heartbeats=False, waiting_forever=False)
+                res = self.receive_msg(
+                    ignore_heartbeats=False,
+                    waiting_forever=False,
+                    print_timeout=False,
+                )
                 now = time.time()
 
                 if int(self.current_tick) >= target_tick:
