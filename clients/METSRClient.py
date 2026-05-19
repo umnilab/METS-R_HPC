@@ -344,21 +344,30 @@ class METSRClient:
             self._logMessage("SENT", msg)
         self.ws.send(json.dumps(msg))
 
-    def _update_current_tick_from_step(self, msg):
-        if msg.get("TYPE") != "STEP" or "TICK" not in msg:
-            return
-        step_tick = int(msg["TICK"])
-        if self.current_tick is None or step_tick > int(self.current_tick):
-            self.current_tick = step_tick
+    def _update_current_tick_from_message(self, msg):
+        if msg.get("TYPE") not in {"STEP", "ANS_tick"} or "TICK" not in msg:
+            return False
+        server_tick = int(msg["TICK"])
+        if self.current_tick is None or server_tick > int(self.current_tick):
+            self.current_tick = server_tick
+            return True
+        return False
 
-    def receive_msg(self, ignore_heartbeats, waiting_forever = True, return_ready = False, print_timeout = True):
+    def receive_msg(
+            self,
+            ignore_heartbeats,
+            waiting_forever = True,
+            return_ready = False,
+            print_timeout = True,
+            timeout = None):
+        timeout = self.timeout if timeout is None else timeout
         start_time = time.time()
         while True:
             fatal_error = self._fatal_log_error()
             if fatal_error:
                 raise RuntimeError(fatal_error)
             try:
-                raw_msg = self.ws.recv(timeout = min(5, max(1, self.timeout)))
+                raw_msg = self.ws.recv(timeout = min(5, max(0.1, timeout)))
 
                 # Decode the json string
                 msg = json.loads(str(raw_msg))
@@ -372,7 +381,7 @@ class METSRClient:
                 if msg["TYPE"].split("_")[0] not in {"STEP", "ANS", "CTRL", "ATK"}:
                     raise RuntimeError("Uknown message type: " + str(msg["TYPE"]))
 
-                self._update_current_tick_from_step(msg)
+                self._update_current_tick_from_message(msg)
 
                 # Allow tick()
                 if msg["TYPE"] in {"ANS_ready"}:
@@ -400,7 +409,7 @@ class METSRClient:
                 self.state = "failed"
                 raise RuntimeError(f"Error while receiving message from METS-R SIM at {self.uri}: {exc}") from exc
             
-            if time.time() - start_time > self.timeout and not waiting_forever:
+            if time.time() - start_time > timeout and not waiting_forever:
                 if print_timeout:
                     print("Timeout while waiting for message.")
                 return None
@@ -430,6 +439,37 @@ class METSRClient:
                 print("\nKeyboardInterrupt detected. Stopping the current operation but keeping the server active.")
                 return None  # Return None to indicate the operation was interrupted
             return res
+
+    def _apply_tick_response(self, res):
+        if res.get("TYPE") != "ANS_tick":
+            raise RuntimeError(f"Expected ANS_tick, received {res.get('TYPE')}")
+        if res.get("CODE", "OK") != "OK":
+            raise RuntimeError(f"METS-R SIM rejected QUERY_tick: {res}")
+        if "TICK" not in res:
+            raise RuntimeError(f"METS-R SIM QUERY_tick response is missing TICK: {res}")
+        self._update_current_tick_from_message(res)
+        return int(res["TICK"])
+
+    def _query_tick_locked(self, timeout = None):
+        """Query server tick while self.lock is already held."""
+        before_tick = self.current_tick
+        self.send_msg({"TYPE": "QUERY_tick"})
+        res = self.receive_msg(
+            ignore_heartbeats=True,
+            waiting_forever=False,
+            print_timeout=False,
+            timeout=min(5, max(0.1, self.timeout if timeout is None else timeout)),
+        )
+        if res is None:
+            if before_tick != self.current_tick:
+                return int(self.current_tick)
+            return None
+        return self._apply_tick_response(res)
+
+    def query_tick(self):
+        """Return the current simulation tick reported by METS-R SIM."""
+        res = self.send_receive_msg({"TYPE": "QUERY_tick"}, ignore_heartbeats=True)
+        return self._apply_tick_response(res)
 
     def tick(self, step_num = 1, wait_forever = False, retry_interval = None, max_wait_seconds = None):
         """Advance the simulator and wait until the requested tick is reached."""
@@ -483,13 +523,26 @@ class METSRClient:
                     break
 
                 if res is None:
+                    synced_tick = self._query_tick_locked()
+                    now = time.time()
+                    if synced_tick is not None:
+                        last_progress_time = now
+
+                    if int(self.current_tick) >= target_tick:
+                        break
+
                     if not wait_forever:
                         raise TimeoutError(
                             f"Timed out waiting for METS-R SIM to reach tick {target_tick}; "
                             f"last received tick was {self.current_tick}"
                         )
 
-                    if retry_interval is not None and now - max(last_send_time, last_progress_time) >= retry_interval:
+                    should_retry_step = (
+                        retry_interval is None
+                        or synced_tick is not None
+                        or now - max(last_send_time, last_progress_time) >= retry_interval
+                    )
+                    if should_retry_step:
                         if self.verbose:
                             print(
                                 f"Still waiting for STEP tick {target_tick}; "
@@ -498,10 +551,20 @@ class METSRClient:
                         send_step_request()
                     continue
 
+                if res["TYPE"] == "ANS_tick":
+                    last_progress_time = now
+                    continue
+
                 if res["TYPE"] != "STEP":
                     raise RuntimeError(f"Expected STEP while ticking, received {res['TYPE']}")
 
                 if res.get("CODE") == "KO":
+                    synced_tick = self._query_tick_locked()
+                    now = time.time()
+                    if synced_tick is not None:
+                        last_progress_time = now
+                    if int(self.current_tick) >= target_tick:
+                        break
                     if not wait_forever:
                         raise RuntimeError(
                             f"METS-R SIM rejected STEP request for tick {target_tick}; "
