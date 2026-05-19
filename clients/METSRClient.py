@@ -471,13 +471,27 @@ class METSRClient:
         res = self.send_receive_msg({"TYPE": "QUERY_tick"}, ignore_heartbeats=True)
         return self._apply_tick_response(res)
 
-    def tick(self, step_num = 1, wait_forever = False, retry_interval = None, max_wait_seconds = None):
-        """Advance the simulator and wait until the requested tick is reached."""
+    def tick(
+            self,
+            step_num = 1,
+            wait_forever = False,
+            retry_interval = None,
+            max_wait_seconds = None,
+            poll_timeout = 5,
+            max_stalled_seconds = None):
+        """Advance the simulator and wait until the requested tick is reached.
+
+        ``wait_forever`` keeps tolerating slow steps, but it should not hide a
+        dead server or a permanently stalled tick. Progress is therefore based
+        on the server tick actually increasing, not just on receiving a reply.
+        """
         assert self.current_tick is not None, "self.current_tick is None. Maybe there is another METS-R SIM instance unclosed."
 
         step_num = int(step_num)
         if step_num < 1:
             raise ValueError("step_num must be a positive integer")
+
+        poll_timeout = min(max(0.1, float(poll_timeout)), max(0.1, float(self.timeout)))
 
         with self.lock:
             start_tick = int(self.current_tick)
@@ -487,7 +501,13 @@ class METSRClient:
             last_send_time = overall_start
 
             if retry_interval is None:
-                retry_interval = self.timeout
+                retry_interval = min(float(self.timeout), 30.0)
+
+            if not wait_forever and max_wait_seconds is None:
+                max_wait_seconds = self.timeout
+
+            if wait_forever and max_stalled_seconds is None:
+                max_stalled_seconds = max(60.0, min(float(self.timeout), 300.0))
 
             def send_step_request():
                 nonlocal last_send_time
@@ -512,20 +532,35 @@ class METSRClient:
 
                 # Always use a bounded receive here so wait_forever=True can still retry
                 # the STEP request instead of blocking forever on a missed heartbeat.
+                tick_before_receive = int(self.current_tick)
                 res = self.receive_msg(
                     ignore_heartbeats=False,
                     waiting_forever=False,
                     print_timeout=False,
+                    timeout=poll_timeout,
                 )
                 now = time.time()
+                if int(self.current_tick) > tick_before_receive:
+                    last_progress_time = now
 
                 if int(self.current_tick) >= target_tick:
                     break
 
+                if (
+                        max_stalled_seconds is not None
+                        and now - last_progress_time > max_stalled_seconds):
+                    raise TimeoutError(
+                        f"METS-R SIM made no tick progress for "
+                        f"{now - last_progress_time:.1f} seconds while waiting for "
+                        f"tick {target_tick}; last server tick was {self.current_tick}. "
+                        "The simulator or WebSocket server is likely stalled."
+                    )
+
                 if res is None:
+                    tick_before_query = int(self.current_tick)
                     synced_tick = self._query_tick_locked()
                     now = time.time()
-                    if synced_tick is not None:
+                    if synced_tick is not None and int(self.current_tick) > tick_before_query:
                         last_progress_time = now
 
                     if int(self.current_tick) >= target_tick:
@@ -539,7 +574,7 @@ class METSRClient:
 
                     should_retry_step = (
                         retry_interval is None
-                        or synced_tick is not None
+                        or int(self.current_tick) > tick_before_query
                         or now - max(last_send_time, last_progress_time) >= retry_interval
                     )
                     if should_retry_step:
@@ -552,16 +587,16 @@ class METSRClient:
                     continue
 
                 if res["TYPE"] == "ANS_tick":
-                    last_progress_time = now
                     continue
 
                 if res["TYPE"] != "STEP":
                     raise RuntimeError(f"Expected STEP while ticking, received {res['TYPE']}")
 
                 if res.get("CODE") == "KO":
+                    tick_before_query = int(self.current_tick)
                     synced_tick = self._query_tick_locked()
                     now = time.time()
-                    if synced_tick is not None:
+                    if synced_tick is not None and int(self.current_tick) > tick_before_query:
                         last_progress_time = now
                     if int(self.current_tick) >= target_tick:
                         break
