@@ -471,6 +471,10 @@ class METSRClient:
         res = self.send_receive_msg({"TYPE": "QUERY_tick"}, ignore_heartbeats=True)
         return self._apply_tick_response(res)
 
+    def query_tick_status(self):
+        res = self.send_receive_msg({"TYPE": "QUERY_stepStatus"}, ignore_heartbeats=True)
+        return res
+
     def tick(
             self,
             step_num = 1,
