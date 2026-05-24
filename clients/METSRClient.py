@@ -10,6 +10,22 @@ import networkx as nx
 str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
 
+VEHICLE_SENSOR_DSRC = 0
+VEHICLE_SENSOR_CV2X = 1
+VEHICLE_SENSOR_MOBILE_DEVICE = 2
+
+VEHICLE_SENSOR_TYPES = {
+    "dsrc": VEHICLE_SENSOR_DSRC,
+    "80211p": VEHICLE_SENSOR_DSRC,
+    "cv2x": VEHICLE_SENSOR_CV2X,
+    "c-v2x": VEHICLE_SENSOR_CV2X,
+    "c_v2x": VEHICLE_SENSOR_CV2X,
+    "mobile": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobiledevice": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobile_device": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobile-device": VEHICLE_SENSOR_MOBILE_DEVICE,
+}
+
 
 def _is_sequence(value):
     return isinstance(value, (list, tuple))
@@ -19,6 +35,20 @@ def _as_list(value):
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value]
+
+
+def _normalize_sensor_type(sensor_type):
+    if isinstance(sensor_type, str):
+        key = sensor_type.strip().lower()
+        compact_key = key.replace(" ", "").replace("_", "").replace("-", "")
+        if key in VEHICLE_SENSOR_TYPES:
+            return VEHICLE_SENSOR_TYPES[key]
+        if compact_key in VEHICLE_SENSOR_TYPES:
+            return VEHICLE_SENSOR_TYPES[compact_key]
+        raise ValueError(
+            "Unknown sensorType. Use 0/'dsrc', 1/'cv2x', or 2/'mobile_device'."
+        )
+    return sensor_type
 
 
 def _broadcast(value, length):
@@ -221,6 +251,10 @@ Acknowledgement: Eric Vin for helping with the revision of the code
 # 2. listerize the query and control function by adding a for loop (is list, go for list, otherwise make it a list with one element)
 
 class METSRClient:
+    SENSOR_DSRC = VEHICLE_SENSOR_DSRC
+    SENSOR_CV2X = VEHICLE_SENSOR_CV2X
+    SENSOR_MOBILE_DEVICE = VEHICLE_SENSOR_MOBILE_DEVICE
+    VEHICLE_SENSOR_TYPES = VEHICLE_SENSOR_TYPES
 
     def __init__(
             self,
@@ -472,6 +506,12 @@ class METSRClient:
         return self._apply_tick_response(res)
 
     def query_tick_status(self):
+        """Return server-side stepping status.
+
+        Recent METS-R SIM versions include active-road stepping fields such as
+        ``activeRoadStepping`` and ``activeRoadCount`` when that scheduler mode
+        is enabled.
+        """
         res = self.send_receive_msg({"TYPE": "QUERY_stepStatus"}, ignore_heartbeats=True)
         return res
 
@@ -655,8 +695,7 @@ class METSRClient:
                                    5 = CRUISING_TRIP
                                    6 = PICKUP_TRIP
                                    7 = ACCESSIBLE_RELOCATION_TRIP
-                                   8 = PRIVATE_TRIP
-                                   9 = CHARGING_RETURN_TRIP,
+                                   8 = PRIVATE_TRIP,
               'x':       <float> network-CRS x coordinate (or lon if transform_coords=True),
               'y':       <float> network-CRS y coordinate (or lat if transform_coords=True),
               'z':       <float> elevation,
@@ -667,7 +706,9 @@ class METSRClient:
                                  (only present when vehicle is on a road),
               'lane':    <int>   lane index on that road (present when on a lane),
               'dist':    <float> distance to the next downstream junction (m)
-                                 (present when on a lane)
+                                 (present when on a lane),
+              'currentParkingRoad': <int> internal road ID where the vehicle is
+                                     parked or has reserved parking, when set
             }
 
         Parameters
@@ -722,7 +763,9 @@ class METSRClient:
               'origin':   <int>   current origin zone ID,
               'dest':     <int>   current destination zone ID
                                   (negative → heading to a charging station),
-              'pass_num': <int>   number of passengers currently on board
+              'pass_num': <int>   number of passengers currently on board,
+              'currentParkingRoad': <int> internal road ID where the taxi is
+                                     parked or has reserved parking, when set
             }
 
         Parameters
@@ -821,6 +864,8 @@ class METSRClient:
               'length':           <float> road length (m),
               'energy_consumed':  <float> cumulative energy consumed on this road (kWh),
               'down_stream_road': <list>  list of downstream road orig-IDs,
+              'parking_capacity': <int>   parking capacity on this road,
+              'parked_num':       <int>   current parked or reserved vehicles,
               'enteringVehicleQueue': <list[int]> vehicle IDs waiting to enter
                                          this road, useful for co-sim roads
             }
@@ -1697,33 +1742,56 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    # update the sensor type of specified vehicle
     def update_vehicle_sensor_type(self, vehID, sensorType, private_veh = False):
+        """Update vehicle sensor type used by V2X/DSRC data collection.
+
+        ``sensorType`` may be the simulator integer code or a readable alias:
+        ``0``/``"dsrc"``, ``1``/``"cv2x"``, or
+        ``2``/``"mobile_device"``. DSRC and C-V2X vehicles emit BSM-style
+        safety records when ``V2X = true``; mobile-device vehicles emit link
+        travel-time and energy probe records.
+        """
         msg = {
                 "TYPE": "CTRL_updateVehicleSensorType",
                 "DATA": []
                 }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(private_veh, list):
+        vehID = _as_list(vehID)
+        if not _is_sequence(private_veh):
             private_veh = [private_veh] * len(vehID)
-        if not isinstance(sensorType, list):
+        else:
+            private_veh = list(private_veh)
+        if not _is_sequence(sensorType):
             sensorType = [sensorType] * len(vehID)
+        else:
+            sensorType = list(sensorType)
+        assert len(vehID) == len(sensorType) == len(private_veh), \
+            "vehID, sensorType, and private_veh must have the same length"
         for vehID, sensorType, private_veh in zip(vehID, sensorType, private_veh):
-            msg["DATA"].append({"vehID": vehID, "sensorType": sensorType, "vehType": private_veh})
+            msg["DATA"].append({
+                "vehID": vehID,
+                "sensorType": _normalize_sensor_type(sensorType),
+                "vehType": private_veh,
+            })
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_updateVehicleSensorType", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    set_vehicle_sensor_type = update_vehicle_sensor_type
+    updateVehicleSensorType = update_vehicle_sensor_type
     
     # Match available taxi(s) to existing pending request(s).
     def dispatch_taxi(self, vehID, reqID):
         """Dispatch taxi(s) to serve already-pending request(s).
 
-        The latest METS-R SIM Control API separates request creation from
-        dispatching. Use ``add_taxi_requests`` or
-        ``add_taxi_requests_between_roads`` first, read the returned ``reqID``,
-        then pass ``vehID`` and ``reqID`` here.
+        The METS-R SIM Control API separates request creation from dispatching.
+        Use ``add_taxi_requests`` or ``add_taxi_requests_between_roads`` first,
+        read the returned ``reqID``, then pass ``vehID`` and ``reqID`` here.
+
+        Recent METS-R SIM versions can release a parked taxi from parking,
+        queue the request after an unfinished passenger-free trip, and return
+        fields such as ``remainingCapacity``, ``requestPassengers``, and
+        ``parkingReservationReleased`` in each response record.
         """
         msg = {
                 "TYPE": "CTRL_dispatchTaxi",
@@ -1743,7 +1811,12 @@ class METSRClient:
         return res
 
     def reposition_taxi(self, vehID, zoneID):
-        """Reposition idle/cruising taxi(s) to destination zone(s)."""
+        """Reposition idle/cruising taxi(s) to destination zone(s).
+
+        If the taxi was already traveling to reserved parking, the simulator can
+        release that reservation and report ``parkingReservationReleased`` in
+        the response record.
+        """
         msg = {"TYPE": "CTRL_repositionTaxi", "DATA": []}
         if not isinstance(vehID, list):
             vehID = [vehID]
@@ -1757,6 +1830,47 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_repositionTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def go_parking(self, vehID, zoneID=None, roadID=None):
+        """Send idle taxi(s) to park at a target zone or road.
+
+        Provide ``zoneID``, ``roadID``, or both. If only ``zoneID`` is supplied,
+        METS-R SIM samples a parking road in that zone. If only ``roadID`` is
+        supplied, the zone is inferred from the road. When both are supplied,
+        the road must belong to the zone and have available parking capacity.
+        """
+        msg = {"TYPE": "CTRL_goParking", "DATA": []}
+        vehID = _as_list(vehID)
+        if zoneID is None:
+            zoneID = [None] * len(vehID)
+        elif not _is_sequence(zoneID):
+            zoneID = [zoneID] * len(vehID)
+        else:
+            zoneID = list(zoneID)
+        if roadID is None:
+            roadID = [None] * len(vehID)
+        elif not _is_sequence(roadID):
+            roadID = [roadID] * len(vehID)
+        else:
+            roadID = list(roadID)
+        assert len(vehID) == len(zoneID) == len(roadID), \
+            "vehID, zoneID, and roadID must have the same length"
+
+        for vid, zid, rid in zip(vehID, zoneID, roadID):
+            if zid is None and rid is None:
+                raise ValueError("zoneID or roadID is required for go_parking")
+            record = {"vehID": vid}
+            if zid is not None:
+                record["zoneID"] = zid
+            if rid is not None:
+                record["roadID"] = rid
+            msg["DATA"].append(record)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_goParking", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    goParking = go_parking
     
     def add_taxi_requests(self, zoneID, dest, num, max_waiting_time = None, maxWaitingTime = None):
         """Add one or more pending taxi requests.
@@ -1999,6 +2113,39 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_updateEdgeWeight", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def update_road_parking_capacity(
+            self, roadID, parking_capacity=None, parkingCapacity=None, capacity=None):
+        """Update parking capacity for one or more roads.
+
+        ``parking_capacity`` is the preferred Python argument. ``parkingCapacity``
+        and ``capacity`` are accepted to mirror the METS-R SIM Control API
+        aliases.
+        """
+        if parking_capacity is None:
+            parking_capacity = parkingCapacity
+        if parking_capacity is None:
+            parking_capacity = capacity
+        if parking_capacity is None:
+            raise ValueError("parking_capacity is required")
+
+        msg = {"TYPE": "CTRL_updateRoadParkingCapacity", "DATA": []}
+        roadID = _as_list(roadID)
+        if not _is_sequence(parking_capacity):
+            parking_capacity = [parking_capacity] * len(roadID)
+        else:
+            parking_capacity = list(parking_capacity)
+        assert len(roadID) == len(parking_capacity), \
+            "roadID and parking_capacity must have the same length"
+
+        for rid, cap in zip(roadID, parking_capacity):
+            msg["DATA"].append({"roadID": rid, "parkingCapacity": cap})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateRoadParkingCapacity", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    updateRoadParkingCapacity = update_road_parking_capacity
     
     # update charging station prices
     def update_charging_prices(self, stationID, stationType, price):
@@ -2184,11 +2331,13 @@ class METSRClient:
     # Dynamically add one or more roads and generated lanes.
     # centerline: [[x, y], ...] or [[x, y, z], ...] per road.
     # upstream_road/downstream_road: road orig_id string or list of orig_id strings.
+    # parking_capacity: optional road-level parking slots.
     # Pass roads=[{...}] to send fully formed simulator records directly.
     def add_roads(self, centerline=None, upstream_road=None, downstream_road=None,
                   orig_id=None, road_type=None, control_type=None,
                   upstream_control_type=None, downstream_control_type=None,
-                  num_lanes=1, lane_width=None, transform_coord=False, roads=None):
+                  num_lanes=1, lane_width=None, transform_coord=False, roads=None,
+                  parking_capacity=None):
         msg = {"TYPE": "CTRL_addRoads", "DATA": []}
 
         if roads is not None:
@@ -2214,11 +2363,12 @@ class METSRClient:
             lane_counts = _broadcast(num_lanes, count)
             lane_widths = _broadcast(lane_width, count)
             transform_coords = _broadcast(transform_coord, count)
+            parking_capacities = _broadcast(parking_capacity, count)
 
-            for cl, oid, up, down, r_type, c_type, up_control, down_control, lane_count, width, tc in zip(
+            for cl, oid, up, down, r_type, c_type, up_control, down_control, lane_count, width, tc, pcap in zip(
                     centerlines, orig_ids, upstream_roads, downstream_roads, road_types,
                     control_types, upstream_control_types, downstream_control_types,
-                    lane_counts, lane_widths, transform_coords):
+                    lane_counts, lane_widths, transform_coords, parking_capacities):
                 record = {
                     "centerline": cl,
                     "numLanes": lane_count,
@@ -2238,6 +2388,8 @@ class METSRClient:
                     record["downStreamControlType"] = down_control
                 if width is not None:
                     record["laneWidth"] = width
+                if pcap is not None:
+                    record["parkingCapacity"] = pcap
                 msg["DATA"].append(record)
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
