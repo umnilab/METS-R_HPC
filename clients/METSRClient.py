@@ -37,6 +37,44 @@ def _as_list(value):
     return [value]
 
 
+REQUEST_ID_FIELDS = ("reqID", "requestID", "requestId", "ID", "id")
+REQUEST_ZONE_FIELDS = (
+    "zoneID",
+    "zoneId",
+    "zone",
+    "originZone",
+    "origZone",
+    "origin",
+    "orig",
+)
+
+
+def _request_id_from_record(record):
+    if not isinstance(record, dict):
+        return record
+    for key in REQUEST_ID_FIELDS:
+        value = record.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _request_zone_from_record(record):
+    if not isinstance(record, dict):
+        return None
+    for key in REQUEST_ZONE_FIELDS:
+        value = record.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested_value = _request_zone_from_record(value)
+            if nested_value is not None:
+                return nested_value
+            continue
+        return value
+    return None
+
+
 def _normalize_sensor_type(sensor_type):
     if isinstance(sensor_type, str):
         key = sensor_type.strip().lower()
@@ -1023,6 +1061,47 @@ class METSRClient:
         assert res["TYPE"] == "ANS_request", res["TYPE"]
         return res
 
+    def _infer_request_zone_id(self, reqID):
+        response = self.query_request(reqID)
+        for record in response.get("DATA", []):
+            zone_id = _request_zone_from_record(record)
+            if zone_id is not None:
+                return zone_id
+        return None
+
+    def query_pickup_taxi_info(self, reqID=None):
+        """Query taxi requests that have been matched but not picked up.
+
+        METS-R SIM added this endpoint with the cancellation API. Passing
+        ``reqID`` filters the result to one or more request IDs.
+        """
+        msg = {"TYPE": "QUERY_pickupTaxiInfo"}
+        if reqID is not None:
+            msg["DATA"] = _as_list(reqID)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_pickupTaxiInfo", res["TYPE"]
+        return res
+
+    queryPickupTaxiInfo = query_pickup_taxi_info
+    query_pickupTaxiInfo = query_pickup_taxi_info
+
+    def query_occupied_taxi_info(self, reqID=None):
+        """Query taxi requests that are already on board a taxi.
+
+        Passing ``reqID`` filters the result to one or more request IDs.
+        Cancellation eligibility is reported by the simulator in the response
+        to :meth:`cancel_requests`.
+        """
+        msg = {"TYPE": "QUERY_occupiedTaxiInfo"}
+        if reqID is not None:
+            msg["DATA"] = _as_list(reqID)
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_occupiedTaxiInfo", res["TYPE"]
+        return res
+
+    queryOccupiedTaxiInfo = query_occupied_taxi_info
+    query_occupiedTaxiInfo = query_occupied_taxi_info
+
     def query_signal(self, id = None):
         """Query the phase state of one or more traffic signals.
 
@@ -1809,6 +1888,71 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_dispatchTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def cancel_requests(self, reqID, zoneID=None):
+        """Cancel one or more taxi/bus requests.
+
+        The latest METS-R SIM control API uses ``CTRL_cancelRequests`` and
+        requires the request's origin zone for each record. ``reqID`` may be a
+        scalar request ID, a list of request IDs, a request record, or a list
+        of request records containing request ID and origin-zone fields. When
+        ``zoneID`` is omitted, the client attempts to infer it with
+        :meth:`query_request`.
+
+        The returned ``DATA`` list contains per-request ``STATUS``/``WARN``
+        details from the simulator; a top-level ``CODE`` of ``OK`` only means
+        the control message itself was processed.
+        """
+        if zoneID is None and isinstance(reqID, dict):
+            request_records = [reqID]
+        elif (
+            zoneID is None
+            and _is_sequence(reqID)
+            and all(isinstance(record, dict) for record in reqID)
+        ):
+            request_records = list(reqID)
+        else:
+            request_ids = [_request_id_from_record(record) for record in _as_list(reqID)]
+            if zoneID is None:
+                zone_ids = [None] * len(request_ids)
+            elif _is_sequence(zoneID):
+                zone_ids = list(zoneID)
+            else:
+                zone_ids = [zoneID] * len(request_ids)
+            assert len(request_ids) == len(zone_ids), \
+                "reqID and zoneID must have the same length"
+            request_records = [
+                {"reqID": rid, "zoneID": zid}
+                for rid, zid in zip(request_ids, zone_ids)
+            ]
+
+        msg = {"TYPE": "CTRL_cancelRequests", "DATA": []}
+        missing_zone_ids = []
+        for record in request_records:
+            rid = _request_id_from_record(record)
+            zid = _request_zone_from_record(record)
+            if rid is None:
+                raise ValueError("reqID is required for cancel_requests")
+            if zid is None:
+                zid = self._infer_request_zone_id(rid)
+            if zid is None:
+                missing_zone_ids.append(rid)
+                continue
+            msg["DATA"].append({"reqID": rid, "zoneID": zid})
+
+        if missing_zone_ids:
+            raise ValueError(
+                "zoneID is required for cancel_requests; could not infer it "
+                "for reqID(s): {}".format(missing_zone_ids)
+            )
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_cancelRequests", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    cancel_request = cancel_requests
+    cancelRequests = cancel_requests
 
     def reposition_taxi(self, vehID, zoneID):
         """Reposition idle/cruising taxi(s) to destination zone(s).
