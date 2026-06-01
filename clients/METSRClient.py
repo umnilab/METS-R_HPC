@@ -794,7 +794,7 @@ class METSRClient:
                                    5 = CRUISING_TRIP  – cruising without a passenger
                                    6 = PICKUP_TRIP    – en-route to pick up a passenger
                                    7 = ACCESSIBLE_RELOCATION_TRIP – repositioning but still assignable
-                                   9 = CHARGING_RETURN_TRIP – returning from charging,
+                                   -1 = NONE_OF_THE_ABOVE – not on network, idle, or in an unrecognized state
               'x':        <float> network-CRS x coordinate,
               'y':        <float> network-CRS y coordinate,
               'z':        <float> elevation,

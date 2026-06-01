@@ -5,7 +5,15 @@ from collections.abc import Mapping
 
 
 DEFAULT_BOOTSTRAP_SERVERS = "localhost:29092"
-DEFAULT_TOPICS = ("link_tt", "link_energy", "bsm")
+DEFAULT_TOPICS = (
+    "link_tt",
+    "link_energy",
+    "bsm",
+    "v2x_tx_bsm",
+    "v2x_rx_bsm",
+    "v2x_link_metrics",
+    "v2x_attack_events",
+)
 
 SENSOR_TYPE_NAMES = {
     0: "dsrc",
@@ -16,6 +24,19 @@ SENSOR_TYPE_NAMES = {
 TOPIC_ALIASES = {
     "bsm": "bsm",
     "basic_safety_message": "bsm",
+    "v2x_bsm": "v2x_rx_bsm",
+    "v2x_tx": "v2x_tx_bsm",
+    "v2x_tx_bsm": "v2x_tx_bsm",
+    "v2x_rx": "v2x_rx_bsm",
+    "v2x_rx_bsm": "v2x_rx_bsm",
+    "rx_bsm": "v2x_rx_bsm",
+    "delivered_bsm": "v2x_rx_bsm",
+    "v2x_link_metric": "v2x_link_metrics",
+    "v2x_link_metrics": "v2x_link_metrics",
+    "v2x_metrics": "v2x_link_metrics",
+    "v2x_attack": "v2x_attack_events",
+    "v2x_attack_event": "v2x_attack_events",
+    "v2x_attack_events": "v2x_attack_events",
     "link_tt": "link_tt",
     "link_travel_time": "link_tt",
     "travel_time": "link_tt",
@@ -97,6 +118,19 @@ def _looks_like_link_energy(data):
     ) is not None
 
 
+def _looks_like_v2x_link_metrics(data):
+    return (
+        "sender_id" in data
+        and "receiver_id" in data
+        and (
+            "latency_ms" in data
+            or "packet_error_rate" in data
+            or "delivery_probability" in data
+            or "rssi_dbm" in data
+        )
+    )
+
+
 def normalize_sensor_record(value, topic=None):
     """Return a METS-R Kafka payload with stable aliases for old and new schemas."""
     if not isinstance(value, Mapping):
@@ -107,7 +141,13 @@ def normalize_sensor_record(value, topic=None):
     if canonical_topic is not None:
         record.setdefault("_topic", canonical_topic)
 
-    if canonical_topic == "bsm" or _looks_like_bsm(record):
+    if canonical_topic in {"v2x_tx_bsm", "v2x_rx_bsm"}:
+        _normalize_v2x_bsm(record)
+    elif canonical_topic == "v2x_link_metrics" or _looks_like_v2x_link_metrics(record):
+        _normalize_v2x_link_metrics(record)
+    elif canonical_topic == "v2x_attack_events":
+        _normalize_v2x_attack_event(record)
+    elif canonical_topic == "bsm" or _looks_like_bsm(record):
         _normalize_bsm(record)
     elif canonical_topic == "link_tt" or _looks_like_link_tt(record):
         _normalize_link_tt(record)
@@ -200,6 +240,45 @@ def _normalize_bsm(record):
     _setdefault_if_present(record, "latency_ms", quality.get("estimated_end_to_end_latency_ms"))
 
 
+def _normalize_v2x_bsm(record):
+    _setdefault_if_present(record, "sender_id", record.get("vehicle_id", record.get("vid")))
+    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+    _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
+    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+    _setdefault_if_present(record, "message_name", "BasicSafetyMessage")
+    _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
+    _normalize_bsm(record)
+    _setdefault_if_present(record, "speed", record.get("speed_mps"))
+    _setdefault_if_present(record, "heading", record.get("heading_deg"))
+
+
+def _normalize_v2x_link_metrics(record):
+    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+    _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
+    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+    _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
+    _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
+    _setdefault_if_present(record, "radio_access", record.get("access_technology"))
+    _setdefault_if_present(record, "packet_delivery_ratio", record.get("delivery_probability"))
+    _setdefault_if_present(record, "packet_error_rate", record.get("per"))
+    _setdefault_if_present(record, "latency_ms", record.get("delay_ms"))
+    _setdefault_if_present(record, "rssi_dbm", record.get("rssi"))
+    _setdefault_if_present(record, "sinr_db", record.get("sinr"))
+    _setdefault_if_present(record, "channel_busy_ratio", record.get("cbr"))
+
+
+def _normalize_v2x_attack_event(record):
+    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+    _setdefault_if_present(record, "vehicle_id", record.get("sender_id", record.get("attacker_id")))
+    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+    _setdefault_if_present(record, "attack_type", record.get("type"))
+    _setdefault_if_present(record, "effect", record.get("result"))
+    _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
+
+
 class KafkaDataProcessor:
     def __init__(self, config=None, topics=None, bootstrap_servers=None):
         self.config = config
@@ -283,6 +362,18 @@ class KafkaDataProcessor:
 
     def process_bsm(self, **kwargs):
         return self.process(topics=("bsm",), **kwargs)
+
+    def process_v2x_transmitted_bsm(self, **kwargs):
+        return self.process(topics=("v2x_tx_bsm",), **kwargs)
+
+    def process_v2x_received_bsm(self, **kwargs):
+        return self.process(topics=("v2x_rx_bsm",), **kwargs)
+
+    def process_v2x_link_metrics(self, **kwargs):
+        return self.process(topics=("v2x_link_metrics",), **kwargs)
+
+    def process_v2x_attack_events(self, **kwargs):
+        return self.process(topics=("v2x_attack_events",), **kwargs)
 
     def process_link_travel_time(self, **kwargs):
         return self.process(topics=("link_tt",), **kwargs)
