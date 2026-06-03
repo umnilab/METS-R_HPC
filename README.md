@@ -45,7 +45,6 @@ jupyter lab tutorials/basic_tutorial.ipynb
 Additional notebooks:
 
 - [`tutorials/advanced_commands.ipynb`](tutorials/advanced_commands.ipynb): command patterns and longer workflows.
-- [`tutorials/planning_examples.ipynb`](tutorials/planning_examples.ipynb): planning-oriented examples.
 - [`tutorials/security_examples.ipynb`](tutorials/security_examples.ipynb): security and attack-scenario examples.
 
 Runnable tutorial scripts:

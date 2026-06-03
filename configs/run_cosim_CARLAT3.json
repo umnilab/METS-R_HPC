@@ -3,7 +3,5 @@
       "name": "CARLAT03",
       "num_etaxi": 100,
       "network_file": "data/CARLA/Town03/facility/road/Town03.net.xml",
-      "zone_file": "data/CARLA/Town03/facility/zone/Town03_centroid",
-      "charging_station_file": "data/CARLA/Town03/facility/charging_station/Town03_charging_station",
       "carla_map": "Town03"
 }

@@ -1,4 +1,6 @@
 {
       "parent_config": "run_cosim_Template.json",
-      "name": "CARLAT05"
+      "name": "CARLAT05",
+      "network_file": "data/CARLA/Town05/facility/road/Town05.net.xml",
+      "carla_map": "Town05"
 }

@@ -2,7 +2,5 @@
       "parent_config": "run_cosim_Template.json",
       "name": "CARLAT10",
       "network_file": "data/CARLA/Town10/facility/road/Town10.net.xml",
-      "zone_file": "data/CARLA/Town10/facility/zone/Town10_centroid",
-      "charging_station_file": "data/CARLA/Town10/facility/charging_station/Town10_charging_station",
       "carla_map": "Town10"
 }

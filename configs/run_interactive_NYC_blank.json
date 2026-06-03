@@ -1,11 +1,12 @@
 {
       "parent_config": "run_interactive_Template.json",
-      "name": "NYC",
+      "name": "NYC_blank",
       "sim_step_size": 0.2,
       "network_file": "data/NYC/facility/road/nyc.net.xml",
-      "zone_file": "data/Empty/facility/zone/empty_zone",
-      "charging_station_file": "data/Empty/facility/charging_station/empyt_cs",
       "dispatching_controlled_by_control_apis": true,
       "repositioning_controlled_by_control_apis": true,
-      "charging_controlled_by_control_apis": true
-}
+      "charging_controlled_by_control_apis": true,
+      "zone_file":"data/NYC/facility/zone/zone_centroid",
+      "charging_station_file":"data/NYC/facility/charging_station/L_0_120000",
+      "num_etaxi":0
+} 

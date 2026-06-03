@@ -1,282 +1,39 @@
 import json
 import os
-import time
 import threading
+import time
 from datetime import datetime
-from websockets.sync.client import connect
-from utils.util import *
+
 import networkx as nx
+from websockets.sync.client import connect
+
+from utils.util import (
+    VEHICLE_SENSOR_CV2X,
+    VEHICLE_SENSOR_DSRC,
+    VEHICLE_SENSOR_MOBILE_DEVICE,
+    VEHICLE_SENSOR_TYPES,
+    _as_list,
+    _broadcast,
+    _configured_trajectory_roots,
+    _is_sequence,
+    _latest_trajectory_directory,
+    _looks_like_centerline,
+    _normalize_sensor_type,
+    _read_trajectory_manifest,
+    _request_id_from_record,
+    _request_zone_from_record,
+    _resolve_trajectory_root,
+    _set_road_reference,
+    _trajectory_format_name,
+    _trajectory_format_score,
+    _trajectory_manifest_summary,
+    run_visualization_server,
+    stop_visualization_server,
+    str_list_mapper_gen,
+)
 
 str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
-
-VEHICLE_SENSOR_DSRC = 0
-VEHICLE_SENSOR_CV2X = 1
-VEHICLE_SENSOR_MOBILE_DEVICE = 2
-
-VEHICLE_SENSOR_TYPES = {
-    "dsrc": VEHICLE_SENSOR_DSRC,
-    "80211p": VEHICLE_SENSOR_DSRC,
-    "cv2x": VEHICLE_SENSOR_CV2X,
-    "c-v2x": VEHICLE_SENSOR_CV2X,
-    "c_v2x": VEHICLE_SENSOR_CV2X,
-    "mobile": VEHICLE_SENSOR_MOBILE_DEVICE,
-    "mobiledevice": VEHICLE_SENSOR_MOBILE_DEVICE,
-    "mobile_device": VEHICLE_SENSOR_MOBILE_DEVICE,
-    "mobile-device": VEHICLE_SENSOR_MOBILE_DEVICE,
-}
-
-
-def _is_sequence(value):
-    return isinstance(value, (list, tuple))
-
-
-def _as_list(value):
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
-
-
-REQUEST_ID_FIELDS = ("reqID", "requestID", "requestId", "ID", "id")
-REQUEST_ZONE_FIELDS = (
-    "zoneID",
-    "zoneId",
-    "zone",
-    "originZone",
-    "origZone",
-    "origin",
-    "orig",
-)
-
-
-def _request_id_from_record(record):
-    if not isinstance(record, dict):
-        return record
-    for key in REQUEST_ID_FIELDS:
-        value = record.get(key)
-        if value is not None:
-            return value
-    return None
-
-
-def _request_zone_from_record(record):
-    if not isinstance(record, dict):
-        return None
-    for key in REQUEST_ZONE_FIELDS:
-        value = record.get(key)
-        if value is None:
-            continue
-        if isinstance(value, dict):
-            nested_value = _request_zone_from_record(value)
-            if nested_value is not None:
-                return nested_value
-            continue
-        return value
-    return None
-
-
-def _normalize_sensor_type(sensor_type):
-    if isinstance(sensor_type, str):
-        key = sensor_type.strip().lower()
-        compact_key = key.replace(" ", "").replace("_", "").replace("-", "")
-        if key in VEHICLE_SENSOR_TYPES:
-            return VEHICLE_SENSOR_TYPES[key]
-        if compact_key in VEHICLE_SENSOR_TYPES:
-            return VEHICLE_SENSOR_TYPES[compact_key]
-        raise ValueError(
-            "Unknown sensorType. Use 0/'dsrc', 1/'cv2x', or 2/'mobile_device'."
-        )
-    return sensor_type
-
-
-def _broadcast(value, length):
-    if length == 1:
-        return [value]
-    if _is_sequence(value) and len(value) == length:
-        return list(value)
-    return [value] * length
-
-
-def _looks_like_centerline(value):
-    if not _is_sequence(value) or len(value) == 0:
-        return False
-    first_point = value[0]
-    if not _is_sequence(first_point) or len(first_point) < 2:
-        return False
-    return not _is_sequence(first_point[0])
-
-
-def _set_road_reference(record, field_prefix, value):
-    if value is None:
-        return
-    if _is_sequence(value) and not isinstance(value, str):
-        record[field_prefix + "Roads"] = list(value)
-    else:
-        record[field_prefix + "Road"] = value
-
-
-def _read_property_values(properties_path):
-    values = {}
-    try:
-        with open(properties_path, "r") as properties_file:
-            for raw_line in properties_file:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                values[key.strip()] = value.strip()
-    except OSError:
-        pass
-    return values
-
-
-def _read_trajectory_manifest(directory):
-    manifest_path = os.path.join(directory, "manifest.json")
-    try:
-        with open(manifest_path, "r") as manifest_file:
-            return json.load(manifest_file)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _resolve_trajectory_root(sim_folder, configured_path):
-    if not configured_path:
-        return None
-    configured_path = os.path.normpath(configured_path)
-    if os.path.isabs(configured_path):
-        return configured_path
-    return os.path.join(sim_folder, configured_path)
-
-
-def _configured_trajectory_roots(sim_folder):
-    properties = _read_property_values(os.path.join(sim_folder, "data", "Data.properties"))
-    roots = []
-    for key in ("TRAJECTORY_BINARY_DEFAULT_PATH", "JSON_DEFAULT_PATH"):
-        root = _resolve_trajectory_root(sim_folder, properties.get(key))
-        if root and root not in roots:
-            roots.append(root)
-
-    default_root = os.path.join(sim_folder, "trajectory_output")
-    if default_root not in roots:
-        roots.append(default_root)
-    return roots
-
-
-def _trajectory_format_score(directory):
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return 0
-
-    if "manifest.json" in names:
-        return 3
-    lowered = [name.lower() for name in names]
-    if any(name.endswith(".bin") for name in lowered):
-        return 2
-    if any(name.endswith(".json") for name in lowered):
-        return 1
-    return 0
-
-
-def _trajectory_format_name(directory):
-    manifest = _read_trajectory_manifest(directory)
-    if manifest is not None:
-        output_format = manifest.get("format", "binary")
-        version = manifest.get("version")
-        sparse_frame_groups = manifest.get("sparseFrameGroups") or []
-        sparse_suffix = " sparse" if sparse_frame_groups else ""
-        if version is not None:
-            return f"{output_format} v{version}{sparse_suffix}"
-        return f"{output_format}{sparse_suffix}"
-
-    score = _trajectory_format_score(directory)
-    if score >= 2:
-        return "binary"
-    if score == 1:
-        return "JSON"
-    return "trajectory"
-
-
-def _trajectory_manifest_summary(directory, manifest):
-    chunks = manifest.get("chunks", [])
-    active_chunk = manifest.get("activeChunk", {})
-    road_dictionary = manifest.get("roadIdDictionary", [])
-    zone_dictionary = manifest.get("zoneDictionary", [])
-    charging_station_dictionary = manifest.get("chargingStationDictionary", [])
-    schemas = manifest.get("schemas", {})
-    frame_groups = manifest.get("frameGroups", [])
-    sparse_frame_groups = manifest.get("sparseFrameGroups") or []
-    sparse_frame_group_mode = manifest.get("sparseFrameGroupMode")
-
-    return {
-        "directory": directory,
-        "manifest_path": os.path.join(directory, "manifest.json"),
-        "format": manifest.get("format"),
-        "version": manifest.get("version"),
-        "byte_order": manifest.get("byteOrder"),
-        "coord_scale": manifest.get("coordScale"),
-        "initial_x": manifest.get("initialX"),
-        "initial_y": manifest.get("initialY"),
-        "tick_interval": manifest.get("tickInterval"),
-        "link_snapshot_interval": manifest.get("linkSnapshotInterval"),
-        "chunk_tick_limit": manifest.get("chunkTickLimit"),
-        "chunk_count": len(chunks),
-        "active_chunk": active_chunk,
-        "road_count": len(road_dictionary),
-        "zone_count": len(zone_dictionary),
-        "charging_station_count": len(charging_station_dictionary),
-        "frame_groups": frame_groups,
-        "sparse_frame_groups": sparse_frame_groups,
-        "sparse_frame_group_mode": sparse_frame_group_mode,
-        "has_sparse_frame_groups": bool(sparse_frame_groups),
-        "has_sparse_zone_frames": "zone" in sparse_frame_groups,
-        "has_sparse_charging_station_frames": "chargingStation" in sparse_frame_groups,
-        "schema_names": sorted(schemas.keys()),
-        "has_zone_attributes": bool(zone_dictionary) or "zone" in schemas,
-        "has_charging_station_attributes": (
-            bool(charging_station_dictionary) or "chargingStation" in schemas
-        ),
-        "has_split_energy_fields": (
-            "frameHeader" in schemas
-            and any("energyPrivateEV" in field for field in schemas["frameHeader"])
-        ),
-    }
-
-
-def _latest_trajectory_directory(root, prefer_binary=True):
-    if root is None or not os.path.isdir(root):
-        return None
-
-    candidates = []
-    root_score = _trajectory_format_score(root)
-    if root_score > 0:
-        candidates.append((root_score, os.path.getmtime(root), root))
-
-    for name in os.listdir(root):
-        candidate = os.path.join(root, name)
-        if not os.path.isdir(candidate):
-            continue
-        score = _trajectory_format_score(candidate)
-        if score > 0:
-            candidates.append((score, os.path.getmtime(candidate), candidate))
-
-    if not candidates:
-        subdirs = [
-            os.path.join(root, name)
-            for name in os.listdir(root)
-            if os.path.isdir(os.path.join(root, name))
-        ]
-        if not subdirs:
-            return None
-        return max(subdirs, key=os.path.getmtime)
-
-    if prefer_binary:
-        binary_candidates = [candidate for candidate in candidates if candidate[0] >= 2]
-        if binary_candidates:
-            return max(binary_candidates, key=lambda item: item[1])[2]
-
-    return max(candidates, key=lambda item: item[1])[2]
-
 
 """
 Implementation of the remote data client
@@ -417,9 +174,13 @@ class METSRClient:
         self.ws.send(json.dumps(msg))
 
     def _update_current_tick_from_message(self, msg):
-        if msg.get("TYPE") not in {"STEP", "ANS_tick"} or "TICK" not in msg:
+        msg_type = msg.get("TYPE")
+        if msg_type not in {"STEP", "ANS_tick", "CTRL_load", "CTRL_reset"} or "TICK" not in msg:
             return False
         server_tick = int(msg["TICK"])
+        if msg_type in {"CTRL_load", "CTRL_reset"}:
+            self.current_tick = server_tick
+            return True
         if self.current_tick is None or server_tick > int(self.current_tick):
             self.current_tick = server_tick
             return True
@@ -2075,7 +1836,8 @@ class METSRClient:
     
     # assign bus
     def add_bus_route(self, routeName, zone, road, paths = None):
-        if paths is None:
+        has_paths = paths is not None
+        if not has_paths:
             msg = {
                     "TYPE": "CTRL_addBusRoute",
                     "DATA": []
@@ -2089,17 +1851,20 @@ class METSRClient:
             routeName = [routeName]
             zone = [zone]
             road = [road]
-            if path != None:
+            if has_paths:
                 paths = [paths]
-        if paths is None:
-            for routeName, zone, road, paths in zip(routeName, zone, road, paths):
+        elif has_paths and not isinstance(paths, list):
+            paths = [paths] * len(routeName)
+
+        if not has_paths:
+            for routeName, zone, road in zip(routeName, zone, road):
                 msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road})
         else:
             for routeName, zone, road, paths in zip(routeName, zone, road, paths):
                 msg["DATA"].append({"routeName": routeName, "zones": zone, "roads": road, "paths": paths})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
-        if paths is None:
+        if not has_paths:
             assert res["TYPE"] == "CTRL_addBusRoute", res["TYPE"]
         else:
             assert res["TYPE"] == "CTRL_addBusRouteWithPath", res["TYPE"]
@@ -2686,12 +2451,31 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
 
-    # load the simulation instance to zip
-    def load(self, filename):
-        msg = {"TYPE": "CTRL_load", "DATA": {"path": filename}}
+    def load(self, filename, reload_network=True):
+        """Restore the simulator from a saved snapshot.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the ``.zip`` snapshot previously written by :meth:`save`.
+        reload_network : bool
+            When ``True`` the simulator fully rebuilds the road
+            network and all facilities from the archive.  When ``False`` the
+            simulator skips network and facility reconstruction and only
+            restores agent state, which is substantially faster when the
+            snapshot was taken from the same running instance (e.g. to replay
+            an experiment from a preheated checkpoint).  The response includes
+            a ``fastLoad`` field confirming whether fast restoration was used.
+        """
+        msg = {"TYPE": "CTRL_load", "DATA": {"path": filename, "reloadNetwork": bool(reload_network)}}
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_load", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        if "tick" in res:
+            self.current_tick = int(res["tick"])
+        else:
+            synced_tick = self.query_tick()
+            self.current_tick = int(synced_tick)
         return res
 
     # terminate the simulation
