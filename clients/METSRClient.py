@@ -175,9 +175,12 @@ class METSRClient:
 
     def _update_current_tick_from_message(self, msg):
         msg_type = msg.get("TYPE")
-        if msg_type not in {"STEP", "ANS_tick", "CTRL_load", "CTRL_reset"} or "TICK" not in msg:
+        if msg_type not in {"STEP", "ANS_tick", "CTRL_load", "CTRL_reset"}:
             return False
-        server_tick = int(msg["TICK"])
+        tick_value = msg.get("TICK", msg.get("tick"))
+        if tick_value is None:
+            return False
+        server_tick = int(tick_value)
         if msg_type in {"CTRL_load", "CTRL_reset"}:
             self.current_tick = server_tick
             return True
@@ -563,6 +566,8 @@ class METSRClient:
               'dest':     <int>   current destination zone ID
                                   (negative → heading to a charging station),
               'pass_num': <int>   number of passengers currently on board,
+              'remainingDistance': <float> remaining active-trip distance in meters,
+              'remainingDistanceMiles': <float> remaining active-trip distance in miles,
               'currentParkingRoad': <int> internal road ID where the taxi is
                                      parked or has reserved parking, when set
             }
@@ -599,7 +604,35 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_availableTaxis", res["TYPE"]
         return res
-        
+
+    def query_almost_finished_taxis(
+            self,
+            distance_threshold_miles = None,
+            distance_threshold_meters = None,
+            zoneID = None):
+        """Query occupied taxis expected to become available soon.
+
+        The simulator filters to occupied taxis with one onboard request, no
+        queued pickup requests, and remaining trip distance below the supplied
+        threshold. A ``zoneID`` filter selects the request destination zone.
+        """
+        msg = {"TYPE": "QUERY_almostFinishedTaxis"}
+        params = {}
+        if distance_threshold_meters is not None:
+            params["distanceThresholdMeters"] = distance_threshold_meters
+        elif distance_threshold_miles is not None:
+            params["distanceThresholdMiles"] = distance_threshold_miles
+        if zoneID is not None:
+            params["zoneID"] = zoneID
+        if params:
+            msg["DATA"] = params
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_almostFinishedTaxis", res["TYPE"]
+        return res
+
+    queryAlmostFinishedTaxis = query_almost_finished_taxis
+    query_almostFinishedTaxis = query_almost_finished_taxis
+         
     def query_bus(self, id = None):
         """Query the state of one or more electric buses.
 
@@ -730,7 +763,7 @@ class METSRClient:
             Use ``-1`` (default) to get the road's overall start/end points
             instead of a per-lane polyline.
         transform_coords : bool | list[bool]
-            ``True`` to return WGS-84 lon/lat instead of network CRS.
+            ``True`` to return network CRS lon/lat instead of WGS-84.
         """
         my_msg = {"TYPE": "QUERY_centerLine"}
         if id is not None:
@@ -1204,7 +1237,7 @@ class METSRClient:
         return res
 
     def query_road_weights(self, roadID = None):
-        """Query the routing-graph edge weight of one or more roads.
+        """Query the routing-graph edge weight in seconds for one or more roads.
 
         Without ``roadID`` returns all road/edge IDs::
 
@@ -1217,9 +1250,9 @@ class METSRClient:
               'r_type':          <int>   road type code,
               'avg_travel_time': <float> recent mean travel time (s),
               'length':          <float> road length (m),
-              'weight':          <float> current edge weight used by the
-                                         router (typically travel time, may
-                                         be overridden via
+              'weight':          <float> current edge weight in seconds used
+                                         by the router (typically travel time,
+                                         may be overridden via
                                          :meth:`update_edge_weight`)
             }
 
@@ -2400,7 +2433,8 @@ class METSRClient:
     # Command vehicle(s) to interrupt current activity and go charge.
     # veh_type: True = private EV, False = public taxi.
     # charger_type: ChargingStation.L2 / L3 / BUS.
-    # cs_id: 0 = auto-select nearest station; negative int = specific station ID.
+    # cs_id: 0 = auto-select (nearest for public taxis/buses, cheapest usable
+    # station for private EVs); nonzero int = specific station ID.
     # After charging the vehicle returns to its pre-charging destination.
     def go_charging(self, vehID, veh_type, charger_type, cs_id=0):
         msg = {"TYPE": "CTRL_goCharging", "DATA": []}
@@ -2430,9 +2464,12 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_reset", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
 
-        self.current_tick = -1
-        self.tick()
-        assert self.current_tick == 0
+        if "TICK" in res or "tick" in res:
+            self.current_tick = int(res.get("TICK", res.get("tick")))
+        else:
+            self.current_tick = -1
+            self.tick()
+            assert self.current_tick == 0
 
         # if viz is running, stop and restart it
         if self.viz_server is not None:
@@ -2471,8 +2508,8 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_load", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
-        if "tick" in res:
-            self.current_tick = int(res["tick"])
+        if "TICK" in res or "tick" in res:
+            self.current_tick = int(res.get("TICK", res.get("tick")))
         else:
             synced_tick = self.query_tick()
             self.current_tick = int(synced_tick)

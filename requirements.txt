@@ -4,6 +4,8 @@ shapely
 psutil
 seaborn
 geopandas
+contextily # for figures in tutorial notebooks
+pyproj
 ujson
 websockets
 
