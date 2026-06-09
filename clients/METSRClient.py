@@ -1537,21 +1537,65 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
     
-    # teleport vehicle to a target location specified by road, lane, and distance to the downstream junction
-    def teleport_trace_replay_vehicle(self, vehID, roadID, laneID, dist, private_veh = False):
+    # teleport vehicle to a target location specified by road/lane plus distance or projected coordinates
+    def teleport_trace_replay_vehicle(
+            self,
+            vehID,
+            roadID,
+            laneID,
+            dist = None,
+            private_veh = False,
+            x = None,
+            y = None,
+            transform_coords = False):
+        """Teleport trace-replay vehicles by lane distance or by coordinates.
+
+        ``dist`` is the distance to the downstream junction. Recent METS-R SIM
+        versions also accept ``x``/``y`` coordinates, which are projected onto
+        the target lane by the simulator; set ``transform_coords=True`` when
+        those coordinates need the simulator CRS transform.
+        """
         msg = {
                 "TYPE": "CTRL_teleportTraceReplayVeh",
                 "DATA": []
                 }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-            roadID = [roadID]
-            laneID = [laneID]
-            dist = [dist]
-        if not isinstance(private_veh, list):
-            private_veh = [private_veh] * len(vehID)
-        for vehID, roadID, laneID, dist, private_veh in zip(vehID, roadID, laneID, dist, private_veh):
-            msg["DATA"].append({"vehID": vehID, "roadID": roadID, "laneID": laneID, "dist": dist, "vehType": private_veh})
+        veh_ids = _as_list(vehID)
+        count = len(veh_ids)
+
+        def _field_values(value, name):
+            if _is_sequence(value):
+                values = list(value)
+                assert len(values) == count, f"{name} must have the same length as vehID"
+                return values
+            return [value] * count
+
+        road_ids = _field_values(roadID, "roadID")
+        lane_ids = _field_values(laneID, "laneID")
+        dists = _field_values(dist, "dist")
+        private_flags = _field_values(private_veh, "private_veh")
+        xs = _field_values(x, "x")
+        ys = _field_values(y, "y")
+        transform_flags = _field_values(transform_coords, "transform_coords")
+
+        for veh_id, road_id, lane_id, dist_value, private_flag, x_value, y_value, transform_flag in zip(
+                veh_ids, road_ids, lane_ids, dists, private_flags, xs, ys, transform_flags):
+            record = {
+                "vehID": veh_id,
+                "roadID": road_id,
+                "laneID": lane_id,
+                "vehType": private_flag,
+            }
+            if x_value is not None or y_value is not None:
+                if x_value is None or y_value is None:
+                    raise ValueError("Both x and y are required for coordinate trace replay teleport")
+                record["x"] = x_value
+                record["y"] = y_value
+                record["transformCoord"] = transform_flag
+            elif dist_value is not None:
+                record["dist"] = dist_value
+            else:
+                raise ValueError("teleport_trace_replay_vehicle requires dist or x/y")
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportTraceReplayVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
