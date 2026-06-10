@@ -53,8 +53,8 @@ Runnable tutorial scripts:
 # CARLA/METS-R co-simulation example
 python tutorials/cosim_example.py -r configs/run_cosim_CARLAT5.json -v
 
-# V2X sidecar example with the lightweight Python sidecar
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_python_sidecar_Template.json
+# Veins latency stress example; start the OMNeT++/Veins bridge first
+python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json
 ```
 
 ## New: CARLA Visualization Integration
@@ -78,26 +78,34 @@ python tutorials/cosim_example.py -r configs/run_cosim_CARLAT1.json -v
 
 CARLA settings such as `carla_dir`, `carla_host`, `carla_port`, and `carla_map` are defined in the selected run config under [`configs/`](configs/).
 
-## Experimental: OMNeT++/VEINS V2X Sidecar
+## Experimental: OMNeT++/VEINS V2X Client
 
-The Python clients include an experimental sidecar bridge for packet-level V2X
-experiments.  METS-R remains the mobility/control simulator, while an external
-OMNeT++/VEINS process can receive vehicle states and intended BSMs, simulate
-network delivery, and return delivered BSMs plus link metrics.
+The Python clients include an experimental bridge client for packet-level V2X
+experiments. A real OMNeT++/VEINS bridge must already be listening on the
+configured host/port. The remaining tutorial sends a synthetic noise-message
+load toward one target vehicle and reports the latency values returned by the
+Veins bridge.
+
+Build and start the included OMNeT++ bridge from WSL:
 
 ```bash
-# Run with the lightweight sidecar process auto-launched
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_python_sidecar_Template.json
+export OMNETPP_HOME=~/src/omnetpp-6.1
+source "$OMNETPP_HOME/setenv"
 
-# Run with a real OMNeT++/VEINS bridge already listening on the configured host/port
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json
-
-# Test the Python/Kafka pipeline without OMNeT++/VEINS
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json --local_v2x_fallback
+cd ~/src/METS-R_HPC/veins_bridge/omnetpp
+bash ./build.sh
+opp_run -u Cmdenv -n . -l ./out/gcc-release/src/libmetsr_veins_bridge omnetpp.ini
 ```
 
-The bridge protocol is documented in [docs/veins_sidecar_protocol.md](docs/veins_sidecar_protocol.md);
-installation notes are in [docs/veins_installation.md](docs/veins_installation.md).
+Then run the Python latency example from this repository:
+
+```bash
+python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json \
+  --noise_senders 60 --messages_per_sender 10 --ticks 100 --csv output/veins_latency.csv
+```
+
+Veins installation and protocol notes have moved to the online
+[METS-R documentation](https://umnilab.github.io/METS-R_doc).
 
 ## License
 

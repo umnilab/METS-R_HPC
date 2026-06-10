@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -212,7 +213,10 @@ void MetsrVeinsBridge::initialize()
 void MetsrVeinsBridge::handleMessage(omnetpp::cMessage* message)
 {
     if (message == keepAlive && running) {
-        scheduleAt(omnetpp::simTime() + 1, keepAlive);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (running) {
+            scheduleAt(omnetpp::simTime() + 1, keepAlive);
+        }
     }
 }
 

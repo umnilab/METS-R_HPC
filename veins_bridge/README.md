@@ -57,6 +57,12 @@ package, make sure you are running from `veins_bridge/omnetpp` with `-n .`.
 The bridge NED files are intentionally package-less because they live directly
 in that directory.
 
+If OMNeT++ reports that `simtime_t` cannot represent the configured time, the
+simulation limit is too large for the active time resolution. The included
+`omnetpp.ini` uses a 7-day limit, which is within the default OMNeT++ range and
+is paced in wall-clock time by the bridge keep-alive. After changing bridge C++
+code, rerun `bash ./build.sh` before starting `opp_run`.
+
 ## Run The Python Latency Example
 
 From the METS-R_HPC repository:
