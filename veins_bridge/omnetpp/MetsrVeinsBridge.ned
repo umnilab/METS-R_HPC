@@ -1,5 +1,3 @@
-package metsr.veinsbridge;
-
 simple MetsrVeinsBridge
 {
     parameters:

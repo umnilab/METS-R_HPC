@@ -31,7 +31,7 @@ export OMNETPP_HOME=~/src/omnetpp-6.1
 source "$OMNETPP_HOME/setenv"
 
 cd ~/src/METS-R_HPC/veins_bridge/omnetpp
-opp_run -u Cmdenv -n . -l ./out/gcc-release/src/libmetsr_veins_bridge omnetpp.ini
+opp_run -u Cmdenv -n . -l ./out/clang-release/metsr_veins_bridge omnetpp.ini
 ```
 
 Expected output includes a line like:
@@ -40,8 +40,22 @@ Expected output includes a line like:
 METS-R Veins bridge listening on 0.0.0.0:9099
 ```
 
-If the generated library path differs, replace the `-l` path with the path
-printed by `find out -name '*metsr_veins_bridge*'`.
+If the generated library path differs, pass the library stem to `-l`, not the
+full generated filename. OMNeT++ adds the leading `lib` and trailing `.so`
+itself.
+
+Examples:
+
+- If `find out -name 'libmetsr_veins_bridge.so'` prints
+  `out/clang-release/libmetsr_veins_bridge.so`, use
+  `-l ./out/clang-release/metsr_veins_bridge`.
+- If it prints `out/gcc-release/libmetsr_veins_bridge.so`, use
+  `-l ./out/gcc-release/metsr_veins_bridge`.
+
+If OMNeT++ reports that a declared NED package does not match the expected
+package, make sure you are running from `veins_bridge/omnetpp` with `-n .`.
+The bridge NED files are intentionally package-less because they live directly
+in that directory.
 
 ## Run The Python Latency Example
 

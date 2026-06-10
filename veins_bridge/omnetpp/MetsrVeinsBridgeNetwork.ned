@@ -1,5 +1,3 @@
-package metsr.veinsbridge;
-
 network MetsrVeinsBridgeNetwork
 {
     submodules:
