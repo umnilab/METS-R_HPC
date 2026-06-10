@@ -1,0 +1,24 @@
+{
+      "parent_config": "run_interactive_Template.json",
+      "name": "V2X_VEINS_Template",
+      "v2x": true,
+      "veins_host": "127.0.0.1",
+      "veins_port": 9099,
+      "veins_command": null,
+      "veins_cwd": null,
+      "veins_auto_launch": false,
+      "veins_connect_timeout": 20,
+      "veins_request_timeout": 10,
+      "veins_retry_interval": 0.25,
+      "veins_radio_access": "cv2x",
+      "kafka_bootstrap_servers": "localhost:29092",
+      "kafka_topics": [
+            "link_tt",
+            "link_energy",
+            "bsm",
+            "v2x_tx_bsm",
+            "v2x_rx_bsm",
+            "v2x_link_metrics",
+            "v2x_attack_events"
+      ]
+}

@@ -7,7 +7,7 @@ from utils.carla_util import snap_to_ground
 from clients.METSRClient import METSRClient
 
 """
-Implementation of the CoSim Client
+An example of the implementation of the CoSim Client
 
 A CoSim client communicates with one METSRClient and one CARLA client to manage the 
 data flow between corresponding simulation instances.

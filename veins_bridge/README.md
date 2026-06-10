@@ -1,0 +1,83 @@
+# METS-R Veins Bridge
+
+This folder contains a minimal OMNeT++ bridge process for `clients.VeinsClient`.
+It listens for METS-R JSON-lines requests on a TCP port, accepts `sync_tick`
+messages, and returns delivered messages plus latency/link metrics.
+
+The current implementation is intentionally small: it runs inside OMNeT++ and
+models receiver congestion from the synthetic noise-message load used by
+`tutorials/v2x_veins_cosim_example.py`. It is the place to connect a deeper
+Veins/INET radio stack next; the Python client and tutorial do not need to
+change when that radio model is added.
+
+## Build In WSL
+
+```bash
+export OMNETPP_HOME=~/src/omnetpp-6.1
+export VEINS_HOME=~/src/veins-veins-5.3.1
+source "$OMNETPP_HOME/setenv"
+
+cd ~/src/METS-R_HPC/veins_bridge/omnetpp
+bash ./build.sh
+find out -name '*metsr_veins_bridge*'
+```
+
+## Start The Bridge
+
+Run this in WSL and leave it open:
+
+```bash
+export OMNETPP_HOME=~/src/omnetpp-6.1
+source "$OMNETPP_HOME/setenv"
+
+cd ~/src/METS-R_HPC/veins_bridge/omnetpp
+opp_run -u Cmdenv -n . -l ./out/gcc-release/src/libmetsr_veins_bridge omnetpp.ini
+```
+
+Expected output includes a line like:
+
+```text
+METS-R Veins bridge listening on 0.0.0.0:9099
+```
+
+If the generated library path differs, replace the `-l` path with the path
+printed by `find out -name '*metsr_veins_bridge*'`.
+
+## Run The Python Latency Example
+
+From the METS-R_HPC repository:
+
+```bash
+python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json \
+  --noise_senders 60 --messages_per_sender 10 --ticks 100 --csv output/veins_latency.csv
+```
+
+If the Python process runs on Windows and the bridge runs in WSL, `127.0.0.1`
+usually works on recent WSL2 versions. If it does not, get the WSL IP:
+
+```bash
+hostname -I
+```
+
+Then run the Python example with `--host <WSL_IP>` or update
+`configs/run_v2x_veins_Template.json`.
+
+## Protocol Boundary
+
+The bridge implements:
+
+- `hello`
+- `ping`
+- `reset`
+- `sync_tick`
+
+`sync_tick` receives `vehicles` and `bsm_messages`, then returns:
+
+- `received_bsms`
+- `link_metrics`
+- `attack_events`
+
+For the current latency/noise example, messages with `receiver_id` or
+`target_vehicle_id` are treated as intended unicast traffic to the target
+vehicle. Latency increases with offered load to that receiver and message
+payload size.
