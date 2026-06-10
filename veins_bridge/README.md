@@ -73,6 +73,10 @@ simulation limit is too large for the active time resolution. The included
 is paced in wall-clock time by the bridge keep-alive. After changing bridge C++
 code, rerun `bash ./build.sh` before starting `opp_run`.
 
+Cmdenv status lines such as `** Event #...`, `Speed:`, and `Messages:` are
+normal OMNeT++ progress reports. When the bridge is idle, `present: 1` and
+`in FES: 1` usually mean only the bridge polling event remains scheduled.
+
 ## Run The Python Latency Example
 
 From the METS-R_HPC repository:
