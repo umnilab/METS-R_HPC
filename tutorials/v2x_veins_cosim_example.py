@@ -1,10 +1,10 @@
 """Measure Veins latency when noise messages converge on one receiver.
 
-This example assumes a real OMNeT++/Veins bridge is already listening on the
-configured host/port. It does not start METS-R, SUMO, a Python sidecar, or a
-local range fallback. The script sends synthetic vehicle positions and a burst
-of noise messages targeted at one receiver, then summarizes the latency values
-returned by the Veins bridge.
+This example assumes the OMNeT++ bridge is already listening on the configured
+host/port. It does not start METS-R, SUMO, a Python sidecar, or a local range
+fallback. The script sends synthetic vehicle positions and a burst of noise
+messages targeted at one receiver, then summarizes the latency values returned
+by the bridge.
 """
 
 import argparse
@@ -174,6 +174,16 @@ def summarize_tick(tick, transmitted, result, target_id):
     return summary
 
 
+def bridge_model_name(result):
+    raw = result.get("raw", {})
+    if not isinstance(raw, dict):
+        return None
+    data = raw.get("data", {})
+    if isinstance(data, dict):
+        return data.get("bridge_model")
+    return raw.get("bridge_model")
+
+
 def format_latency(value):
     return "NA" if value is None else f"{value:.3f}"
 
@@ -200,8 +210,10 @@ def main(argv=None):
         verbose=args.verbose,
     )
     rows = []
+    reported_model = False
     try:
         client.connect()
+        print(f"connected_to_veins_bridge host={client.host} port={client.port}")
         for tick in range(args.ticks):
             vehicle_records = make_vehicle_records(args, tick)
             mobility = build_mobility_records(vehicle_records)
@@ -212,6 +224,11 @@ def main(argv=None):
                 bsm_messages=messages,
                 duration_s=args.duration_s,
             )
+            if not reported_model:
+                model = bridge_model_name(result)
+                if model:
+                    print(f"bridge_model={model}")
+                    reported_model = True
             summary = summarize_tick(
                 tick=tick,
                 transmitted=len(messages),

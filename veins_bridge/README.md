@@ -4,11 +4,13 @@ This folder contains a minimal OMNeT++ bridge process for `clients.VeinsClient`.
 It listens for METS-R JSON-lines requests on a TCP port, accepts `sync_tick`
 messages, and returns delivered messages plus latency/link metrics.
 
-The current implementation is intentionally small: it runs inside OMNeT++ and
-models receiver congestion from the synthetic noise-message load used by
-`tutorials/v2x_veins_cosim_example.py`. It is the place to connect a deeper
-Veins/INET radio stack next; the Python client and tutorial do not need to
-change when that radio model is added.
+The current implementation is intentionally small: it runs inside OMNeT++,
+hands each `sync_tick` request to the OMNeT++ event loop, schedules packet
+delivery events, and reports latency as receive simulation time minus generation
+simulation time. The wireless behavior is still an abstract queue/contention
+model rather than a detailed Veins 802.11p/C-V2X PHY/MAC stack. It is the place
+to connect that deeper Veins/INET radio stack next; the Python client and
+tutorial do not need to change when that radio model is added.
 
 ## Build In WSL
 
@@ -38,6 +40,14 @@ Expected output includes a line like:
 
 ```text
 METS-R Veins bridge listening on 0.0.0.0:9099
+```
+
+When the Python example connects, the bridge also logs JSON requests, for
+example:
+
+```text
+METS-R Veins bridge request type=hello request_id=1
+METS-R Veins bridge request type=sync_tick request_id=2 tick=0 vehicles=61 bsm_messages=600
 ```
 
 If the generated library path differs, pass the library stem to `-l`, not the
@@ -100,4 +110,22 @@ The bridge implements:
 For the current latency/noise example, messages with `receiver_id` or
 `target_vehicle_id` are treated as intended unicast traffic to the target
 vehicle. Latency increases with offered load to that receiver and message
-payload size.
+payload size. Delivered messages are scheduled as OMNeT++ events; the returned
+`latency_ms` is measured from the simulated delivery event time.
+
+The abstract scheduled-delay model is:
+
+```text
+scheduled_delay_ms = baseLatencyMs
+                   + perMessageLatencyMs * receiver_queue_position
+                   + perPayloadByteLatencyUs * payload_bytes / 1000
+                   + payload_serialization_delay
+                   + propagation_delay
+                   + sampled_mac_backoff
+                   + sampled_jitter
+```
+
+Packet drops are sampled from the configured contention loss slope and
+communication range. Because backoff, jitter, and packet drops are sampled by
+the OMNeT++ module, the default example should no longer return the same latency
+for every delivered message.

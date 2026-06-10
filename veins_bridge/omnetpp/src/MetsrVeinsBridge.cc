@@ -4,10 +4,13 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -28,6 +31,34 @@ namespace {
 
 constexpr const char* PROTOCOL_NAME = "metsr-veins-jsonl";
 constexpr int PROTOCOL_VERSION = 1;
+constexpr const char* NETWORK_MODEL = "omnetpp_event_wireless_queue_model";
+constexpr int KIND_KEEP_ALIVE = 1;
+constexpr int KIND_PACKET_DELIVERY = 2;
+constexpr double SPEED_OF_LIGHT_MPS = 299792458.0;
+
+struct SyncWork {
+    int requestId = 0;
+    int tick = 0;
+    json request;
+    json received = json::array();
+    json metrics = json::array();
+    json attackEvents = json::array();
+    int outstandingDeliveries = 0;
+    bool done = false;
+    json response;
+    std::mutex mutex;
+    std::condition_variable cv;
+};
+
+struct PacketDelivery {
+    std::shared_ptr<SyncWork> work;
+    json message;
+    json metric;
+    int tick = 0;
+    int senderId = 0;
+    int receiverId = 0;
+    double generationTimeS = 0.0;
+};
 
 double numberValue(const json& record, const char* key, double fallback = 0.0)
 {
@@ -169,12 +200,21 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     double perMessageLatencyMs = 0.35;
     double perPayloadByteLatencyUs = 0.04;
     double contentionLossSlope = 0.002;
+    double bitrateMbps = 6.0;
+    double macSlotTimeMs = 0.013;
+    double maxJitterMs = 0.25;
+    double communicationRangeM = 1000.0;
+    int pollIntervalMs = 10;
     std::string radioAccess = "cv2x";
+    bool logRequests = true;
 
     std::thread serverThread;
     std::atomic<bool> running {false};
     int serverFd = -1;
     std::mutex socketMutex;
+    std::mutex pendingMutex;
+    std::deque<std::shared_ptr<SyncWork>> pendingSyncRequests;
+    int activeSyncWorks = 0;
     omnetpp::cMessage* keepAlive = nullptr;
 
   protected:
@@ -186,9 +226,14 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     void serverLoop();
     void handleConnection(int clientFd);
     json handleRequest(const json& request);
-    json handleSyncTick(const json& request);
+    json submitSyncTick(const json& request);
+    void drainPendingSyncRequests();
+    void startSyncWork(const std::shared_ptr<SyncWork>& work);
+    void handlePacketDelivery(omnetpp::cMessage* message);
+    void completeSyncWork(const std::shared_ptr<SyncWork>& work);
     void closeServerSocket();
-    double targetLoadLatencyMs(int receiverLoad, int payloadBytes) const;
+    double scheduledLatencyMs(int receiverLoad, int queuePosition, int payloadBytes, double distanceM);
+    double packetErrorRate(int receiverLoad, double distanceM) const;
 };
 
 Define_Module(MetsrVeinsBridge);
@@ -201,28 +246,65 @@ void MetsrVeinsBridge::initialize()
     perMessageLatencyMs = par("perMessageLatencyMs").doubleValue();
     perPayloadByteLatencyUs = par("perPayloadByteLatencyUs").doubleValue();
     contentionLossSlope = par("contentionLossSlope").doubleValue();
+    bitrateMbps = par("bitrateMbps").doubleValue();
+    macSlotTimeMs = par("macSlotTimeMs").doubleValue();
+    maxJitterMs = par("maxJitterMs").doubleValue();
+    communicationRangeM = par("communicationRangeM").doubleValue();
+    pollIntervalMs = par("pollIntervalMs").intValue();
     radioAccess = par("radioAccess").stringValue();
+    logRequests = par("logRequests").boolValue();
 
     running = true;
     keepAlive = new omnetpp::cMessage("bridge-keep-alive");
-    scheduleAt(omnetpp::simTime() + 1, keepAlive);
+    keepAlive->setKind(KIND_KEEP_ALIVE);
+    scheduleAt(omnetpp::simTime() + pollIntervalMs / 1000.0, keepAlive);
     serverThread = std::thread(&MetsrVeinsBridge::serverLoop, this);
     EV_INFO << "METS-R Veins bridge starting on " << bridgeHost << ":" << bridgePort << "\n";
 }
 
 void MetsrVeinsBridge::handleMessage(omnetpp::cMessage* message)
 {
-    if (message == keepAlive && running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        if (running) {
-            scheduleAt(omnetpp::simTime() + 1, keepAlive);
+    if (message == keepAlive) {
+        drainPendingSyncRequests();
+        if (running && activeSyncWorks == 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(std::max(1, pollIntervalMs)));
         }
+        if (running) {
+            scheduleAt(omnetpp::simTime() + pollIntervalMs / 1000.0, keepAlive);
+        }
+        return;
     }
+
+    if (message->getKind() == KIND_PACKET_DELIVERY) {
+        handlePacketDelivery(message);
+        return;
+    }
+
+    delete message;
 }
 
 void MetsrVeinsBridge::finish()
 {
     running = false;
+    {
+        std::deque<std::shared_ptr<SyncWork>> pending;
+        {
+            std::lock_guard<std::mutex> lock(pendingMutex);
+            pending.swap(pendingSyncRequests);
+        }
+        for (const auto& work : pending) {
+            std::lock_guard<std::mutex> workLock(work->mutex);
+            work->response = {
+                {"type", "sync_tick_result"},
+                {"request_id", work->requestId},
+                {"status", "error"},
+                {"message", "bridge stopped before the request reached the OMNeT++ event loop"},
+            };
+            work->done = true;
+            work->cv.notify_all();
+        }
+    }
     closeServerSocket();
     if (serverThread.joinable()) {
         serverThread.join();
@@ -337,6 +419,17 @@ void MetsrVeinsBridge::handleConnection(int clientFd)
         json response;
         try {
             json request = json::parse(line);
+            if (logRequests) {
+                const std::string type = stringValue(request, "type");
+                std::cout << "METS-R Veins bridge request type=" << type
+                          << " request_id=" << intValue(request, "request_id", 0);
+                if (type == "sync_tick") {
+                    std::cout << " tick=" << intValue(request, "tick", 0)
+                              << " vehicles=" << request.value("vehicles", json::array()).size()
+                              << " bsm_messages=" << request.value("bsm_messages", json::array()).size();
+                }
+                std::cout << std::endl;
+            }
             response = handleRequest(request);
         }
         catch (const std::exception& exc) {
@@ -383,7 +476,7 @@ json MetsrVeinsBridge::handleRequest(const json& request)
         };
     }
     if (type == "sync_tick") {
-        return handleSyncTick(request);
+        return submitSyncTick(request);
     }
 
     return {
@@ -394,19 +487,51 @@ json MetsrVeinsBridge::handleRequest(const json& request)
     };
 }
 
-double MetsrVeinsBridge::targetLoadLatencyMs(int receiverLoad, int payloadBytes) const
+json MetsrVeinsBridge::submitSyncTick(const json& request)
 {
-    const double loadPenalty = perMessageLatencyMs * std::max(0, receiverLoad - 1);
-    const double payloadPenalty = perPayloadByteLatencyUs * payloadBytes / 1000.0;
-    return baseLatencyMs + loadPenalty + payloadPenalty;
+    auto work = std::make_shared<SyncWork>();
+    work->requestId = intValue(request, "request_id", 0);
+    work->tick = intValue(request, "tick", 0);
+    work->request = request;
+
+    if (!running) {
+        return {
+            {"type", "sync_tick_result"},
+            {"request_id", work->requestId},
+            {"status", "error"},
+            {"message", "bridge is not running"},
+        };
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+        pendingSyncRequests.push_back(work);
+    }
+
+    std::unique_lock<std::mutex> lock(work->mutex);
+    work->cv.wait(lock, [&work]() { return work->done; });
+    return work->response;
 }
 
-json MetsrVeinsBridge::handleSyncTick(const json& request)
+void MetsrVeinsBridge::drainPendingSyncRequests()
 {
-    const int requestId = intValue(request, "request_id", 0);
-    const int tick = intValue(request, "tick", 0);
-    const auto vehicles = request.value("vehicles", json::array());
-    const auto messages = request.value("bsm_messages", json::array());
+    std::deque<std::shared_ptr<SyncWork>> pending;
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+        pending.swap(pendingSyncRequests);
+    }
+
+    for (const auto& work : pending) {
+        startSyncWork(work);
+    }
+}
+
+void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
+{
+    activeSyncWorks += 1;
+    const int tick = work->tick;
+    const auto vehicles = work->request.value("vehicles", json::array());
+    const auto messages = work->request.value("bsm_messages", json::array());
 
     std::map<int, json> vehicleById;
     for (const auto& vehicle : vehicles) {
@@ -427,9 +552,8 @@ json MetsrVeinsBridge::handleSyncTick(const json& request)
         }
     }
 
-    json received = json::array();
-    json metrics = json::array();
-    json attackEvents = json::array();
+    std::map<int, int> receiverQueuePosition;
+    const double generationTimeS = omnetpp::simTime().dbl();
 
     for (const auto& message : messages) {
         const int senderId = entityId(message, "sender_id", entityId(message, "vehicle_id", 0));
@@ -442,11 +566,8 @@ json MetsrVeinsBridge::handleSyncTick(const json& request)
         }
 
         const int load = std::max(1, receiverLoad[receiverId]);
+        const int queuePosition = receiverQueuePosition[receiverId]++;
         const int payloadBytes = intValue(message, "payload_bytes", 0);
-        const double latencyMs = targetLoadLatencyMs(load, payloadBytes);
-        const double packetErrorRate = std::min(0.95, contentionLossSlope * std::max(0, load - 1));
-        const double deliveryProbability = std::max(0.0, 1.0 - packetErrorRate);
-        const bool delivered = deliveryProbability > 0.0;
         double distance = 0.0;
         auto senderIt = vehicleById.find(senderId);
         auto receiverIt = vehicleById.find(receiverId);
@@ -454,47 +575,149 @@ json MetsrVeinsBridge::handleSyncTick(const json& request)
             distance = distanceM(senderIt->second, receiverIt->second);
         }
 
+        const double per = packetErrorRate(load, distance);
+        const double deliveryProbability = std::max(0.0, 1.0 - per);
+        const bool delivered = deliveryProbability > 0.0 && uniform(0.0, 1.0) <= deliveryProbability;
+        const double scheduledDelayMs = scheduledLatencyMs(load, queuePosition, payloadBytes, distance);
+
         json metric = {
             {"tick", tick},
             {"sender_id", senderId},
             {"receiver_id", receiverId},
             {"distance_m", distance},
-            {"latency_ms", latencyMs},
-            {"packet_error_rate", packetErrorRate},
+            {"generation_time_s", generationTimeS},
+            {"scheduled_delay_ms", scheduledDelayMs},
+            {"packet_error_rate", per},
             {"delivery_probability", deliveryProbability},
             {"channel_busy_ratio", std::min(1.0, load / 1000.0)},
             {"receiver_load", load},
+            {"receiver_queue_position", queuePosition},
             {"payload_bytes", payloadBytes},
             {"radio_access", radioAccess},
             {"delivered", delivered},
-            {"network_model", "omnetpp_veins_bridge_load_model"},
+            {"network_model", NETWORK_MODEL},
         };
-        metrics.push_back(metric);
 
-        if (delivered) {
-            json deliveredMessage = message;
-            deliveredMessage["tick"] = tick;
-            deliveredMessage["sender_id"] = senderId;
-            deliveredMessage["receiver_id"] = receiverId;
-            deliveredMessage["latency_ms"] = latencyMs;
-            deliveredMessage["packet_error_rate"] = packetErrorRate;
-            deliveredMessage["delivery_probability"] = deliveryProbability;
-            deliveredMessage["radio_access"] = radioAccess;
-            deliveredMessage["receiver_load"] = load;
-            deliveredMessage["network_model"] = "omnetpp_veins_bridge_load_model";
-            received.push_back(deliveredMessage);
+        if (!delivered) {
+            metric["latency_ms"] = nullptr;
+            metric["drop_reason"] =
+                communicationRangeM > 0.0 && distance > communicationRangeM
+                    ? "out_of_range"
+                    : "contention_loss";
+            work->metrics.push_back(metric);
+            continue;
         }
+
+        auto delivery = new PacketDelivery();
+        delivery->work = work;
+        delivery->message = message;
+        delivery->metric = metric;
+        delivery->tick = tick;
+        delivery->senderId = senderId;
+        delivery->receiverId = receiverId;
+        delivery->generationTimeS = generationTimeS;
+
+        auto event = new omnetpp::cMessage("packet-delivery");
+        event->setKind(KIND_PACKET_DELIVERY);
+        event->setContextPointer(delivery);
+        work->outstandingDeliveries += 1;
+        scheduleAt(omnetpp::simTime() + scheduledDelayMs / 1000.0, event);
     }
 
-    return {
+    if (work->outstandingDeliveries == 0) {
+        completeSyncWork(work);
+    }
+}
+
+void MetsrVeinsBridge::handlePacketDelivery(omnetpp::cMessage* message)
+{
+    auto* delivery = static_cast<PacketDelivery*>(message->getContextPointer());
+    std::unique_ptr<PacketDelivery> cleanup(delivery);
+    std::unique_ptr<omnetpp::cMessage> eventCleanup(message);
+    if (delivery == nullptr || delivery->work == nullptr) {
+        return;
+    }
+
+    auto work = delivery->work;
+    const double receiveTimeS = omnetpp::simTime().dbl();
+    const double latencyMs = (receiveTimeS - delivery->generationTimeS) * 1000.0;
+
+    json metric = delivery->metric;
+    metric["latency_ms"] = latencyMs;
+    metric["receive_time_s"] = receiveTimeS;
+    work->metrics.push_back(metric);
+
+    json deliveredMessage = delivery->message;
+    deliveredMessage["tick"] = delivery->tick;
+    deliveredMessage["sender_id"] = delivery->senderId;
+    deliveredMessage["receiver_id"] = delivery->receiverId;
+    deliveredMessage["generation_time_s"] = delivery->generationTimeS;
+    deliveredMessage["receive_time_s"] = receiveTimeS;
+    deliveredMessage["latency_ms"] = latencyMs;
+    deliveredMessage["packet_error_rate"] = metric["packet_error_rate"];
+    deliveredMessage["delivery_probability"] = metric["delivery_probability"];
+    deliveredMessage["radio_access"] = radioAccess;
+    deliveredMessage["receiver_load"] = metric["receiver_load"];
+    deliveredMessage["receiver_queue_position"] = metric["receiver_queue_position"];
+    deliveredMessage["network_model"] = NETWORK_MODEL;
+    work->received.push_back(deliveredMessage);
+
+    work->outstandingDeliveries -= 1;
+    if (work->outstandingDeliveries == 0) {
+        completeSyncWork(work);
+    }
+}
+
+void MetsrVeinsBridge::completeSyncWork(const std::shared_ptr<SyncWork>& work)
+{
+    activeSyncWorks = std::max(0, activeSyncWorks - 1);
+    json response = {
         {"type", "sync_tick_result"},
-        {"request_id", requestId},
+        {"request_id", work->requestId},
         {"status", "ok"},
         {"data", {
-            {"received_bsms", received},
-            {"link_metrics", metrics},
-            {"attack_events", attackEvents},
-            {"bridge_model", "omnetpp_veins_bridge_load_model"},
+            {"received_bsms", work->received},
+            {"link_metrics", work->metrics},
+            {"attack_events", work->attackEvents},
+            {"bridge_model", NETWORK_MODEL},
         }},
     };
+
+    {
+        std::lock_guard<std::mutex> lock(work->mutex);
+        work->response = response;
+        work->done = true;
+    }
+    work->cv.notify_all();
+}
+
+double MetsrVeinsBridge::scheduledLatencyMs(
+    int receiverLoad,
+    int queuePosition,
+    int payloadBytes,
+    double distanceM)
+{
+    const double queueDelayMs = perMessageLatencyMs * std::max(0, queuePosition);
+    const double payloadProcessingMs = perPayloadByteLatencyUs * payloadBytes / 1000.0;
+    const double serializationMs =
+        bitrateMbps > 0.0 ? (payloadBytes * 8.0) / (bitrateMbps * 1000000.0) * 1000.0 : 0.0;
+    const double propagationMs =
+        SPEED_OF_LIGHT_MPS > 0.0 ? distanceM / SPEED_OF_LIGHT_MPS * 1000.0 : 0.0;
+    const double contentionWindowSlots =
+        std::min(1023.0, 15.0 + std::max(0, receiverLoad - 1) / 2.0);
+    const double backoffMs =
+        macSlotTimeMs > 0.0 ? uniform(0.0, contentionWindowSlots) * macSlotTimeMs : 0.0;
+    const double jitterMs = maxJitterMs > 0.0 ? uniform(0.0, maxJitterMs) : 0.0;
+    return std::max(
+        0.0,
+        baseLatencyMs + queueDelayMs + payloadProcessingMs + serializationMs +
+            propagationMs + backoffMs + jitterMs);
+}
+
+double MetsrVeinsBridge::packetErrorRate(int receiverLoad, double distanceM) const
+{
+    if (communicationRangeM > 0.0 && distanceM > communicationRangeM) {
+        return 1.0;
+    }
+    return std::min(0.95, contentionLossSlope * std::max(0, receiverLoad - 1));
 }
