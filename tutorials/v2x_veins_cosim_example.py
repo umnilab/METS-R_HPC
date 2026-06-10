@@ -45,13 +45,37 @@ def get_arguments(argv):
     parser.add_argument("--noise_senders", type=int, default=40)
     parser.add_argument("--messages_per_sender", type=int, default=5)
     parser.add_argument("--sender_radius_m", type=float, default=80.0)
+    parser.add_argument(
+        "--radius_end_m",
+        type=float,
+        default=None,
+        help="If set, linearly sweep sender radius from sender_radius_m to this value.",
+    )
     parser.add_argument("--payload_bytes", type=int, default=300)
     parser.add_argument("--csv", default=None, help="Optional CSV output path.")
+    parser.add_argument(
+        "--message_csv",
+        default=None,
+        help="Optional per-message link metric CSV output path.",
+    )
+    parser.add_argument(
+        "--trace_messages",
+        type=int,
+        default=0,
+        help="Print this many per-message link metrics at each printed tick.",
+    )
     parser.add_argument("--print_every", type=int, default=10)
     parser.add_argument("--connect_timeout", type=float, default=None)
     parser.add_argument("--request_timeout", type=float, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
+
+
+def sender_radius_for_tick(args, tick):
+    if args.radius_end_m is None or args.ticks <= 1:
+        return args.sender_radius_m
+    fraction = tick / float(args.ticks - 1)
+    return args.sender_radius_m + (args.radius_end_m - args.sender_radius_m) * fraction
 
 
 def percentile(values, pct):
@@ -68,6 +92,7 @@ def percentile(values, pct):
 
 
 def make_vehicle_records(args, tick):
+    sender_radius = sender_radius_for_tick(args, tick)
     vehicles = [
         {
             "ID": args.target_id,
@@ -85,8 +110,8 @@ def make_vehicle_records(args, tick):
         vehicles.append(
             {
                 "ID": 1000 + index,
-                "x": args.sender_radius_m * math.cos(angle),
-                "y": args.sender_radius_m * math.sin(angle),
+                "x": sender_radius * math.cos(angle),
+                "y": sender_radius * math.sin(angle),
                 "z": 0.0,
                 "speed": 0.0,
                 "bearing": math.degrees(angle) % 360.0,
@@ -152,16 +177,45 @@ def latency_values_for_target(result, target_id):
 
 def summarize_tick(tick, transmitted, result, target_id):
     latencies, latency_rows = latency_values_for_target(result, target_id)
+    metrics = result.get("link_metrics", [])
+    distances = [
+        float(row["distance_m"])
+        for row in metrics
+        if row.get("receiver_id", row.get("target_vehicle_id")) == target_id
+        and row.get("distance_m") is not None
+    ]
+    delivered_metrics = [
+        row
+        for row in metrics
+        if row.get("receiver_id", row.get("target_vehicle_id")) == target_id
+        and row.get("delivered", False)
+    ]
     summary = {
         "tick": tick,
         "tx_noise_messages": transmitted,
         "rx_to_target": len(latency_rows),
-        "link_metrics": len(result.get("link_metrics", [])),
+        "delivery_rate": None,
+        "dropped": None,
+        "link_metrics": len(metrics),
+        "distance_min_m": None,
+        "distance_mean_m": None,
+        "distance_max_m": None,
         "latency_mean_ms": None,
         "latency_p50_ms": None,
         "latency_p95_ms": None,
         "latency_max_ms": None,
     }
+    if metrics:
+        summary["delivery_rate"] = len(delivered_metrics) / len(metrics)
+        summary["dropped"] = len(metrics) - len(delivered_metrics)
+    if distances:
+        summary.update(
+            {
+                "distance_min_m": min(distances),
+                "distance_mean_m": sum(distances) / len(distances),
+                "distance_max_m": max(distances),
+            }
+        )
     if latencies:
         summary.update(
             {
@@ -172,6 +226,39 @@ def summarize_tick(tick, transmitted, result, target_id):
             }
         )
     return summary
+
+
+def metric_rows_for_csv(result):
+    rows = []
+    for metric in result.get("link_metrics", []):
+        row = dict(metric)
+        if row.get("latency_ms") is None:
+            row["latency_ms"] = ""
+        rows.append(row)
+    return rows
+
+
+def print_metric_trace(metrics, limit):
+    if limit <= 0:
+        return
+    for row in metrics[:limit]:
+        latency = format_latency(row.get("latency_ms"))
+        drop_reason = row.get("drop_reason", "")
+        print(
+            "  msg tick={tick} {sender}->{receiver} count={count} "
+            "dist_m={distance:.1f} delivered={delivered} latency_ms={latency} "
+            "per={per:.3f} {drop}".format(
+                tick=row.get("tick"),
+                sender=row.get("sender_id"),
+                receiver=row.get("receiver_id"),
+                count=row.get("message_count", ""),
+                distance=float(row.get("distance_m", 0.0)),
+                delivered=row.get("delivered"),
+                latency=latency,
+                per=float(row.get("packet_error_rate", 0.0)),
+                drop=f"drop_reason={drop_reason}" if drop_reason else "",
+            ).rstrip()
+        )
 
 
 def bridge_model_name(result):
@@ -185,14 +272,23 @@ def bridge_model_name(result):
 
 
 def format_latency(value):
-    return "NA" if value is None else f"{value:.3f}"
+    if value is None or value == "":
+        return "NA"
+    return f"{float(value):.3f}"
 
 
 def write_csv(path, rows):
     if not path or not rows:
         return
+    fieldnames = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
     with open(path, "w", newline="", encoding="utf-8") as output:
-        writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -210,6 +306,7 @@ def main(argv=None):
         verbose=args.verbose,
     )
     rows = []
+    message_rows = []
     reported_model = False
     try:
         client.connect()
@@ -235,23 +332,36 @@ def main(argv=None):
                 result=result,
                 target_id=args.target_id,
             )
+            summary["sender_radius_m"] = sender_radius_for_tick(args, tick)
             rows.append(summary)
+            tick_metric_rows = metric_rows_for_csv(result)
+            message_rows.extend(tick_metric_rows)
             if args.print_every > 0 and (tick % args.print_every == 0 or tick == args.ticks - 1):
                 print(
-                    "tick={tick} tx={tx} rx_target={rx} mean_ms={mean} "
+                    "tick={tick} radius_m={radius:.1f} tx={tx} rx_target={rx} "
+                    "delivery={delivery} dist_mean_m={dist} mean_ms={mean} "
                     "p95_ms={p95} max_ms={max_latency}".format(
                         tick=summary["tick"],
+                        radius=summary["sender_radius_m"],
                         tx=summary["tx_noise_messages"],
                         rx=summary["rx_to_target"],
+                        delivery=(
+                            "NA"
+                            if summary["delivery_rate"] is None
+                            else f"{summary['delivery_rate']:.3f}"
+                        ),
+                        dist=format_latency(summary["distance_mean_m"]),
                         mean=format_latency(summary["latency_mean_ms"]),
                         p95=format_latency(summary["latency_p95_ms"]),
                         max_latency=format_latency(summary["latency_max_ms"]),
                     )
                 )
+                print_metric_trace(tick_metric_rows, args.trace_messages)
     finally:
         client.close()
 
     write_csv(args.csv, rows)
+    write_csv(args.message_csv, message_rows)
     latency_means = [
         row["latency_mean_ms"] for row in rows if row["latency_mean_ms"] is not None
     ]

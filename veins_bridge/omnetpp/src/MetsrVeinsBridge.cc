@@ -204,6 +204,8 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     double macSlotTimeMs = 0.013;
     double maxJitterMs = 0.25;
     double communicationRangeM = 1000.0;
+    double distanceLatencyUsPerM = 2.0;
+    double distanceLossAtRange = 0.05;
     int pollIntervalMs = 10;
     std::string radioAccess = "cv2x";
     bool logRequests = true;
@@ -250,6 +252,8 @@ void MetsrVeinsBridge::initialize()
     macSlotTimeMs = par("macSlotTimeMs").doubleValue();
     maxJitterMs = par("maxJitterMs").doubleValue();
     communicationRangeM = par("communicationRangeM").doubleValue();
+    distanceLatencyUsPerM = par("distanceLatencyUsPerM").doubleValue();
+    distanceLossAtRange = par("distanceLossAtRange").doubleValue();
     pollIntervalMs = par("pollIntervalMs").intValue();
     radioAccess = par("radioAccess").stringValue();
     logRequests = par("logRequests").boolValue();
@@ -579,12 +583,25 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
         const double deliveryProbability = std::max(0.0, 1.0 - per);
         const bool delivered = deliveryProbability > 0.0 && uniform(0.0, 1.0) <= deliveryProbability;
         const double scheduledDelayMs = scheduledLatencyMs(load, queuePosition, payloadBytes, distance);
+        const double propagationMs =
+            SPEED_OF_LIGHT_MPS > 0.0 ? distance / SPEED_OF_LIGHT_MPS * 1000.0 : 0.0;
+        const double distanceLatencyMs = std::max(0.0, distanceLatencyUsPerM) * distance / 1000.0;
+        const double distanceLossComponent =
+            communicationRangeM > 0.0 && distanceLossAtRange > 0.0
+                ? distanceLossAtRange * std::pow(std::max(0.0, distance) / communicationRangeM, 2.0)
+                : 0.0;
 
         json metric = {
             {"tick", tick},
             {"sender_id", senderId},
             {"receiver_id", receiverId},
+            {"message_name", stringValue(message, "message_name")},
+            {"message_standard", stringValue(message, "message_standard")},
+            {"message_count", intValue(message, "message_count", 0)},
             {"distance_m", distance},
+            {"propagation_delay_ms", propagationMs},
+            {"distance_latency_ms", distanceLatencyMs},
+            {"distance_loss_component", std::min(0.95, distanceLossComponent)},
             {"generation_time_s", generationTimeS},
             {"scheduled_delay_ms", scheduledDelayMs},
             {"packet_error_rate", per},
@@ -703,6 +720,7 @@ double MetsrVeinsBridge::scheduledLatencyMs(
         bitrateMbps > 0.0 ? (payloadBytes * 8.0) / (bitrateMbps * 1000000.0) * 1000.0 : 0.0;
     const double propagationMs =
         SPEED_OF_LIGHT_MPS > 0.0 ? distanceM / SPEED_OF_LIGHT_MPS * 1000.0 : 0.0;
+    const double distanceModelMs = std::max(0.0, distanceLatencyUsPerM) * distanceM / 1000.0;
     const double contentionWindowSlots =
         std::min(1023.0, 15.0 + std::max(0, receiverLoad - 1) / 2.0);
     const double backoffMs =
@@ -711,7 +729,7 @@ double MetsrVeinsBridge::scheduledLatencyMs(
     return std::max(
         0.0,
         baseLatencyMs + queueDelayMs + payloadProcessingMs + serializationMs +
-            propagationMs + backoffMs + jitterMs);
+            propagationMs + distanceModelMs + backoffMs + jitterMs);
 }
 
 double MetsrVeinsBridge::packetErrorRate(int receiverLoad, double distanceM) const
@@ -719,5 +737,11 @@ double MetsrVeinsBridge::packetErrorRate(int receiverLoad, double distanceM) con
     if (communicationRangeM > 0.0 && distanceM > communicationRangeM) {
         return 1.0;
     }
-    return std::min(0.95, contentionLossSlope * std::max(0, receiverLoad - 1));
+    const double contentionLoss = contentionLossSlope * std::max(0, receiverLoad - 1);
+    double distanceLoss = 0.0;
+    if (communicationRangeM > 0.0 && distanceLossAtRange > 0.0) {
+        const double normalizedDistance = std::max(0.0, distanceM) / communicationRangeM;
+        distanceLoss = distanceLossAtRange * normalizedDistance * normalizedDistance;
+    }
+    return std::min(0.95, contentionLoss + distanceLoss);
 }

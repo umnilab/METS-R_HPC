@@ -11,6 +11,8 @@ simple MetsrVeinsBridge
         double macSlotTimeMs = default(0.013);
         double maxJitterMs = default(0.25);
         double communicationRangeM = default(1000);
+        double distanceLatencyUsPerM = default(2);
+        double distanceLossAtRange = default(0.05);
         int pollIntervalMs = default(10);
         string radioAccess = default("cv2x");
         bool logRequests = default(true);

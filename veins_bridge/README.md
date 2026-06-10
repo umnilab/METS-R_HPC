@@ -86,6 +86,35 @@ python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.js
   --noise_senders 60 --messages_per_sender 10 --ticks 100 --csv output/veins_latency.csv
 ```
 
+To inspect the individual messages and link outcomes returned by the bridge,
+write a per-message CSV or print a few sample rows:
+
+```bash
+python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json \
+  --noise_senders 60 --messages_per_sender 10 --ticks 20 \
+  --csv output/veins_latency.csv --message_csv output/veins_messages.csv \
+  --trace_messages 3
+```
+
+`output/veins_messages.csv` contains one row per intended BSM transfer with
+sender, receiver, message count, distance, delivered/drop status, packet error
+rate, and latency when delivered.
+
+To show how sender location influences latency, sweep the sender ring away from
+the target over time:
+
+```bash
+python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json \
+  --noise_senders 60 --messages_per_sender 10 --ticks 100 \
+  --sender_radius_m 50 --radius_end_m 900 \
+  --csv output/veins_distance_sweep.csv \
+  --message_csv output/veins_distance_messages.csv
+```
+
+The tick-level CSV includes `sender_radius_m`, distance summaries, delivery
+rate, and latency summaries. The per-message CSV includes `distance_m` and
+`latency_ms`, so you can plot latency versus distance directly.
+
 If the Python process runs on Windows and the bridge runs in WSL, `127.0.0.1`
 usually works on recent WSL2 versions. If it does not, get the WSL IP:
 
@@ -125,11 +154,13 @@ scheduled_delay_ms = baseLatencyMs
                    + perPayloadByteLatencyUs * payload_bytes / 1000
                    + payload_serialization_delay
                    + propagation_delay
+                   + distanceLatencyUsPerM * distance_m / 1000
                    + sampled_mac_backoff
                    + sampled_jitter
 ```
 
 Packet drops are sampled from the configured contention loss slope and
-communication range. Because backoff, jitter, and packet drops are sampled by
-the OMNeT++ module, the default example should no longer return the same latency
-for every delivered message.
+communication range, with an additional `distanceLossAtRange` term for the
+abstract distance-sensitive model. Because backoff, jitter, and packet drops are
+sampled by the OMNeT++ module, the default example should no longer return the
+same latency for every delivered message.
