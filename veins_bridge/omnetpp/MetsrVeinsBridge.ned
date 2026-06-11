@@ -19,6 +19,15 @@ simple MetsrVeinsBridge
         string networkModel = default("omnetpp_event_wireless_queue_model");
         string backendNote = default("");
         string radioAccess = default("cv2x");
+        double simu5gReceiveTimeoutMs = default(1000);
+        string simu5gVehicleModuleName = default("car");
+        string simu5gMobilityModuleName = default("mobility");
+        int simu5gBsmAppIndex = default(0);
+        int simu5gLocalPort = default(4400);
+        int simu5gDestPort = default(4400);
+        bool simu5gUpdateMobility = default(true);
         bool logRequests = default(true);
         @display("i=block/network2");
+    gates:
+        input sim5gReportIn @directIn;
 }

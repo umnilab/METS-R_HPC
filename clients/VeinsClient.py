@@ -367,7 +367,7 @@ class VeinsClient:
         status = response.get("status", "ok")
         if status not in ("ok", "OK", "success"):
             message = response.get("message", response.get("error", response))
-            raise VeinsProtocolError(f"VEINS sidecar rejected request: {message}")
+            raise VeinsProtocolError(f"Veins bridge rejected request: {message}")
 
     def close(self, close_process=True):
         if self.reader is not None:

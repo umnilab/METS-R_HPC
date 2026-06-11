@@ -7,12 +7,13 @@ messages, and returns delivered messages plus latency/link metrics.
 The current implementation is intentionally small: it runs inside OMNeT++,
 hands each `sync_tick` request to the OMNeT++ event loop, schedules packet
 delivery events, and reports latency as receive simulation time minus generation
-simulation time. The bridge now exposes named backend profiles
-(`abstract_omnetpp`, `veins_80211p`, and `sim5g_cellular`), but all three are
-currently parameter profiles on the same abstract queue/contention model. They
-do not yet instantiate full Veins 802.11p or Simu5G cellular PHY/MAC modules.
-The stable Python protocol is the boundary where those deeper backends can be
-connected later without changing the tutorial shape.
+simulation time. The bridge now exposes named backend profiles. The usable
+profiles today (`abstract_omnetpp`, `veins_80211p`, and `sim5g_cellular`) are
+parameter profiles on the same abstract queue/contention model. Reserved true
+backend requests (`sim5g_cellular_uu` and `cv2x_pc5_sidelink`) fail fast until
+the corresponding Simu5G/PC5 modules are wired in. The stable Python protocol is
+the boundary where those deeper backends can be connected later without changing
+the tutorial shape.
 
 ## Build In WSL
 
@@ -65,10 +66,28 @@ To run the cellular profile reserved for future Simu5G integration:
 opp_run -u Cmdenv -n . -l ./out/clang-release/metsr_veins_bridge -c Sim5gCellular omnetpp.ini
 ```
 
+To intentionally request the future true Simu5G Uu backend:
+
+```bash
+bash ./build_sim5g.sh
+bash ./run_sim5g_uu.sh
+```
+
+This build compiles the bridge with the Simu5G UE app and METS-R external
+mobility modules. `sync_tick` packets are injected into Simu5G UE applications
+and completed from real UDP receive events. The reserved PC5 sidelink config
+still fails fast because direct C-V2X/NR-V2X sidelink is a separate radio path:
+
+```bash
+opp_run -u Cmdenv -n . -l ./out/clang-release/metsr_veins_bridge -c Cv2xPc5Sidelink omnetpp.ini
+```
+
 The profile name appears in `hello`, `sync_tick`, per-message `link_metrics`,
 and the tutorial CSV fields as `bridge_backend`. Today `veins_80211p` and
 `sim5g_cellular` tune the current abstract model; their
-`backend_implementation` values make that explicit.
+`backend_implementation` values make that explicit. The true-backend configs use
+`*_required` implementation names so they cannot be confused with abstract
+results. The true Uu backend uses `backend_implementation=simu5g_cellular_uu`.
 
 When the Python example connects, the bridge also logs JSON requests, for
 example:
@@ -267,14 +286,72 @@ abstract profiles:
 - `abstract_profile_pending_full_veins`
 - `abstract_profile_pending_simu5g`
 
-The next real backend steps are:
+Implemented true-backend implementation names:
 
-1. Add a Simu5G/INET build target and NED network for `sim5g_cellular_uu`.
-2. Map each METS-R vehicle record to a Simu5G UE mobility module every tick.
-3. Inject BSM payloads into Simu5G UE applications and measure receive events.
-4. Export Simu5G radio/network metrics such as serving gNB, CQI, SINR, BLER,
+- `simu5g_cellular_uu`
+
+Reserved true-backend implementation names still fail fast:
+
+- `cv2x_pc5_sidelink_required`
+
+The next Simu5G artifacts are scaffolded under `omnetpp/sim5g/`. Install and
+build Simu5G/INET first, then run:
+
+```bash
+cd ~/src/METS-R_HPC/veins_bridge/omnetpp
+bash ./check_sim5g_env.sh
+bash ./build_sim5g.sh
+bash ./run_sim5g_uu.sh
+```
+
+The Simu5G installation docs recommend `opp_env install simu5g-latest`, and the
+manual install path builds OMNeT++, INET, and Simu5G before running examples:
+<https://simu5g.org/install.html>.
+
+`build_sim5g.sh` generates active NED/INI files under
+`veins_bridge/.generated/sim5g-ned` and compiles with `METSR_WITH_SIMU5G`.
+`run_sim5g_uu.sh` adds that generated NED directory plus `$SIMU5G_HOME/src`,
+`$SIMU5G_HOME/simulations`, and `$INET_HOME/src` to the NED path.
+
+## Connected Vehicle Backend Usage
+
+Use the backends according to the communication question:
+
+- `AbstractOmnetpp`: quick regression and distance/load sweeps when you only
+  need deterministic bridge plumbing and message observability.
+- `Veins80211p`: abstract DSRC/802.11p-like profile for VASP-style experiments
+  before the full Veins PHY/MAC stack is wired in.
+- `Sim5gCellular`: abstract cellular-like profile for quick Uu-shaped sweeps.
+- `Sim5gCellularUu`: real Simu5G/INET Uu path. METS-R/CARLA vehicle positions
+  update Simu5G NR UE mobility modules; each BSM is injected into the sender UE
+  app; Simu5G/INET decides radio/core delivery through gNB/UPF/IP; the receiver
+  UE app reports the receive event back to `sync_tick`.
+- `Cv2xPc5Sidelink`: reserved direct sidelink path. Use this only after a PC5
+  backend exists; it should model direct V2V/VRU/RSU sidelink resource selection,
+  sensing, interference, collisions, and BLER.
+
+In CV vocabulary, the current real Uu backend is best read as infrastructure
+mediated V2X:
+
+- V2V over Uu: vehicle UE sends a BSM to another vehicle UE through the cellular
+  infrastructure path, not direct sidelink.
+- V2N/V2I over Uu: vehicle UE sends status or BSM-like payloads to a network,
+  MEC, traffic-management, or infrastructure endpoint.
+- V2X over Uu: the same packet path can represent vehicle-to-anything when the
+  target is reachable through the cellular/IP network.
+
+PC5 sidelink remains different: it is direct V2V/V2I/VRU broadcast/multicast
+without routing through the gNB/UPF user-plane path.
+
+The remaining real backend steps are:
+
+1. Validate the generated Uu network against your local Simu5G/INET checkout and
+   adjust library names with `INET_LIB_NAME` / `SIMU5G_LIB_NAME` if needed.
+2. Add optional Uu V2N/MEC relay/server applications for cloud or RSU-style
+   targets rather than UE-to-UE BSM delivery.
+3. Export Simu5G radio/network metrics such as serving gNB, CQI, SINR, BLER,
    HARQ count, scheduler delay, and handover state into `link_metrics`.
-5. Add a separate `cv2x_pc5_sidelink` backend for direct V2V/RSU delivery.
+4. Add a separate `cv2x_pc5_sidelink` backend for direct V2V/RSU delivery.
    This needs sidelink resource pools, sensing/resource selection, collision
    accounting, interference, BLER, and broadcast/multicast delivery semantics.
 

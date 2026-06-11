@@ -1,0 +1,18 @@
+package metsr.veinsbridge.sim5g;
+
+import inet.applications.contract.IApp;
+
+simple MetsrBsmUuApp like IApp
+{
+    parameters:
+        int localPort = default(4400);
+        int destPort = default(4400);
+        string bridgeModule = default("^.^.bridge");
+        int tos = default(-1);
+        @class(metsr::veinsbridge::sim5g::MetsrBsmUuApp);
+        @display("i=block/rxtx");
+    gates:
+        input socketIn;
+        output socketOut;
+        input bridgeIn @directIn;
+}

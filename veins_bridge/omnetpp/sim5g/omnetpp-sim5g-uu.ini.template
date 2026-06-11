@@ -1,0 +1,57 @@
+[General]
+network = Sim5gCellularUuBridgeNetwork
+sim-time-limit = 7d
+cmdenv-express-mode = true
+cmdenv-autoflush = true
+cmdenv-status-frequency = 30s
+abstract = true
+print-undisposed = false
+
+**.routingRecorder.enabled = false
+*.configurator.config = xmldoc("sim5g/demo.xml")
+
+# Keep the bridge's Python-facing socket contract unchanged.
+*.bridge.bridgeHost = "0.0.0.0"
+*.bridge.bridgePort = 9099
+*.bridge.bridgeBackend = "sim5g_cellular_uu"
+*.bridge.backendImplementation = "simu5g_cellular_uu"
+*.bridge.networkModel = "simu5g_nr_uu"
+*.bridge.radioAccess = "5g_nr_uu"
+*.bridge.backendNote = "True Simu5G Uu backend: BSM payloads are delivered through Simu5G UE/gNB modules."
+*.bridge.simu5gVehicleModuleName = "car"
+*.bridge.simu5gMobilityModuleName = "mobility"
+*.bridge.simu5gBsmAppIndex = 0
+*.bridge.simu5gLocalPort = 4400
+*.bridge.simu5gDestPort = 4400
+*.bridge.simu5gReceiveTimeoutMs = 1000
+
+# METS-R/CARLA-controlled vehicles are Simu5G NR UEs.
+*.numVehicles = 16
+*.car[*].numApps = 1
+*.car[*].app[0].typename = "metsr.veinsbridge.sim5g.MetsrBsmUuApp"
+*.car[*].app[0].localPort = 4400
+*.car[*].app[0].destPort = 4400
+*.car[*].app[0].bridgeModule = "^.^.bridge"
+*.car[*].mobility.typename = "metsr.veinsbridge.sim5g.MetsrExternalMobility"
+*.car[*].mobility.constraintAreaMinX = 0m
+*.car[*].mobility.constraintAreaMinY = 0m
+*.car[*].mobility.constraintAreaMinZ = 0m
+*.car[*].mobility.constraintAreaMaxX = 10000m
+*.car[*].mobility.constraintAreaMaxY = 10000m
+*.car[*].mobility.constraintAreaMaxZ = 200m
+*.car[*].mobility.initFromDisplayString = false
+
+# NR standalone Uu radio/core configuration, adapted from Simu5G standalone.
+**.numBands = 50
+**.ueTxPower = 26dBm
+**.eNodeBTxPower = 40dBm
+**.targetBler = 0.01
+**.blerShift = 5
+*.gnb.mobility.initialX = 450m
+*.gnb.mobility.initialY = 300m
+*.car[*].servingNodeId = 0
+*.car[*].nrServingNodeId = 1
+*.car[*].cellularNic.nrPhy.dynamicCellAssociation = true
+
+# The tutorial maps active METS-R vehicles onto car[0], car[1], ... in the
+# order they are sent in sync_tick. Increase *.numVehicles above if needed.

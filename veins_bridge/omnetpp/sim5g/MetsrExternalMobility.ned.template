@@ -1,0 +1,17 @@
+package metsr.veinsbridge.sim5g;
+
+import inet.mobility.base.MobilityBase;
+
+simple MetsrExternalMobility extends MobilityBase
+{
+    parameters:
+        double initialX @unit(m) = default(0m);
+        double initialY @unit(m) = default(0m);
+        double initialZ @unit(m) = default(0m);
+        double initialHeading @unit(deg) = default(0deg);
+        bool initFromDisplayString = default(false);
+        @class(metsr::veinsbridge::sim5g::MetsrExternalMobility);
+        @display("i=block/cogwheel");
+    gates:
+        input bridgeIn @directIn;
+}

@@ -25,6 +25,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "MetsrVeinsBridgeProtocol.h"
+
 using json = nlohmann::json;
 
 namespace {
@@ -32,9 +34,16 @@ namespace {
 constexpr const char* PROTOCOL_NAME = "metsr-veins-jsonl";
 constexpr int PROTOCOL_VERSION = 1;
 constexpr const char* DEFAULT_NETWORK_MODEL = "omnetpp_event_wireless_queue_model";
-constexpr int KIND_KEEP_ALIVE = 1;
-constexpr int KIND_PACKET_DELIVERY = 2;
 constexpr double SPEED_OF_LIGHT_MPS = 299792458.0;
+
+using metsr::veinsbridge::KIND_KEEP_ALIVE;
+using metsr::veinsbridge::KIND_PACKET_DELIVERY;
+using metsr::veinsbridge::KIND_SIMU5G_BSM_REQUEST;
+using metsr::veinsbridge::KIND_SIMU5G_MOBILITY_UPDATE;
+using metsr::veinsbridge::KIND_SIMU5G_RX_REPORT;
+using metsr::veinsbridge::KIND_SIMU5G_SYNC_TIMEOUT;
+using metsr::veinsbridge::SIMU5G_BRIDGE_GATE;
+using metsr::veinsbridge::SIMU5G_REPORT_GATE;
 
 struct SyncWork {
     int requestId = 0;
@@ -44,6 +53,7 @@ struct SyncWork {
     json metrics = json::array();
     json attackEvents = json::array();
     int outstandingDeliveries = 0;
+    omnetpp::cMessage* timeoutEvent = nullptr;
     bool done = false;
     json response;
     std::mutex mutex;
@@ -58,6 +68,17 @@ struct PacketDelivery {
     int senderId = 0;
     int receiverId = 0;
     double generationTimeS = 0.0;
+};
+
+struct Simu5gPendingDelivery {
+    std::shared_ptr<SyncWork> work;
+    json message;
+    json metric;
+    double generationTimeS = 0.0;
+};
+
+struct SyncWorkHolder {
+    std::shared_ptr<SyncWork> work;
 };
 
 double numberValue(const json& record, const char* key, double fallback = 0.0)
@@ -145,6 +166,9 @@ int entityId(const json& record, const char* primary, int fallback = 0)
     if (hasKey(record, "ID")) {
         return intValue(record, "ID", fallback);
     }
+    if (hasKey(record, "id")) {
+        return intValue(record, "id", fallback);
+    }
     return fallback;
 }
 
@@ -223,6 +247,13 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     std::string networkModel = DEFAULT_NETWORK_MODEL;
     std::string backendNote;
     std::string radioAccess = "cv2x";
+    double simu5gReceiveTimeoutMs = 1000.0;
+    std::string simu5gVehicleModuleName = "car";
+    std::string simu5gMobilityModuleName = "mobility";
+    int simu5gBsmAppIndex = 0;
+    int simu5gLocalPort = 4400;
+    int simu5gDestPort = 4400;
+    bool simu5gUpdateMobility = true;
     bool logRequests = true;
 
     std::thread serverThread;
@@ -231,6 +262,7 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     std::mutex socketMutex;
     std::mutex pendingMutex;
     std::deque<std::shared_ptr<SyncWork>> pendingSyncRequests;
+    std::map<std::string, Simu5gPendingDelivery> pendingSimu5gDeliveries;
     int activeSyncWorks = 0;
     omnetpp::cMessage* keepAlive = nullptr;
 
@@ -247,7 +279,7 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     void drainPendingSyncRequests();
     void startSyncWork(const std::shared_ptr<SyncWork>& work);
     void recordAttackEvents(const std::shared_ptr<SyncWork>& work);
-    void runActiveBackend(
+    bool runActiveBackend(
         const std::shared_ptr<SyncWork>& work,
         const json& vehicles,
         const json& messages);
@@ -255,8 +287,29 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
         const std::shared_ptr<SyncWork>& work,
         const json& vehicles,
         const json& messages);
+    bool runSimu5gCellularUuBackend(
+        const std::shared_ptr<SyncWork>& work,
+        const json& vehicles,
+        const json& messages);
+    bool updateSimu5gMobility(int vehicleIndex, int vehicleId, const json& vehicle);
+    bool injectSimu5gBsm(
+        const std::shared_ptr<SyncWork>& work,
+        const json& message,
+        const json& metric,
+        int senderIndex,
+        int receiverIndex,
+        double generationTimeS);
+    omnetpp::cModule* simu5gVehicleModule(int vehicleIndex) const;
+    void handleSimu5gReport(omnetpp::cMessage* message);
+    void handleSimu5gTimeout(omnetpp::cMessage* message);
+    void markSimu5gDrop(
+        const Simu5gPendingDelivery& delivery,
+        const std::string& dropReason);
     void handlePacketDelivery(omnetpp::cMessage* message);
-    void completeSyncWork(const std::shared_ptr<SyncWork>& work);
+    void completeSyncWork(
+        const std::shared_ptr<SyncWork>& work,
+        const std::string& status = "ok",
+        const std::string& message = "");
     void closeServerSocket();
     json bridgeMetadata(bool includeNote = false) const;
     void addBridgeMetadata(json& record, bool includeNote = false) const;
@@ -286,6 +339,13 @@ void MetsrVeinsBridge::initialize()
     networkModel = par("networkModel").stringValue();
     backendNote = par("backendNote").stringValue();
     radioAccess = par("radioAccess").stringValue();
+    simu5gReceiveTimeoutMs = par("simu5gReceiveTimeoutMs").doubleValue();
+    simu5gVehicleModuleName = par("simu5gVehicleModuleName").stringValue();
+    simu5gMobilityModuleName = par("simu5gMobilityModuleName").stringValue();
+    simu5gBsmAppIndex = par("simu5gBsmAppIndex").intValue();
+    simu5gLocalPort = par("simu5gLocalPort").intValue();
+    simu5gDestPort = par("simu5gDestPort").intValue();
+    simu5gUpdateMobility = par("simu5gUpdateMobility").boolValue();
     logRequests = par("logRequests").boolValue();
 
     running = true;
@@ -315,6 +375,16 @@ void MetsrVeinsBridge::handleMessage(omnetpp::cMessage* message)
 
     if (message->getKind() == KIND_PACKET_DELIVERY) {
         handlePacketDelivery(message);
+        return;
+    }
+
+    if (message->getKind() == KIND_SIMU5G_RX_REPORT) {
+        handleSimu5gReport(message);
+        return;
+    }
+
+    if (message->getKind() == KIND_SIMU5G_SYNC_TIMEOUT) {
+        handleSimu5gTimeout(message);
         return;
     }
 
@@ -350,6 +420,16 @@ void MetsrVeinsBridge::finish()
         cancelAndDelete(keepAlive);
         keepAlive = nullptr;
     }
+    for (auto& item : pendingSimu5gDeliveries) {
+        if (item.second.work && item.second.work->timeoutEvent != nullptr) {
+            auto* holder = static_cast<SyncWorkHolder*>(item.second.work->timeoutEvent->getContextPointer());
+            delete holder;
+            item.second.work->timeoutEvent->setContextPointer(nullptr);
+            cancelAndDelete(item.second.work->timeoutEvent);
+            item.second.work->timeoutEvent = nullptr;
+        }
+    }
+    pendingSimu5gDeliveries.clear();
 }
 
 void MetsrVeinsBridge::closeServerSocket()
@@ -601,7 +681,9 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
     const auto messages = work->request.value("bsm_messages", json::array());
 
     recordAttackEvents(work);
-    runActiveBackend(work, vehicles, messages);
+    if (!runActiveBackend(work, vehicles, messages)) {
+        return;
+    }
 
     if (work->outstandingDeliveries == 0) {
         completeSyncWork(work);
@@ -620,7 +702,7 @@ void MetsrVeinsBridge::recordAttackEvents(const std::shared_ptr<SyncWork>& work)
     }
 }
 
-void MetsrVeinsBridge::runActiveBackend(
+bool MetsrVeinsBridge::runActiveBackend(
     const std::shared_ptr<SyncWork>& work,
     const json& vehicles,
     const json& messages)
@@ -629,7 +711,11 @@ void MetsrVeinsBridge::runActiveBackend(
         backendImplementation == "abstract_profile_pending_full_veins" ||
         backendImplementation == "abstract_profile_pending_simu5g") {
         runAbstractEventBackend(work, vehicles, messages);
-        return;
+        return true;
+    }
+
+    if (backendImplementation == "simu5g_cellular_uu") {
+        return runSimu5gCellularUuBackend(work, vehicles, messages);
     }
 
     json errorEvent = {
@@ -641,6 +727,304 @@ void MetsrVeinsBridge::runActiveBackend(
     };
     addBridgeMetadata(errorEvent, true);
     work->attackEvents.push_back(errorEvent);
+    completeSyncWork(work, "error", errorEvent["message"].get<std::string>());
+    return false;
+}
+
+omnetpp::cModule* MetsrVeinsBridge::simu5gVehicleModule(int vehicleIndex) const
+{
+    omnetpp::cModule* parent = getParentModule();
+    if (parent == nullptr) {
+        return nullptr;
+    }
+    return parent->getSubmodule(simu5gVehicleModuleName.c_str(), vehicleIndex);
+}
+
+bool MetsrVeinsBridge::updateSimu5gMobility(int vehicleIndex, int vehicleId, const json& vehicle)
+{
+    if (!simu5gUpdateMobility) {
+        return true;
+    }
+
+    omnetpp::cModule* ue = simu5gVehicleModule(vehicleIndex);
+    if (ue == nullptr) {
+        return false;
+    }
+    omnetpp::cModule* mobility = ue->getSubmodule(simu5gMobilityModuleName.c_str());
+    if (mobility == nullptr || !mobility->hasGate(SIMU5G_BRIDGE_GATE)) {
+        return false;
+    }
+
+    auto* update = new omnetpp::cMessage("metsrMobilityUpdate", KIND_SIMU5G_MOBILITY_UPDATE);
+    update->addPar("vehicle_id") = vehicleId;
+    update->addPar("vehicle_index") = vehicleIndex;
+    update->addPar("x") = numberValue(vehicle, "x");
+    update->addPar("y") = numberValue(vehicle, "y");
+    update->addPar("z") = numberValue(vehicle, "z");
+    update->addPar("speed_mps") = numberValue(vehicle, "speed_mps", numberValue(vehicle, "speed"));
+    update->addPar("heading_deg") = numberValue(vehicle, "heading_deg", numberValue(vehicle, "heading"));
+    sendDirect(update, mobility, SIMU5G_BRIDGE_GATE);
+    return true;
+}
+
+bool MetsrVeinsBridge::injectSimu5gBsm(
+    const std::shared_ptr<SyncWork>& work,
+    const json& message,
+    const json& metric,
+    int senderIndex,
+    int receiverIndex,
+    double generationTimeS)
+{
+    omnetpp::cModule* sender = simu5gVehicleModule(senderIndex);
+    omnetpp::cModule* receiver = simu5gVehicleModule(receiverIndex);
+    if (sender == nullptr || receiver == nullptr) {
+        return false;
+    }
+    omnetpp::cModule* app = sender->getSubmodule("app", simu5gBsmAppIndex);
+    if (app == nullptr || !app->hasGate(SIMU5G_BRIDGE_GATE)) {
+        return false;
+    }
+
+    const std::string messageId = metric.value("message_id", "");
+    const std::string destAddress = simu5gVehicleModuleName + "[" + std::to_string(receiverIndex) + "]";
+    const int senderId = metric.value("sender_id", 0);
+    const int receiverId = metric.value("receiver_id", 0);
+    const int payloadBytes = metric.value("payload_bytes", 0);
+    const std::string content = stringValue(message, "content");
+
+    auto* tx = new omnetpp::cMessage("metsrBsmUuTx", KIND_SIMU5G_BSM_REQUEST);
+    tx->addPar("message_id") = messageId.c_str();
+    tx->addPar("sender_id") = senderId;
+    tx->addPar("receiver_id") = receiverId;
+    tx->addPar("sender_index") = senderIndex;
+    tx->addPar("receiver_index") = receiverIndex;
+    tx->addPar("dest_address") = destAddress.c_str();
+    tx->addPar("dest_port") = simu5gDestPort;
+    tx->addPar("local_port") = simu5gLocalPort;
+    tx->addPar("payload_bytes") = payloadBytes;
+    tx->addPar("tx_time_s") = generationTimeS;
+    tx->addPar("message_name") = stringValue(message, "message_name", "BasicSafetyMessage").c_str();
+    tx->addPar("message_standard") = stringValue(message, "message_standard", "SAE J2735-aligned").c_str();
+    tx->addPar("message_json") = message.dump().c_str();
+    tx->addPar("content") = content.c_str();
+
+    pendingSimu5gDeliveries[messageId] = Simu5gPendingDelivery {
+        work,
+        message,
+        metric,
+        generationTimeS,
+    };
+    work->outstandingDeliveries += 1;
+    sendDirect(tx, app, SIMU5G_BRIDGE_GATE);
+    return true;
+}
+
+bool MetsrVeinsBridge::runSimu5gCellularUuBackend(
+    const std::shared_ptr<SyncWork>& work,
+    const json& vehicles,
+    const json& messages)
+{
+    if (!messages.empty() && simu5gVehicleModule(0) == nullptr) {
+        json errorEvent = {
+            {"tick", work->tick},
+            {"status", "error"},
+            {"message", "simu5g_cellular_uu requires a Simu5G network with UE submodules"},
+            {"vehicle_module_name", simu5gVehicleModuleName},
+            {"requested_backend", bridgeBackend},
+            {"requested_backend_implementation", backendImplementation},
+        };
+        addBridgeMetadata(errorEvent, true);
+        work->attackEvents.push_back(errorEvent);
+        completeSyncWork(work, "error", errorEvent["message"].get<std::string>());
+        return false;
+    }
+
+    std::map<int, json> vehicleById;
+    std::map<int, int> vehicleIndexById;
+    int vehicleIndex = 0;
+    for (const auto& vehicle : vehicles) {
+        const int vehicleId = entityId(vehicle, "vehicle_id", entityId(vehicle, "id", 0));
+        if (vehicleId == 0) {
+            vehicleIndex += 1;
+            continue;
+        }
+        vehicleById[vehicleId] = vehicle;
+        vehicleIndexById[vehicleId] = vehicleIndex;
+        if (!updateSimu5gMobility(vehicleIndex, vehicleId, vehicle)) {
+            EV_WARN << "Could not update Simu5G mobility for vehicle_id=" << vehicleId
+                    << " index=" << vehicleIndex << "\n";
+        }
+        vehicleIndex += 1;
+    }
+
+    const double generationTimeS = omnetpp::simTime().dbl();
+    for (const auto& message : messages) {
+        const int senderId = entityId(message, "sender_id", entityId(message, "vehicle_id", 0));
+        int receiverId = entityId(message, "receiver_id", 0);
+        if (receiverId == 0 && hasKey(message, "target_vehicle_id")) {
+            receiverId = intValue(message, "target_vehicle_id", 0);
+        }
+        const int payloadBytes = intValue(message, "payload_bytes", 0);
+        const double txTimeS = numberValue(message, "tx_time_s", generationTimeS);
+        const std::string messageId = messageIdValue(message, work->tick, senderId, receiverId);
+
+        json metric = {
+            {"tick", work->tick},
+            {"message_id", messageId},
+            {"tx_time_s", txTimeS},
+            {"sender_id", senderId},
+            {"receiver_id", receiverId},
+            {"message_name", stringValue(message, "message_name")},
+            {"message_standard", stringValue(message, "message_standard")},
+            {"message_count", intValue(message, "message_count", 0)},
+            {"payload_bytes", payloadBytes},
+            {"radio_mode", stringValue(message, "radio_mode", radioAccess)},
+            {"attacked", hasKey(message, "attacked") ? message["attacked"] : false},
+            {"attack_id", stringValue(message, "attack_id")},
+            {"attack_type", stringValue(message, "attack_type")},
+            {"backend_time_source", "simu5g_udp_receive_event"},
+            {"simu5g_delivery_path", "5g_nr_uu_unicast"},
+            {"delivered", false},
+            {"drop_reason", "pending_simu5g_delivery"},
+        };
+
+        if (vehicleById.find(senderId) != vehicleById.end() &&
+            vehicleById.find(receiverId) != vehicleById.end()) {
+            const double distance = distanceM(vehicleById.at(senderId), vehicleById.at(receiverId));
+            metric["distance_m"] = distance;
+        }
+        else {
+            metric["distance_m"] = nullptr;
+        }
+
+        addBridgeMetadata(metric);
+
+        auto senderIndexIt = vehicleIndexById.find(senderId);
+        auto receiverIndexIt = vehicleIndexById.find(receiverId);
+        if (senderIndexIt == vehicleIndexById.end() || receiverIndexIt == vehicleIndexById.end()) {
+            metric["drop_reason"] = "unknown_sender_or_receiver_vehicle";
+            work->metrics.push_back(metric);
+            continue;
+        }
+
+        if (!injectSimu5gBsm(
+                work,
+                message,
+                metric,
+                senderIndexIt->second,
+                receiverIndexIt->second,
+                generationTimeS)) {
+            metric["drop_reason"] = "simu5g_sender_app_missing";
+            work->metrics.push_back(metric);
+        }
+    }
+
+    if (work->outstandingDeliveries > 0) {
+        auto* timeout = new omnetpp::cMessage("simu5gSyncTimeout", KIND_SIMU5G_SYNC_TIMEOUT);
+        timeout->setContextPointer(new SyncWorkHolder {work});
+        work->timeoutEvent = timeout;
+        scheduleAt(
+            omnetpp::simTime() + std::max(0.001, simu5gReceiveTimeoutMs / 1000.0),
+            timeout);
+    }
+
+    return true;
+}
+
+void MetsrVeinsBridge::markSimu5gDrop(
+    const Simu5gPendingDelivery& delivery,
+    const std::string& dropReason)
+{
+    json metric = delivery.metric;
+    metric["delivered"] = false;
+    metric["drop_reason"] = dropReason;
+    metric["rx_time_s"] = nullptr;
+    metric["latency_ms"] = nullptr;
+    addBridgeMetadata(metric);
+    delivery.work->metrics.push_back(metric);
+    delivery.work->outstandingDeliveries = std::max(0, delivery.work->outstandingDeliveries - 1);
+}
+
+void MetsrVeinsBridge::handleSimu5gReport(omnetpp::cMessage* message)
+{
+    std::unique_ptr<omnetpp::cMessage> cleanup(message);
+    const std::string messageId = message->hasPar("message_id")
+        ? message->par("message_id").stringValue()
+        : "";
+    auto it = pendingSimu5gDeliveries.find(messageId);
+    if (it == pendingSimu5gDeliveries.end()) {
+        EV_WARN << "Ignoring Simu5G receive report for unknown message_id=" << messageId << "\n";
+        return;
+    }
+
+    Simu5gPendingDelivery delivery = it->second;
+    pendingSimu5gDeliveries.erase(it);
+
+    const double rxTimeS = omnetpp::simTime().dbl();
+    json metric = delivery.metric;
+    metric["delivered"] = true;
+    metric["drop_reason"] = "";
+    metric["rx_time_s"] = rxTimeS;
+    metric["latency_ms"] = (rxTimeS - delivery.generationTimeS) * 1000.0;
+    metric["simu5g_sender_module"] = message->hasPar("sender_module")
+        ? message->par("sender_module").stringValue()
+        : "";
+    metric["simu5g_receiver_module"] = message->hasPar("receiver_module")
+        ? message->par("receiver_module").stringValue()
+        : "";
+    metric["simu5g_receiver_app"] = message->hasPar("receiver_app")
+        ? message->par("receiver_app").stringValue()
+        : "";
+    metric["simu5g_packet_name"] = message->hasPar("packet_name")
+        ? message->par("packet_name").stringValue()
+        : "";
+    addBridgeMetadata(metric);
+    delivery.work->metrics.push_back(metric);
+
+    json deliveredMessage = delivery.message;
+    deliveredMessage["message_id"] = metric["message_id"];
+    deliveredMessage["tx_time_s"] = metric["tx_time_s"];
+    deliveredMessage["rx_time_s"] = metric["rx_time_s"];
+    deliveredMessage["latency_ms"] = metric["latency_ms"];
+    deliveredMessage["distance_m"] = metric["distance_m"];
+    deliveredMessage["radio_mode"] = metric["radio_mode"];
+    deliveredMessage["attacked"] = metric["attacked"];
+    deliveredMessage["attack_id"] = metric["attack_id"];
+    deliveredMessage["attack_type"] = metric["attack_type"];
+    deliveredMessage["simu5g_delivery_path"] = metric["simu5g_delivery_path"];
+    addBridgeMetadata(deliveredMessage);
+    delivery.work->received.push_back(deliveredMessage);
+
+    delivery.work->outstandingDeliveries = std::max(0, delivery.work->outstandingDeliveries - 1);
+    if (delivery.work->outstandingDeliveries == 0) {
+        completeSyncWork(delivery.work);
+    }
+}
+
+void MetsrVeinsBridge::handleSimu5gTimeout(omnetpp::cMessage* message)
+{
+    std::unique_ptr<omnetpp::cMessage> cleanup(message);
+    auto* holder = static_cast<SyncWorkHolder*>(message->getContextPointer());
+    std::shared_ptr<SyncWork> work = holder != nullptr ? holder->work : nullptr;
+    delete holder;
+    if (!work) {
+        return;
+    }
+    work->timeoutEvent = nullptr;
+
+    for (auto it = pendingSimu5gDeliveries.begin(); it != pendingSimu5gDeliveries.end(); ) {
+        if (it->second.work == work) {
+            markSimu5gDrop(it->second, "simu5g_receive_timeout");
+            it = pendingSimu5gDeliveries.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+
+    if (work->outstandingDeliveries == 0) {
+        completeSyncWork(work);
+    }
 }
 
 void MetsrVeinsBridge::runAbstractEventBackend(
@@ -809,8 +1193,24 @@ void MetsrVeinsBridge::handlePacketDelivery(omnetpp::cMessage* message)
     }
 }
 
-void MetsrVeinsBridge::completeSyncWork(const std::shared_ptr<SyncWork>& work)
+void MetsrVeinsBridge::completeSyncWork(
+    const std::shared_ptr<SyncWork>& work,
+    const std::string& status,
+    const std::string& message)
 {
+    {
+        std::lock_guard<std::mutex> lock(work->mutex);
+        if (work->done) {
+            return;
+        }
+    }
+    if (work->timeoutEvent != nullptr) {
+        auto* holder = static_cast<SyncWorkHolder*>(work->timeoutEvent->getContextPointer());
+        delete holder;
+        work->timeoutEvent->setContextPointer(nullptr);
+        cancelAndDelete(work->timeoutEvent);
+        work->timeoutEvent = nullptr;
+    }
     activeSyncWorks = std::max(0, activeSyncWorks - 1);
     json data = {
         {"received_bsms", work->received},
@@ -824,9 +1224,12 @@ void MetsrVeinsBridge::completeSyncWork(const std::shared_ptr<SyncWork>& work)
     json response = {
         {"type", "sync_tick_result"},
         {"request_id", work->requestId},
-        {"status", "ok"},
+        {"status", status},
         {"data", data},
     };
+    if (!message.empty()) {
+        response["message"] = message;
+    }
 
     {
         std::lock_guard<std::mutex> lock(work->mutex);
