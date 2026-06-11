@@ -12,6 +12,11 @@ if [ ! -f "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned" ]; then
     echo "Generated NED files are missing. Run bash ./build_sim5g.sh first." >&2
     exit 1
 fi
+if [ ! -f "$GENERATED_NED_ROOT/sim5g/demo.xml" ]; then
+    mkdir -p "$GENERATED_NED_ROOT/sim5g"
+    cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
+    echo "Copied missing Simu5G routing XML to $GENERATED_NED_ROOT/sim5g/demo.xml"
+fi
 
 LIB_SO="$(find out -name 'libmetsr_veins_bridge_simu5g.so' | head -n 1)"
 if [ -z "$LIB_SO" ]; then

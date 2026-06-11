@@ -10,6 +10,7 @@ bash ./check_sim5g_env.sh
 
 GENERATED_NED_ROOT="${GENERATED_NED_ROOT:-../.generated/sim5g-ned}"
 mkdir -p "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g"
+mkdir -p "$GENERATED_NED_ROOT/sim5g"
 
 sed 's/\.template$//' sim5g/Sim5gCellularUuBridgeNetwork.ned.template > \
     "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned"
@@ -19,8 +20,9 @@ sed 's/\.template$//' sim5g/MetsrExternalMobility.ned.template > \
     "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrExternalMobility.ned"
 sed 's/\.template$//' sim5g/omnetpp-sim5g-uu.ini.template > \
     "$GENERATED_NED_ROOT/omnetpp-sim5g-uu.ini"
+cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
 
-echo "Generated Simu5G NED files under $GENERATED_NED_ROOT"
+echo "Generated Simu5G NED/INI/XML files under $GENERATED_NED_ROOT"
 
 HAD_MAKEFILE=0
 if [ -f Makefile ]; then
