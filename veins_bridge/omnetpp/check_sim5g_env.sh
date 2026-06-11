@@ -38,15 +38,17 @@ require_dir_var SIMU5G_HOME
 if [ "$missing" -ne 0 ]; then
     echo
     echo "Simu5G environment is incomplete."
-    echo "Recommended install path from Simu5G docs:"
+    echo "Recommended install path from Simu5G docs, if opp_env is installed:"
     echo "  opp_env install simu5g-latest"
     echo
-    echo "Or set these manually after building OMNeT++, INET, and Simu5G:"
+    echo "If opp_env is not installed, build INET and Simu5G manually, then set:"
     echo "  export OMNETPP_HOME=/path/to/omnetpp"
     echo "  export INET_HOME=/path/to/inet4.5"
     echo "  export SIMU5G_HOME=/path/to/Simu5G"
     echo "  source \"\$OMNETPP_HOME/setenv\""
+    echo "  cd \"\$INET_HOME\" && make makefiles && make MODE=release"
     echo "  cd \"\$SIMU5G_HOME\" && . setenv"
+    echo "  make makefiles && make MODE=release"
     exit 1
 fi
 

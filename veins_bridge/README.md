@@ -304,8 +304,10 @@ bash ./build_sim5g.sh
 bash ./run_sim5g_uu.sh
 ```
 
-The Simu5G installation docs recommend `opp_env install simu5g-latest`, and the
-manual install path builds OMNeT++, INET, and Simu5G before running examples:
+The Simu5G installation docs recommend `opp_env install simu5g-latest` when the
+separate `opp_env` helper is available. If `opp_env` is not installed, use the
+manual install path: build OMNeT++, INET, and Simu5G, then export
+`OMNETPP_HOME`, `INET_HOME`, and `SIMU5G_HOME` before running this bridge:
 <https://simu5g.org/install.html>.
 
 `build_sim5g.sh` generates active NED/INI files under
