@@ -31,7 +31,7 @@ namespace {
 
 constexpr const char* PROTOCOL_NAME = "metsr-veins-jsonl";
 constexpr int PROTOCOL_VERSION = 1;
-constexpr const char* NETWORK_MODEL = "omnetpp_event_wireless_queue_model";
+constexpr const char* DEFAULT_NETWORK_MODEL = "omnetpp_event_wireless_queue_model";
 constexpr int KIND_KEEP_ALIVE = 1;
 constexpr int KIND_PACKET_DELIVERY = 2;
 constexpr double SPEED_OF_LIGHT_MPS = 299792458.0;
@@ -118,6 +118,17 @@ std::string stringValue(const json& record, const char* key, const std::string& 
         return it->get<std::string>();
     }
     return it->dump();
+}
+
+std::string messageIdValue(const json& record, int tick, int senderId, int receiverId)
+{
+    const std::string explicitId = stringValue(record, "message_id");
+    if (!explicitId.empty()) {
+        return explicitId;
+    }
+    const int messageCount = intValue(record, "message_count", 0);
+    return std::to_string(tick) + ":" + std::to_string(senderId) + ">" +
+        std::to_string(receiverId) + ":" + std::to_string(messageCount);
 }
 
 int entityId(const json& record, const char* primary, int fallback = 0)
@@ -207,6 +218,10 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     double distanceLatencyUsPerM = 2.0;
     double distanceLossAtRange = 0.05;
     int pollIntervalMs = 10;
+    std::string bridgeBackend = "abstract_omnetpp";
+    std::string backendImplementation = "abstract_event_profile";
+    std::string networkModel = DEFAULT_NETWORK_MODEL;
+    std::string backendNote;
     std::string radioAccess = "cv2x";
     bool logRequests = true;
 
@@ -231,9 +246,20 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     json submitSyncTick(const json& request);
     void drainPendingSyncRequests();
     void startSyncWork(const std::shared_ptr<SyncWork>& work);
+    void recordAttackEvents(const std::shared_ptr<SyncWork>& work);
+    void runActiveBackend(
+        const std::shared_ptr<SyncWork>& work,
+        const json& vehicles,
+        const json& messages);
+    void runAbstractEventBackend(
+        const std::shared_ptr<SyncWork>& work,
+        const json& vehicles,
+        const json& messages);
     void handlePacketDelivery(omnetpp::cMessage* message);
     void completeSyncWork(const std::shared_ptr<SyncWork>& work);
     void closeServerSocket();
+    json bridgeMetadata(bool includeNote = false) const;
+    void addBridgeMetadata(json& record, bool includeNote = false) const;
     double scheduledLatencyMs(int receiverLoad, int queuePosition, int payloadBytes, double distanceM);
     double packetErrorRate(int receiverLoad, double distanceM) const;
 };
@@ -255,6 +281,10 @@ void MetsrVeinsBridge::initialize()
     distanceLatencyUsPerM = par("distanceLatencyUsPerM").doubleValue();
     distanceLossAtRange = par("distanceLossAtRange").doubleValue();
     pollIntervalMs = par("pollIntervalMs").intValue();
+    bridgeBackend = par("bridgeBackend").stringValue();
+    backendImplementation = par("backendImplementation").stringValue();
+    networkModel = par("networkModel").stringValue();
+    backendNote = par("backendNote").stringValue();
     radioAccess = par("radioAccess").stringValue();
     logRequests = par("logRequests").boolValue();
 
@@ -263,7 +293,10 @@ void MetsrVeinsBridge::initialize()
     keepAlive->setKind(KIND_KEEP_ALIVE);
     scheduleAt(omnetpp::simTime() + pollIntervalMs / 1000.0, keepAlive);
     serverThread = std::thread(&MetsrVeinsBridge::serverLoop, this);
-    EV_INFO << "METS-R Veins bridge starting on " << bridgeHost << ":" << bridgePort << "\n";
+    EV_INFO << "METS-R Veins bridge starting on " << bridgeHost << ":" << bridgePort
+            << " backend=" << bridgeBackend
+            << " implementation=" << backendImplementation
+            << " radio_access=" << radioAccess << "\n";
 }
 
 void MetsrVeinsBridge::handleMessage(omnetpp::cMessage* message)
@@ -326,6 +359,33 @@ void MetsrVeinsBridge::closeServerSocket()
         ::shutdown(serverFd, SHUT_RDWR);
         ::close(serverFd);
         serverFd = -1;
+    }
+}
+
+json MetsrVeinsBridge::bridgeMetadata(bool includeNote) const
+{
+    json metadata = {
+        {"bridge_backend", bridgeBackend},
+        {"backend_implementation", backendImplementation},
+        {"bridge_model", networkModel},
+        {"network_model", networkModel},
+        {"radio_access", radioAccess},
+    };
+    if (includeNote && !backendNote.empty()) {
+        metadata["backend_note"] = backendNote;
+    }
+    return metadata;
+}
+
+void MetsrVeinsBridge::addBridgeMetadata(json& record, bool includeNote) const
+{
+    record["bridge_backend"] = bridgeBackend;
+    record["backend_implementation"] = backendImplementation;
+    record["bridge_model"] = networkModel;
+    record["network_model"] = networkModel;
+    record["radio_access"] = radioAccess;
+    if (includeNote && !backendNote.empty()) {
+        record["backend_note"] = backendNote;
     }
 }
 
@@ -457,13 +517,15 @@ json MetsrVeinsBridge::handleRequest(const json& request)
     const int requestId = intValue(request, "request_id", 0);
 
     if (type == "hello") {
-        return {
+        json response = {
             {"type", "hello_result"},
             {"request_id", requestId},
             {"status", "ok"},
             {"protocol", PROTOCOL_NAME},
             {"version", PROTOCOL_VERSION},
         };
+        addBridgeMetadata(response, true);
+        return response;
     }
     if (type == "ping") {
         return {
@@ -473,11 +535,13 @@ json MetsrVeinsBridge::handleRequest(const json& request)
         };
     }
     if (type == "reset") {
-        return {
+        json response = {
             {"type", "reset_result"},
             {"request_id", requestId},
             {"status", "ok"},
         };
+        addBridgeMetadata(response);
+        return response;
     }
     if (type == "sync_tick") {
         return submitSyncTick(request);
@@ -533,10 +597,58 @@ void MetsrVeinsBridge::drainPendingSyncRequests()
 void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
 {
     activeSyncWorks += 1;
-    const int tick = work->tick;
     const auto vehicles = work->request.value("vehicles", json::array());
     const auto messages = work->request.value("bsm_messages", json::array());
 
+    recordAttackEvents(work);
+    runActiveBackend(work, vehicles, messages);
+
+    if (work->outstandingDeliveries == 0) {
+        completeSyncWork(work);
+    }
+}
+
+void MetsrVeinsBridge::recordAttackEvents(const std::shared_ptr<SyncWork>& work)
+{
+    const auto attacks = work->request.value("attacks", json::array());
+    for (const auto& attack : attacks) {
+        json event = attack;
+        event["tick"] = work->tick;
+        event["status"] = "submitted";
+        addBridgeMetadata(event);
+        work->attackEvents.push_back(event);
+    }
+}
+
+void MetsrVeinsBridge::runActiveBackend(
+    const std::shared_ptr<SyncWork>& work,
+    const json& vehicles,
+    const json& messages)
+{
+    if (backendImplementation == "abstract_event_profile" ||
+        backendImplementation == "abstract_profile_pending_full_veins" ||
+        backendImplementation == "abstract_profile_pending_simu5g") {
+        runAbstractEventBackend(work, vehicles, messages);
+        return;
+    }
+
+    json errorEvent = {
+        {"tick", work->tick},
+        {"status", "error"},
+        {"message", "bridge backend implementation is not available in this build"},
+        {"requested_backend", bridgeBackend},
+        {"requested_backend_implementation", backendImplementation},
+    };
+    addBridgeMetadata(errorEvent, true);
+    work->attackEvents.push_back(errorEvent);
+}
+
+void MetsrVeinsBridge::runAbstractEventBackend(
+    const std::shared_ptr<SyncWork>& work,
+    const json& vehicles,
+    const json& messages)
+{
+    const int tick = work->tick;
     std::map<int, json> vehicleById;
     for (const auto& vehicle : vehicles) {
         int id = entityId(vehicle, "vehicle_id", 0);
@@ -586,6 +698,8 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
         const double propagationMs =
             SPEED_OF_LIGHT_MPS > 0.0 ? distance / SPEED_OF_LIGHT_MPS * 1000.0 : 0.0;
         const double distanceLatencyMs = std::max(0.0, distanceLatencyUsPerM) * distance / 1000.0;
+        const double txTimeS = numberValue(message, "tx_time_s", generationTimeS);
+        const std::string messageId = messageIdValue(message, tick, senderId, receiverId);
         const double distanceLossComponent =
             communicationRangeM > 0.0 && distanceLossAtRange > 0.0
                 ? distanceLossAtRange * std::pow(std::max(0.0, distance) / communicationRangeM, 2.0)
@@ -593,6 +707,8 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
 
         json metric = {
             {"tick", tick},
+            {"message_id", messageId},
+            {"tx_time_s", txTimeS},
             {"sender_id", senderId},
             {"receiver_id", receiverId},
             {"message_name", stringValue(message, "message_name")},
@@ -610,10 +726,13 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
             {"receiver_load", load},
             {"receiver_queue_position", queuePosition},
             {"payload_bytes", payloadBytes},
-            {"radio_access", radioAccess},
+            {"radio_mode", stringValue(message, "radio_mode", radioAccess)},
+            {"attacked", hasKey(message, "attacked") ? message["attacked"] : false},
+            {"attack_id", stringValue(message, "attack_id")},
+            {"attack_type", stringValue(message, "attack_type")},
             {"delivered", delivered},
-            {"network_model", NETWORK_MODEL},
         };
+        addBridgeMetadata(metric);
 
         if (!delivered) {
             metric["latency_ms"] = nullptr;
@@ -642,7 +761,7 @@ void MetsrVeinsBridge::startSyncWork(const std::shared_ptr<SyncWork>& work)
     }
 
     if (work->outstandingDeliveries == 0) {
-        completeSyncWork(work);
+        return;
     }
 }
 
@@ -666,6 +785,8 @@ void MetsrVeinsBridge::handlePacketDelivery(omnetpp::cMessage* message)
 
     json deliveredMessage = delivery->message;
     deliveredMessage["tick"] = delivery->tick;
+    deliveredMessage["message_id"] = metric["message_id"];
+    deliveredMessage["tx_time_s"] = metric["tx_time_s"];
     deliveredMessage["sender_id"] = delivery->senderId;
     deliveredMessage["receiver_id"] = delivery->receiverId;
     deliveredMessage["generation_time_s"] = delivery->generationTimeS;
@@ -673,10 +794,13 @@ void MetsrVeinsBridge::handlePacketDelivery(omnetpp::cMessage* message)
     deliveredMessage["latency_ms"] = latencyMs;
     deliveredMessage["packet_error_rate"] = metric["packet_error_rate"];
     deliveredMessage["delivery_probability"] = metric["delivery_probability"];
-    deliveredMessage["radio_access"] = radioAccess;
     deliveredMessage["receiver_load"] = metric["receiver_load"];
     deliveredMessage["receiver_queue_position"] = metric["receiver_queue_position"];
-    deliveredMessage["network_model"] = NETWORK_MODEL;
+    deliveredMessage["radio_mode"] = metric["radio_mode"];
+    deliveredMessage["attacked"] = metric["attacked"];
+    deliveredMessage["attack_id"] = metric["attack_id"];
+    deliveredMessage["attack_type"] = metric["attack_type"];
+    addBridgeMetadata(deliveredMessage);
     work->received.push_back(deliveredMessage);
 
     work->outstandingDeliveries -= 1;
@@ -688,16 +812,20 @@ void MetsrVeinsBridge::handlePacketDelivery(omnetpp::cMessage* message)
 void MetsrVeinsBridge::completeSyncWork(const std::shared_ptr<SyncWork>& work)
 {
     activeSyncWorks = std::max(0, activeSyncWorks - 1);
+    json data = {
+        {"received_bsms", work->received},
+        {"link_metrics", work->metrics},
+        {"attack_events", work->attackEvents},
+    };
+    const json metadata = bridgeMetadata(true);
+    for (const auto& item : metadata.items()) {
+        data[item.key()] = item.value();
+    }
     json response = {
         {"type", "sync_tick_result"},
         {"request_id", work->requestId},
         {"status", "ok"},
-        {"data", {
-            {"received_bsms", work->received},
-            {"link_metrics", work->metrics},
-            {"attack_events", work->attackEvents},
-            {"bridge_model", NETWORK_MODEL},
-        }},
+        {"data", data},
     };
 
     {

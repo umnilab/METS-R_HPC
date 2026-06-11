@@ -180,6 +180,7 @@ class VeinsClient:
         self.socket = None
         self.reader = None
         self.request_id = 0
+        self.bridge_info = {}
 
     def __enter__(self):
         self.connect()
@@ -224,7 +225,7 @@ class VeinsClient:
                 sock.settimeout(self.request_timeout)
                 self.socket = sock
                 self.reader = sock.makefile("r", encoding="utf-8", newline="\n")
-                self.hello()
+                self.bridge_info = self.hello()
                 return
             except OSError as exc:
                 last_error = exc
@@ -300,6 +301,16 @@ class VeinsClient:
             "received_bsms": data.get("received_bsms", data.get("rx_bsms", [])),
             "link_metrics": data.get("link_metrics", data.get("metrics", [])),
             "attack_events": data.get("attack_events", []),
+            "bridge_backend": data.get(
+                "bridge_backend", response.get("bridge_backend")
+            ),
+            "backend_implementation": data.get(
+                "backend_implementation", response.get("backend_implementation")
+            ),
+            "bridge_model": data.get("bridge_model", response.get("bridge_model")),
+            "network_model": data.get("network_model", response.get("network_model")),
+            "radio_access": data.get("radio_access", response.get("radio_access")),
+            "backend_note": data.get("backend_note", response.get("backend_note")),
             "raw": response,
         }
 

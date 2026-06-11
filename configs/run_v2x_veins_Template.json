@@ -10,6 +10,7 @@
       "veins_connect_timeout": 20,
       "veins_request_timeout": 10,
       "veins_retry_interval": 0.25,
+      "veins_bridge_backend": "abstract_omnetpp",
       "veins_radio_access": "cv2x",
       "kafka_bootstrap_servers": "localhost:29092",
       "kafka_topics": [
