@@ -259,12 +259,16 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
     std::thread serverThread;
     std::atomic<bool> running {false};
     int serverFd = -1;
+    int activeClientFd = -1;
     std::mutex socketMutex;
     std::mutex pendingMutex;
     std::deque<std::shared_ptr<SyncWork>> pendingSyncRequests;
     std::map<std::string, Simu5gPendingDelivery> pendingSimu5gDeliveries;
     int activeSyncWorks = 0;
     omnetpp::cMessage* keepAlive = nullptr;
+
+  public:
+    ~MetsrVeinsBridge() override;
 
   protected:
     void initialize() override;
@@ -318,6 +322,15 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
 };
 
 Define_Module(MetsrVeinsBridge);
+
+MetsrVeinsBridge::~MetsrVeinsBridge()
+{
+    running = false;
+    closeServerSocket();
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+}
 
 void MetsrVeinsBridge::initialize()
 {
@@ -434,11 +447,22 @@ void MetsrVeinsBridge::finish()
 
 void MetsrVeinsBridge::closeServerSocket()
 {
-    std::lock_guard<std::mutex> lock(socketMutex);
-    if (serverFd >= 0) {
-        ::shutdown(serverFd, SHUT_RDWR);
-        ::close(serverFd);
+    int fdToClose = -1;
+    int clientToClose = -1;
+    {
+        std::lock_guard<std::mutex> lock(socketMutex);
+        fdToClose = serverFd;
         serverFd = -1;
+        clientToClose = activeClientFd;
+        activeClientFd = -1;
+    }
+    if (fdToClose >= 0) {
+        ::shutdown(fdToClose, SHUT_RDWR);
+        ::close(fdToClose);
+    }
+    if (clientToClose >= 0) {
+        ::shutdown(clientToClose, SHUT_RDWR);
+        ::close(clientToClose);
     }
 }
 
@@ -549,8 +573,24 @@ void MetsrVeinsBridge::serverLoop()
             }
             continue;
         }
+        {
+            std::lock_guard<std::mutex> lock(socketMutex);
+            activeClientFd = clientFd;
+        }
         handleConnection(clientFd);
-        ::close(clientFd);
+        bool shouldCloseClient = true;
+        {
+            std::lock_guard<std::mutex> lock(socketMutex);
+            if (activeClientFd == clientFd) {
+                activeClientFd = -1;
+            }
+            else {
+                shouldCloseClient = false;
+            }
+        }
+        if (shouldCloseClient) {
+            ::close(clientFd);
+        }
     }
 
     closeServerSocket();

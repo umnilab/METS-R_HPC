@@ -8,6 +8,18 @@ bash ./check_sim5g_env.sh
 GENERATED_NED_ROOT="${GENERATED_NED_ROOT:-../.generated/sim5g-ned}"
 GENERATED_INI="${GENERATED_INI:-$GENERATED_NED_ROOT/omnetpp-sim5g-uu.ini}"
 
+mkdir -p "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g"
+mkdir -p "$GENERATED_NED_ROOT/sim5g"
+sed 's/\.template$//' sim5g/Sim5gCellularUuBridgeNetwork.ned.template > \
+    "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned"
+sed 's/\.template$//' sim5g/MetsrBsmUuApp.ned.template > \
+    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmUuApp.ned"
+sed 's/\.template$//' sim5g/MetsrExternalMobility.ned.template > \
+    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrExternalMobility.ned"
+sed 's/\.template$//' sim5g/omnetpp-sim5g-uu.ini.template > \
+    "$GENERATED_NED_ROOT/omnetpp-sim5g-uu.ini"
+cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
+
 if [ ! -f "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned" ]; then
     echo "Generated NED files are missing. Run bash ./build_sim5g.sh first." >&2
     exit 1
