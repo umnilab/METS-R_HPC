@@ -26,7 +26,9 @@ print-undisposed = false
 *.bridge.simu5gReceiveTimeoutMs = 1000
 
 # METS-R/CARLA-controlled vehicles are Simu5G NR UEs.
-*.numVehicles = 16
+# Must cover every vehicle sent in sync_tick. The README noise example uses
+# one target plus 60 senders, so 64 keeps that run inside the Simu5G UE vector.
+*.numVehicles = 64
 *.car[*].numApps = 1
 *.car[*].app[0].typename = "metsr.veinsbridge.sim5g.MetsrBsmUuApp"
 *.car[*].app[0].localPort = 4400
