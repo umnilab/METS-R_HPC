@@ -8,5 +8,7 @@
       "charging_controlled_by_control_apis": true,
       "zone_file":"data/NYC/facility/zone/zone_centroid",
       "charging_station_file":"data/NYC/facility/charging_station/L_0_120000",
-      "num_etaxi":0
+      "num_etaxi":0,
+      "initial_x": -73,
+      "initial_y": 40
 } 

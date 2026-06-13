@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import threading
 import time
 from datetime import datetime
@@ -2588,6 +2589,7 @@ class METSRClient:
         """
         if not self.sim_folder:
             raise ValueError("sim_folder is required to locate trajectory output")
+        wait_seconds = max(0.0, float(wait_seconds or 0))
 
         if trajectory_output_dir is not None:
             roots = [_resolve_trajectory_root(self.sim_folder, trajectory_output_dir)]
@@ -2613,7 +2615,7 @@ class METSRClient:
                 return max(candidates, key=os.path.getmtime)
 
             if wait_seconds <= 0 or time.time() >= deadline:
-                roots_text = ", ".join(root for root in roots if root)
+                roots_text = ", ".join(str(root) for root in roots if root)
                 raise FileNotFoundError(
                     "No trajectory output directory found under " + roots_text
             )
@@ -2669,8 +2671,22 @@ class METSRClient:
             "has_split_energy_fields": False,
         }
 
+    def _wait_for_viz_server(self, server_port, startup_timeout=3):
+        deadline = time.time() + max(0.1, float(startup_timeout or 0.1))
+        last_error = None
+        while time.time() <= deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", int(server_port)), timeout=0.5):
+                    return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.1)
+        raise RuntimeError(
+            f"Visualization server did not become reachable at http://127.0.0.1:{server_port}/"
+        ) from last_error
+
     # open visualization server
-    def start_viz(self, trajectory_output_dir=None, server_port=8000, prefer_binary=True, wait_seconds=0):
+    def start_viz(self, trajectory_output_dir=None, server_port=8000, prefer_binary=True, wait_seconds=30, startup_timeout=3):
         latest_directory = self.latest_trajectory_output_dir(
             trajectory_output_dir=trajectory_output_dir,
             prefer_binary=prefer_binary,
@@ -2686,6 +2702,18 @@ class METSRClient:
         )
         self.viz_event, self.viz_server = run_visualization_server(latest_directory, server_port)
         self.viz_port = server_port
+        try:
+            self._wait_for_viz_server(server_port, startup_timeout=startup_timeout)
+        except Exception:
+            self.stop_viz()
+            raise
+        print(f"Visualization files are available at http://127.0.0.1:{server_port}/")
+        return {
+            "directory": latest_directory,
+            "port": server_port,
+            "url": f"http://127.0.0.1:{server_port}/",
+            "manifest_url": f"http://127.0.0.1:{server_port}/manifest.json",
+        }
 
     def stop_viz(self):
         if self.viz_server is not None:
