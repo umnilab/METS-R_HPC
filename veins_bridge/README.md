@@ -17,6 +17,63 @@ the tutorial shape.
 
 ## Build In WSL
 
+The commands below assume a fresh Ubuntu WSL shell and keep the simulator
+dependencies under `~/src`. If you already installed OMNeT++ or Veins, adjust
+the `OMNETPP_HOME` and `VEINS_HOME` paths to match your machine.
+
+Install the system packages needed to compile OMNeT++ and the bridge. These
+steps build a headless `Cmdenv` install, which is enough for this bridge:
+
+```bash
+sudo apt update
+sudo apt install -y \
+    build-essential make diffutils pkg-config ccache clang lld gdb lldb \
+    bison flex perl sed gawk python3 python3-pip python3-venv python3-dev \
+    libxml2-dev zlib1g-dev doxygen graphviz xdg-utils libdw-dev \
+    git wget unzip sumo sumo-tools
+```
+
+Download and build OMNeT++:
+
+```bash
+mkdir -p ~/src
+cd ~/src
+wget https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.1/omnetpp-6.1-linux-x86_64.tgz
+tar xzf omnetpp-6.1-linux-x86_64.tgz
+
+export OMNETPP_HOME=~/src/omnetpp-6.1
+cd "$OMNETPP_HOME"
+python3 -m venv .venv --upgrade-deps --clear --prompt "omnetpp/.venv"
+source .venv/bin/activate
+python3 -m pip install -r python/requirements.txt
+source setenv
+./configure WITH_QTENV=no WITH_OSG=no
+make -j"$(nproc)"
+```
+
+Install Veins in the path used by the bridge examples. The current abstract
+bridge build does not link against Veins yet, but this prepares the environment
+for the Veins/802.11p profile and future full-stack backend work:
+
+```bash
+cd ~/src
+git clone --branch veins-5.3.1 --depth 1 https://github.com/sommer/veins.git veins-veins-5.3.1
+
+export VEINS_HOME=~/src/veins-veins-5.3.1
+cd "$VEINS_HOME"
+./configure
+make -j"$(nproc)"
+```
+
+Clone this repository into WSL if you have not already done so:
+
+```bash
+cd ~/src
+git clone https://github.com/umnilab/METS-R_HPC.git METS-R_HPC
+```
+
+Then build the bridge:
+
 ```bash
 export OMNETPP_HOME=~/src/omnetpp-6.1
 export VEINS_HOME=~/src/veins-veins-5.3.1
