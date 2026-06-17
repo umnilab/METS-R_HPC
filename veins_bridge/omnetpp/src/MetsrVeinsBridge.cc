@@ -9,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -141,13 +142,249 @@ std::string stringValue(const json& record, const char* key, const std::string& 
     return it->dump();
 }
 
+const json* nestedValue(const json& record, std::initializer_list<const char*> path)
+{
+    const json* current = &record;
+    for (const char* key : path) {
+        if (current == nullptr || !current->is_object()) {
+            return nullptr;
+        }
+        auto it = current->find(key);
+        if (it == current->end() || it->is_null()) {
+            return nullptr;
+        }
+        current = &(*it);
+    }
+    return current;
+}
+
+std::string stringFromJsonValue(const json& value, const std::string& fallback = "")
+{
+    if (value.is_null()) {
+        return fallback;
+    }
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    return value.dump();
+}
+
+int intFromJsonValue(const json& value, int fallback = 0)
+{
+    if (value.is_null()) {
+        return fallback;
+    }
+    if (value.is_number_integer()) {
+        return value.get<int>();
+    }
+    if (value.is_number()) {
+        return static_cast<int>(value.get<double>());
+    }
+    if (value.is_string()) {
+        try {
+            return std::stoi(value.get<std::string>());
+        }
+        catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+double numberFromJsonValue(const json& value, double fallback = 0.0)
+{
+    if (value.is_null()) {
+        return fallback;
+    }
+    if (value.is_number()) {
+        return value.get<double>();
+    }
+    if (value.is_string()) {
+        try {
+            return std::stod(value.get<std::string>());
+        }
+        catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+std::string nestedStringValue(
+    const json& record,
+    std::initializer_list<const char*> path,
+    const std::string& fallback = "")
+{
+    const json* value = nestedValue(record, path);
+    return value == nullptr ? fallback : stringFromJsonValue(*value, fallback);
+}
+
+int nestedIntValue(const json& record, std::initializer_list<const char*> path, int fallback = 0)
+{
+    const json* value = nestedValue(record, path);
+    return value == nullptr ? fallback : intFromJsonValue(*value, fallback);
+}
+
+double nestedNumberValue(
+    const json& record,
+    std::initializer_list<const char*> path,
+    double fallback = 0.0)
+{
+    const json* value = nestedValue(record, path);
+    return value == nullptr ? fallback : numberFromJsonValue(*value, fallback);
+}
+
+json nestedJsonValue(const json& record, std::initializer_list<const char*> path, const json& fallback)
+{
+    const json* value = nestedValue(record, path);
+    return value == nullptr ? fallback : *value;
+}
+
+int entityId(const json& record, const char* primary, int fallback);
+
+int bsmSenderId(const json& message)
+{
+    const int flatSenderId = entityId(message, "sender_id", entityId(message, "vehicle_id", 0));
+    if (flatSenderId != 0) {
+        return flatSenderId;
+    }
+    return nestedIntValue(message, {"transport", "senderId"}, 0);
+}
+
+int bsmReceiverId(const json& message)
+{
+    if (hasKey(message, "receiver_id")) {
+        return intValue(message, "receiver_id", 0);
+    }
+    if (hasKey(message, "target_vehicle_id")) {
+        return intValue(message, "target_vehicle_id", 0);
+    }
+    return nestedIntValue(message, {"transport", "receiverId"}, 0);
+}
+
+int bsmPayloadBytes(const json& message)
+{
+    if (hasKey(message, "payload_bytes")) {
+        return intValue(message, "payload_bytes", 0);
+    }
+    return nestedIntValue(message, {"transport", "payloadBytes"}, 0);
+}
+
+double bsmTxTimeS(const json& message, double fallback)
+{
+    if (hasKey(message, "tx_time_s")) {
+        return numberValue(message, "tx_time_s", fallback);
+    }
+    return nestedNumberValue(message, {"transport", "txTimeS"}, fallback);
+}
+
+int bsmMessageCount(const json& message)
+{
+    if (hasKey(message, "message_count")) {
+        return intValue(message, "message_count", 0);
+    }
+    int count = nestedIntValue(message, {"messageFrame", "value", "BasicSafetyMessage", "coreData", "msgCnt"}, -1);
+    if (count >= 0) {
+        return count;
+    }
+    count = nestedIntValue(message, {"BasicSafetyMessage", "coreData", "msgCnt"}, -1);
+    if (count >= 0) {
+        return count;
+    }
+    return nestedIntValue(message, {"coreData", "msgCnt"}, 0);
+}
+
+std::string bsmMessageName(const json& message)
+{
+    const std::string flatName = stringValue(message, "message_name");
+    if (!flatName.empty()) {
+        return flatName;
+    }
+    const std::string frameName = nestedStringValue(message, {"messageFrame", "messageId"});
+    if (!frameName.empty()) {
+        if (frameName == "basicSafetyMessage") {
+            return "BasicSafetyMessage";
+        }
+        return frameName;
+    }
+    if (nestedValue(message, {"messageFrame", "value", "BasicSafetyMessage"}) != nullptr ||
+        nestedValue(message, {"BasicSafetyMessage"}) != nullptr) {
+        return "BasicSafetyMessage";
+    }
+    return "";
+}
+
+std::string bsmMessageStandard(const json& message)
+{
+    const std::string flatStandard = stringValue(message, "message_standard");
+    if (!flatStandard.empty()) {
+        return flatStandard;
+    }
+    return nestedStringValue(message, {"transport", "messageStandard"}, "SAE J2735");
+}
+
+std::string bsmRadioMode(const json& message, const std::string& fallback)
+{
+    const std::string flatMode = stringValue(message, "radio_mode");
+    if (!flatMode.empty()) {
+        return flatMode;
+    }
+    return nestedStringValue(message, {"transport", "radioMode"}, fallback);
+}
+
+std::string bsmContent(const json& message)
+{
+    const std::string flatContent = stringValue(message, "content");
+    if (!flatContent.empty()) {
+        return flatContent;
+    }
+    return nestedStringValue(message, {"operationalData", "content"});
+}
+
+json bsmAttackValue(const json& message, const char* flatKey, const char* nestedKey, const json& fallback)
+{
+    if (hasKey(message, flatKey)) {
+        return message.at(flatKey);
+    }
+    return nestedJsonValue(message, {"operationalData", "attack", nestedKey}, fallback);
+}
+
+std::string bsmAttackString(const json& message, const char* flatKey, const char* nestedKey)
+{
+    const std::string flatValue = stringValue(message, flatKey);
+    if (!flatValue.empty()) {
+        return flatValue;
+    }
+    return nestedStringValue(message, {"operationalData", "attack", nestedKey});
+}
+
+json bsmPayloadJson(const json& message)
+{
+    const json* frame = nestedValue(message, {"messageFrame"});
+    if (frame != nullptr && frame->is_object()) {
+        return *frame;
+    }
+    const json* bsm = nestedValue(message, {"BasicSafetyMessage"});
+    if (bsm != nullptr && bsm->is_object()) {
+        return json {
+            {"messageId", "BasicSafetyMessage"},
+            {"value", json {{"BasicSafetyMessage", *bsm}}},
+        };
+    }
+    return message;
+}
+
 std::string messageIdValue(const json& record, int tick, int senderId, int receiverId)
 {
     const std::string explicitId = stringValue(record, "message_id");
     if (!explicitId.empty()) {
         return explicitId;
     }
-    const int messageCount = intValue(record, "message_count", 0);
+    const std::string transportId = nestedStringValue(record, {"transport", "messageId"});
+    if (!transportId.empty()) {
+        return transportId;
+    }
+    const int messageCount = bsmMessageCount(record);
     return std::to_string(tick) + ":" + std::to_string(senderId) + ">" +
         std::to_string(receiverId) + ":" + std::to_string(messageCount);
 }
@@ -830,7 +1067,14 @@ bool MetsrVeinsBridge::injectSimu5gBsm(
     const int senderId = metric.value("sender_id", 0);
     const int receiverId = metric.value("receiver_id", 0);
     const int payloadBytes = metric.value("payload_bytes", 0);
-    const std::string content = stringValue(message, "content");
+    const std::string content = bsmContent(message);
+    std::string messageName = bsmMessageName(message);
+    if (messageName.empty()) {
+        messageName = "BasicSafetyMessage";
+    }
+    const std::string messageStandard = bsmMessageStandard(message);
+    const json payloadJson = bsmPayloadJson(message);
+    const std::string payloadJsonString = payloadJson.dump();
 
     auto* tx = new omnetpp::cMessage("metsrBsmUuTx", KIND_SIMU5G_BSM_REQUEST);
     tx->addPar("message_id") = messageId.c_str();
@@ -843,9 +1087,9 @@ bool MetsrVeinsBridge::injectSimu5gBsm(
     tx->addPar("local_port") = simu5gLocalPort;
     tx->addPar("payload_bytes") = payloadBytes;
     tx->addPar("tx_time_s") = generationTimeS;
-    tx->addPar("message_name") = stringValue(message, "message_name", "BasicSafetyMessage").c_str();
-    tx->addPar("message_standard") = stringValue(message, "message_standard", "SAE J2735-aligned").c_str();
-    tx->addPar("message_json") = message.dump().c_str();
+    tx->addPar("message_name") = messageName.c_str();
+    tx->addPar("message_standard") = messageStandard.c_str();
+    tx->addPar("message_json") = payloadJsonString.c_str();
     tx->addPar("content") = content.c_str();
 
     pendingSimu5gDeliveries[messageId] = Simu5gPendingDelivery {
@@ -899,13 +1143,10 @@ bool MetsrVeinsBridge::runSimu5gCellularUuBackend(
 
     const double generationTimeS = omnetpp::simTime().dbl();
     for (const auto& message : messages) {
-        const int senderId = entityId(message, "sender_id", entityId(message, "vehicle_id", 0));
-        int receiverId = entityId(message, "receiver_id", 0);
-        if (receiverId == 0 && hasKey(message, "target_vehicle_id")) {
-            receiverId = intValue(message, "target_vehicle_id", 0);
-        }
-        const int payloadBytes = intValue(message, "payload_bytes", 0);
-        const double txTimeS = numberValue(message, "tx_time_s", generationTimeS);
+        const int senderId = bsmSenderId(message);
+        const int receiverId = bsmReceiverId(message);
+        const int payloadBytes = bsmPayloadBytes(message);
+        const double txTimeS = bsmTxTimeS(message, generationTimeS);
         const std::string messageId = messageIdValue(message, work->tick, senderId, receiverId);
 
         json metric = {
@@ -914,14 +1155,14 @@ bool MetsrVeinsBridge::runSimu5gCellularUuBackend(
             {"tx_time_s", txTimeS},
             {"sender_id", senderId},
             {"receiver_id", receiverId},
-            {"message_name", stringValue(message, "message_name")},
-            {"message_standard", stringValue(message, "message_standard")},
-            {"message_count", intValue(message, "message_count", 0)},
+            {"message_name", bsmMessageName(message)},
+            {"message_standard", bsmMessageStandard(message)},
+            {"message_count", bsmMessageCount(message)},
             {"payload_bytes", payloadBytes},
-            {"radio_mode", stringValue(message, "radio_mode", radioAccess)},
-            {"attacked", hasKey(message, "attacked") ? message["attacked"] : json(false)},
-            {"attack_id", stringValue(message, "attack_id")},
-            {"attack_type", stringValue(message, "attack_type")},
+            {"radio_mode", bsmRadioMode(message, radioAccess)},
+            {"attacked", bsmAttackValue(message, "attacked", "attacked", json(false))},
+            {"attack_id", bsmAttackString(message, "attack_id", "attackId")},
+            {"attack_type", bsmAttackString(message, "attack_type", "attackType")},
             {"backend_time_source", "simu5g_udp_receive_event"},
             {"simu5g_delivery_path", "5g_nr_uu_unicast"},
             {"delivered", false},
@@ -1083,10 +1324,7 @@ void MetsrVeinsBridge::runAbstractEventBackend(
 
     std::map<int, int> receiverLoad;
     for (const auto& message : messages) {
-        int receiverId = entityId(message, "receiver_id", 0);
-        if (receiverId == 0 && hasKey(message, "target_vehicle_id")) {
-            receiverId = intValue(message, "target_vehicle_id", 0);
-        }
+        int receiverId = bsmReceiverId(message);
         if (receiverId != 0) {
             receiverLoad[receiverId] += 1;
         }
@@ -1096,18 +1334,15 @@ void MetsrVeinsBridge::runAbstractEventBackend(
     const double generationTimeS = omnetpp::simTime().dbl();
 
     for (const auto& message : messages) {
-        const int senderId = entityId(message, "sender_id", entityId(message, "vehicle_id", 0));
-        int receiverId = entityId(message, "receiver_id", 0);
-        if (receiverId == 0 && hasKey(message, "target_vehicle_id")) {
-            receiverId = intValue(message, "target_vehicle_id", 0);
-        }
+        const int senderId = bsmSenderId(message);
+        int receiverId = bsmReceiverId(message);
         if (senderId == 0 || receiverId == 0) {
             continue;
         }
 
         const int load = std::max(1, receiverLoad[receiverId]);
         const int queuePosition = receiverQueuePosition[receiverId]++;
-        const int payloadBytes = intValue(message, "payload_bytes", 0);
+        const int payloadBytes = bsmPayloadBytes(message);
         double distance = 0.0;
         auto senderIt = vehicleById.find(senderId);
         auto receiverIt = vehicleById.find(receiverId);
@@ -1122,7 +1357,7 @@ void MetsrVeinsBridge::runAbstractEventBackend(
         const double propagationMs =
             SPEED_OF_LIGHT_MPS > 0.0 ? distance / SPEED_OF_LIGHT_MPS * 1000.0 : 0.0;
         const double distanceLatencyMs = std::max(0.0, distanceLatencyUsPerM) * distance / 1000.0;
-        const double txTimeS = numberValue(message, "tx_time_s", generationTimeS);
+        const double txTimeS = bsmTxTimeS(message, generationTimeS);
         const std::string messageId = messageIdValue(message, tick, senderId, receiverId);
         const double distanceLossComponent =
             communicationRangeM > 0.0 && distanceLossAtRange > 0.0
@@ -1135,9 +1370,9 @@ void MetsrVeinsBridge::runAbstractEventBackend(
             {"tx_time_s", txTimeS},
             {"sender_id", senderId},
             {"receiver_id", receiverId},
-            {"message_name", stringValue(message, "message_name")},
-            {"message_standard", stringValue(message, "message_standard")},
-            {"message_count", intValue(message, "message_count", 0)},
+            {"message_name", bsmMessageName(message)},
+            {"message_standard", bsmMessageStandard(message)},
+            {"message_count", bsmMessageCount(message)},
             {"distance_m", distance},
             {"propagation_delay_ms", propagationMs},
             {"distance_latency_ms", distanceLatencyMs},
@@ -1150,10 +1385,10 @@ void MetsrVeinsBridge::runAbstractEventBackend(
             {"receiver_load", load},
             {"receiver_queue_position", queuePosition},
             {"payload_bytes", payloadBytes},
-            {"radio_mode", stringValue(message, "radio_mode", radioAccess)},
-            {"attacked", hasKey(message, "attacked") ? message["attacked"] : json(false)},
-            {"attack_id", stringValue(message, "attack_id")},
-            {"attack_type", stringValue(message, "attack_type")},
+            {"radio_mode", bsmRadioMode(message, radioAccess)},
+            {"attacked", bsmAttackValue(message, "attacked", "attacked", json(false))},
+            {"attack_id", bsmAttackString(message, "attack_id", "attackId")},
+            {"attack_type", bsmAttackString(message, "attack_type", "attackType")},
             {"delivered", delivered},
         };
         addBridgeMetadata(metric);
