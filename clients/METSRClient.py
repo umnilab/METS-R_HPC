@@ -1138,23 +1138,13 @@ class METSRClient:
         assert res["TYPE"] in ("ANS_onRoadVehicles", "ANS_onRoadVehicle"), res["TYPE"]
         return res
 
-    queryOnRoadVehicles = query_on_road_vehicles
-    query_onRoadVehicles = query_on_road_vehicles
-    query_on_road_vehicle = query_on_road_vehicles
-    queryOnRoadVehicle = query_on_road_vehicles
-
     def query_active_roads(self):
         """Query compact records for roads currently in the active-road index."""
         msg = {"TYPE": "QUERY_activeRoads"}
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] in ("ANS_activeRoads", "ANS_activeRoad"), res["TYPE"]
         return res
-
-    queryActiveRoads = query_active_roads
-    query_activeRoads = query_active_roads
-    query_active_road = query_active_roads
-    queryActiveRoad = query_active_roads
-
+    
     def query_taxi(self, id = None):
         """Query the state of one or more e-taxis.
 
@@ -1245,9 +1235,6 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_almostFinishedTaxis", res["TYPE"]
         return res
-
-    queryAlmostFinishedTaxis = query_almost_finished_taxis
-    query_almostFinishedTaxis = query_almost_finished_taxis
          
     def query_bus(self, id = None):
         """Query the state of one or more electric buses.
@@ -1356,9 +1343,6 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_coSimEnteringVehicleQueue", res["TYPE"]
         return res
-
-    query_coSim_entering_vehicle_queue = query_cosim_entering_vehicle_queue
-    query_cosim_enteringVehicleQueue = query_cosim_entering_vehicle_queue
     
     def query_centerline(self, id, lane_index = -1, transform_coords = False):
         """Query the geometric center-line of a road or a specific lane.
@@ -1492,9 +1476,6 @@ class METSRClient:
         assert res["TYPE"] == "ANS_pickupTaxiInfo", res["TYPE"]
         return res
 
-    queryPickupTaxiInfo = query_pickup_taxi_info
-    query_pickupTaxiInfo = query_pickup_taxi_info
-
     def query_occupied_taxi_info(self, reqID=None):
         """Query taxi requests that are already on board a taxi.
 
@@ -1508,9 +1489,6 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_occupiedTaxiInfo", res["TYPE"]
         return res
-
-    queryOccupiedTaxiInfo = query_occupied_taxi_info
-    query_occupiedTaxiInfo = query_occupied_taxi_info
 
     def query_signal(self, id = None):
         """Query the phase state of one or more traffic signals.
@@ -2467,8 +2445,6 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_goParking", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
-
-    goParking = go_parking
     
     def add_taxi_requests(self, zoneID, dest, num, max_waiting_time = None, maxWaitingTime = None):
         """Add one or more pending taxi requests.
@@ -2746,8 +2722,6 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_updateRoadParkingCapacity", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
-
-    updateRoadParkingCapacity = update_road_parking_capacity
     
     # update charging station prices
     def update_charging_prices(self, stationID, stationType, price):
@@ -3626,10 +3600,6 @@ class METSRClient:
             "initial_y": float(initial_y),
             "mode": "live",
         }
-
-    start_viz_stream = start_viz
-    stream_to_viz = start_viz
-    start_metsr_viz_stream = start_viz
 
     def _send_viz_stream_messages(self, *messages):
         with self.viz_stream_lock:
