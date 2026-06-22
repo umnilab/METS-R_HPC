@@ -463,7 +463,7 @@ def shutdown_metsr(metsr, timeout=3):
 
 def run_cosimulation(config, carla_client, carla_tm):
     metsr = open_metsr_client(config)
-    metsr.start_viz(server_port=getattr(config, "viz_port", 8000), wait_seconds=60)
+    metsr.start_offline_viz(server_port=getattr(config, "viz_port", 8000), wait_seconds=60)
     configure_metsr_cosim_roads(metsr, getattr(config, "metsr_road", []))
     route_graph = query_road_adjacency(
         metsr,
