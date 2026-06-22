@@ -3400,7 +3400,7 @@ class METSRClient:
         last_error = None
         while time.time() <= deadline:
             try:
-                with connect(uri, open_timeout=0.5):
+                with socket.create_connection((connect_host, int(server_port)), timeout=0.5):
                     return
             except Exception as exc:
                 last_error = exc
@@ -3408,6 +3408,51 @@ class METSRClient:
         raise RuntimeError(
             f"METS-R Vis stream server did not become reachable at {uri}"
         ) from last_error
+
+    def _viz_stream_url(self):
+        connect_host = (
+            self.viz_stream_host
+            if self.viz_stream_host not in (None, "", "0.0.0.0", "::")
+            else "127.0.0.1"
+        )
+        server_port = self.viz_stream_port if self.viz_stream_port is not None else 8765
+        return f"ws://{connect_host}:{int(server_port)}"
+
+    def _viz_stream_no_client_error(self, wait_seconds=0):
+        url = self._viz_stream_url()
+        waited = (
+            f" within {wait_seconds:g} seconds"
+            if wait_seconds and wait_seconds > 0
+            else ""
+        )
+        return (
+            f"No METS-R Vis client connected to the live stream at {url}{waited}, "
+            "so render() cannot deliver a frame.\n"
+            "Fix: open https://engineering.purdue.edu/HSEES/METSRVis/ in a browser, "
+            "click Stream, set the WebSocket URL to the URL printed by start_viz() "
+            f"({url}), and then run render() again.\n"
+            "If the browser is on another machine, restart the stream with "
+            f"start_viz(host='0.0.0.0', server_port={int(self.viz_stream_port or 8765)}) "
+            "and connect METS-R Vis to ws://<this-machine-ip>:"
+            f"{int(self.viz_stream_port or 8765)}."
+        )
+
+    def _wait_for_viz_stream_client(self, client_wait_timeout=5):
+        try:
+            wait_seconds = max(0.0, float(client_wait_timeout or 0.0))
+        except (TypeError, ValueError):
+            wait_seconds = 0.0
+        if wait_seconds != wait_seconds or wait_seconds in (float("inf"), float("-inf")):
+            wait_seconds = 0.0
+        deadline = time.time() + wait_seconds
+        while True:
+            with self.viz_stream_lock:
+                client_count = len(self.viz_stream_clients)
+            if client_count > 0:
+                return client_count
+            if wait_seconds == 0 or time.time() >= deadline:
+                raise RuntimeError(self._viz_stream_no_client_error(wait_seconds))
+            time.sleep(min(0.1, max(0.0, deadline - time.time())))
 
     def _serve_viz_stream_connection(self, websocket, stop_event, manifest):
         try:
@@ -3607,11 +3652,15 @@ class METSRClient:
                         self.viz_stream_clients.remove(websocket)
         return sent_clients
 
-    def render(self):
-        """Query the current METS-R tick and push one frame to METSR_VIS."""
+    def render(self, client_wait_timeout=5):
+        """Query the current METS-R tick and push one frame to METSR_VIS.
+
+        Raises if no METS-R Vis client connects within client_wait_timeout seconds.
+        """
         if self.viz_stream_server is None or self.viz_stream_manifest is None:
             raise RuntimeError("Call start_viz() before render().")
 
+        self._wait_for_viz_stream_client(client_wait_timeout=client_wait_timeout)
         options = dict(self.viz_stream_options or {})
         tick = int(self.query_tick())
 
@@ -3692,6 +3741,11 @@ class METSRClient:
         messages.append(chunk)
 
         client_count = self._send_viz_stream_messages(*messages)
+        if client_count == 0:
+            raise RuntimeError(
+                self._viz_stream_no_client_error(0)
+                + "\nA client was connected when render() started, but it disconnected before the frame was sent."
+            )
         self.viz_stream_last_tick = tick
         return {
             "tick": tick,
