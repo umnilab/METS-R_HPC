@@ -1,0 +1,6 @@
+{
+      "parent_config": "run_cosim_Template.json",
+      "name": "DuckieTown",
+      "network_file": "data/CARLA/DukieTown/facility/road/DuckieTown_extended.net.xml",
+      "carla_map": "DuckieTown_extended"
+}

@@ -71,7 +71,6 @@ _VIZ_STREAM_VEHICLE_TYPES = {
 _INT32_MIN = -(2 ** 31)
 _INT32_MAX = 2 ** 31 - 1
 
-
 def _viz_float(value, default=0.0):
     try:
         number = float(value)
@@ -169,7 +168,7 @@ def _viz_record_energy_by_class(records):
     etaxi = 0.0
     ebus = 0.0
     for record in records:
-        energy = _viz_float(_viz_first(record, "energy", "totalEnergy", "totalConsume", default=0.0))
+        energy = _viz_float(_viz_first(record, "energy", "totalEnergy", "totalEnergyConsumed", "totalConsume", default=0.0))
         vehicle_class = _viz_int(_viz_first(record, "vehicleClass", "v_type", "vehicle_class", default=-1), default=-1)
         if vehicle_class == 3:
             private_ev += energy
@@ -250,6 +249,50 @@ def _viz_vehicle_state(record):
     return _viz_int(_viz_first(record, "state", "vehicleState", "tripState", default=-1), default=-1)
 
 
+def _viz_same_identifier(left, right):
+    if left is None or right is None:
+        return False
+    return str(left) == str(right)
+
+
+def _viz_vehicle_origin_id(record):
+    value = _viz_first(
+        record,
+        "originZoneID",
+        "originZoneId",
+        "origin_zone_id",
+        "originId",
+        "origin_id",
+        "origin",
+        default=None,
+    )
+    if value is not None:
+        return value
+
+    value = _viz_first(record, "originID", default=None)
+    road_id = _viz_first(record, "roadID", "roadId", "road", default=None)
+    if value is not None and not _viz_same_identifier(value, road_id):
+        return value
+    return -1
+
+
+def _viz_vehicle_dest_id(record):
+    return _viz_first(
+        record,
+        "destZoneID",
+        "destZoneId",
+        "dest_zone_id",
+        "destId",
+        "dest_id",
+        "dest",
+        "destinationID",
+        "destinationId",
+        "destination",
+        "destID",
+        default=-1,
+    )
+
+
 def _viz_vehicle_group_key(record):
     vehicle_class = _viz_vehicle_class(record)
     state = _viz_vehicle_state(record)
@@ -318,10 +361,10 @@ def _viz_ev_base_record_bytes(record, coord_scale, initial_x, initial_y):
     data.extend(_viz_pack_int(_viz_scaled_coord(y, initial_y, coord_scale)))
     data.extend(_viz_pack_float(_viz_first(record, "bearing", "heading", "heading_deg", default=0.0)))
     data.extend(_viz_pack_float(_viz_first(record, "speed", "speed_mps", default=0.0)))
-    data.extend(_viz_pack_int(_viz_first(record, "originID", "originId", "origin_id", default=-1), default=-1))
-    data.extend(_viz_pack_int(_viz_first(record, "destID", "destId", "dest_id", default=-1), default=-1))
+    data.extend(_viz_pack_int(_viz_vehicle_origin_id(record), default=-1))
+    data.extend(_viz_pack_int(_viz_vehicle_dest_id(record), default=-1))
     data.extend(_viz_pack_float(_viz_first(record, "battery", "battery_state", "batteryLevel", default=0.0)))
-    data.extend(_viz_pack_float(_viz_first(record, "energy", "totalEnergy", "totalConsume", "totalEnergyConsumption", default=0.0)))
+    data.extend(_viz_pack_float(_viz_first(record, "energy", "totalEnergy", "totalEnergyConsumed", "totalConsume", "totalEnergyConsumption", default=0.0)))
     return data
 
 
@@ -368,7 +411,7 @@ def _viz_bus_record_bytes(record, coord_scale, initial_x, initial_y):
     data.extend(_viz_pack_float(_viz_first(record, "bearing", "heading", "heading_deg", default=0.0)))
     data.extend(_viz_pack_float(_viz_first(record, "speed", "speed_mps", default=0.0)))
     data.extend(_viz_pack_float(_viz_first(record, "battery", "battery_state", "batteryLevel", default=0.0)))
-    data.extend(_viz_pack_float(_viz_first(record, "energy", "totalEnergy", "totalConsume", "totalEnergyConsumption", default=0.0)))
+    data.extend(_viz_pack_float(_viz_first(record, "energy", "totalEnergy", "totalEnergyConsumed", "totalConsume", "totalEnergyConsumption", default=0.0)))
     data.extend(_viz_pack_int(_viz_first(record, "matchedRequests", "busMatchedRequests", default=0)))
     data.extend(_viz_pack_int(_viz_first(record, "matchedPassengers", "matchedBusPassengers", default=0)))
     data.extend(_viz_pack_int(_viz_first(record, "pickupRequests", "pickupBusRequests", default=0)))
@@ -1088,13 +1131,21 @@ class METSRClient:
                                    6 = PICKUP_TRIP
                                    7 = ACCESSIBLE_RELOCATION_TRIP
                                    8 = PRIVATE_TRIP,
-              'x':       <float> network-CRS x coordinate (or lon if transform_coords=True),
-              'y':       <float> network-CRS y coordinate (or lat if transform_coords=True),
+              'x':       <float> SIM/internal x coordinate; projected/local
+                                  SUMO x if transform_coords=True,
+              'y':       <float> SIM/internal y coordinate; projected/local
+                                  SUMO y if transform_coords=True,
               'z':       <float> elevation,
               'bearing': <float> heading in degrees (0 = north, clockwise),
               'acc':     <float> current longitudinal acceleration (m/sÂ²),
               'speed':   <float> current speed (m/s),
-              'road':    <str>   SUMO road ID of the road the vehicle is on
+              'originZoneID': <int> current trip origin zone ID,
+              'destZoneID':   <int> current trip destination zone ID,
+              'originRoadID': <str> original road ID for the trip origin road,
+              'destRoadID':   <str> original road ID for the trip destination road,
+              'battery': <float> EV battery energy (kWh, EV classes only),
+              'totalEnergyConsumed': <float> EV cumulative energy use (kWh),
+              'roadID':  <str>   SUMO road ID of the road the vehicle is on
                                  (only present when vehicle is on a road),
               'lane':    <int>   lane index on that road (present when on a lane),
               'dist':    <float> distance to the next downstream junction (m)
@@ -1111,7 +1162,9 @@ class METSRClient:
             ``True`` for private vehicles (EV/GV), ``False`` for public
             (taxi/bus). Must match the length of ``id`` if both are lists.
         transform_coords : bool | list[bool]
-            ``True`` to return WGS-84 lon/lat instead of network CRS.
+            ``False`` returns SIM/internal coordinates (WGS-84 lon/lat for
+            georeferenced networks). ``True`` returns projected/local SUMO
+            coordinates, which can be passed to the CARLA coordinate helpers.
         """
         msg = {"TYPE": "QUERY_vehicle"}
         if id is not None:
@@ -1165,8 +1218,8 @@ class METSRClient:
                                    6 = PICKUP_TRIP    â€“ en-route to pick up a passenger
                                    7 = ACCESSIBLE_RELOCATION_TRIP â€“ repositioning but still assignable
                                    -1 = NONE_OF_THE_ABOVE â€“ not on network, idle, or in an unrecognized state
-              'x':        <float> network-CRS x coordinate,
-              'y':        <float> network-CRS y coordinate,
+              'x':        <float> SIM/internal x coordinate,
+              'y':        <float> SIM/internal y coordinate,
               'z':        <float> elevation,
               'origin':   <int>   current origin zone ID,
               'dest':     <int>   current destination zone ID
@@ -1363,7 +1416,9 @@ class METSRClient:
             Use ``-1`` (default) to get the road's overall start/end points
             instead of a per-lane polyline.
         transform_coords : bool | list[bool]
-            ``True`` to return network CRS lon/lat instead of WGS-84.
+            ``False`` returns SIM/internal coordinates (WGS-84 lon/lat for
+            georeferenced networks). ``True`` returns projected/local SUMO
+            coordinates.
         """
         my_msg = {"TYPE": "QUERY_centerLine"}
         if id is not None:
@@ -1683,7 +1738,7 @@ class METSRClient:
         return res
     
     def query_route(self, orig_x, orig_y, dest_x, dest_y, transform_coords = False):
-        """Query the shortest path between two geographic coordinates.
+        """Query the shortest path between two coordinate pairs.
 
         Each query pair returns::
 
@@ -1694,13 +1749,14 @@ class METSRClient:
         Parameters
         ----------
         orig_x, orig_y : float | list[float]
-            Origin coordinate(s) in network CRS (or lon/lat if
-            ``transform_coords=True``).
+            Origin coordinate(s) in the SIM/internal frame, or projected/local
+            SUMO coordinates when ``transform_coords=True``.
         dest_x, dest_y : float | list[float]
             Destination coordinate(s) (matched pairwise with origin).
         transform_coords : bool | list[bool]
-            ``True`` if the input coordinates are WGS-84 lon/lat and should be
-            projected into the network CRS before routing.
+            ``True`` if the input coordinates are projected/local SUMO
+            coordinates and should be transformed into the SIM/internal frame
+            before routing.
         """
         msg = {"TYPE": "QUERY_routesBwCoords", "DATA": []}
         if not isinstance(orig_x, list):
@@ -1723,7 +1779,7 @@ class METSRClient:
         return res
 
     def query_k_routes(self, orig_x, orig_y, dest_x, dest_y, k, transform_coords = False):
-        """Query the *k* shortest paths between two geographic coordinates.
+        """Query the *k* shortest paths between two coordinate pairs.
 
         Each query pair returns::
 
@@ -1740,7 +1796,8 @@ class METSRClient:
         k : int | list[int]
             Number of alternative routes to return per query.
         transform_coords : bool | list[bool]
-            ``True`` to interpret coordinates as WGS-84 lon/lat.
+            ``True`` to interpret coordinates as projected/local SUMO
+            coordinates and transform them into the SIM/internal frame.
         """
         msg = {"TYPE": "QUERY_multiRoutesBwCoords", "DATA": []}
         if not isinstance(orig_x, list):
@@ -1929,40 +1986,283 @@ class METSRClient:
         assert res["TYPE"] == "ANS_busWithRoute", res["TYPE"]
         return res
 
-    def query_routing_graph(self):
-        """Build and return the full road network as a directed NetworkX graph.
+    @staticmethod
+    def _routing_first(record, *names, default=None):
+        if not isinstance(record, dict):
+            return default
+        for name in names:
+            value = record.get(name)
+            if value is not None:
+                return value
+        return default
 
-        Queries all roads and assembles a ``networkx.DiGraph`` where each node
-        is a SUMO road orig-ID and each directed edge represents a downstream
-        connection between consecutive roads.
+    @staticmethod
+    def _routing_truthy(value):
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y")
+        return bool(value)
 
-        Node attributes::
+    @classmethod
+    def _routing_float(cls, record, *names, default=0.0):
+        value = cls._routing_first(record, *names, default=default)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if number != number or number in (float("inf"), float("-inf")):
+            return float(default)
+        return number
 
-            length      <float>  road length (m)
-            speed_limit <float>  posted speed limit (m/s)
-            r_type      <int>    road type code
+    @classmethod
+    def _routing_road_id_from(cls, record):
+        road_id = cls._routing_first(record, "ID", "roadID", "roadId", "id", "orig_id", "origID")
+        return None if road_id is None else str(road_id)
 
-        Returns
-        -------
-        networkx.DiGraph
-            Road-level connectivity graph (no edge weights).
+    @classmethod
+    def _routing_downstream_from(cls, record, default=None):
+        downstream = cls._routing_first(
+            record,
+            "down_stream_road",
+            "downstream_road",
+            "downStreamRoad",
+            "downStreamRoads",
+            "downstreamRoad",
+            "downstreamRoads",
+            default=default,
+        )
+        if downstream is None:
+            return None
+        if isinstance(downstream, str):
+            return [downstream]
+        return [str(road_id) for road_id in downstream if road_id is not None]
+
+    @classmethod
+    def _routing_node_attrs_from(cls, record, previous=None):
+        previous = previous or {}
+        distance = cls._routing_float(
+            record,
+            "distance",
+            "distance_m",
+            "length",
+            default=previous.get("distance", previous.get("length", 0.0)),
+        )
+        speed_limit = cls._routing_float(
+            record,
+            "speed_limit",
+            "speedLimit",
+            default=previous.get("speed_limit", 0.0),
+        )
+        travel_time = cls._routing_float(
+            record,
+            "travel_time",
+            "travelTime",
+            "travel_time_s",
+            "avg_travel_time",
+            default=previous.get("travel_time", previous.get("weight", 0.0)),
+        )
+        if travel_time <= 0.0 and distance > 0.0 and speed_limit > 0.0:
+            travel_time = distance / speed_limit
+
+        energy_consumed = cls._routing_float(
+            record,
+            "energy_consumed",
+            "energyConsumed",
+            "totalEnergy",
+            "totalEnergyConsumed",
+            "energy",
+            default=previous.get("energy_consumed", previous.get("total_energy", 0.0)),
+        )
+        avg_energy = cls._routing_float(
+            record,
+            "avg_energy_consumption",
+            "avgEnergyConsumption",
+            "energy_consumption",
+            "energyConsumption",
+            default=previous.get("avg_energy_consumption", previous.get("energy_consumption", 0.0)),
+        )
+        if cls._routing_first(record, "weight", default=None) is None:
+            weight = travel_time
+        else:
+            weight = cls._routing_float(record, "weight", default=travel_time)
+            if weight <= 0.0:
+                weight = travel_time
+
+        attrs = {
+            "distance": distance,
+            "travel_time": travel_time,
+            "energy_consumption": avg_energy,
+            "avg_energy_consumption": avg_energy,
+            "energy_consumed": energy_consumed,
+            "total_energy": energy_consumed,
+            "length": distance,
+            "weight": weight,
+            "speed_limit": speed_limit,
+        }
+        passthrough = (
+            "roadID",
+            "roadIndex",
+            "r_type",
+            "num_veh",
+            "nVehicles",
+            "speed",
+            "flow",
+            "parking_capacity",
+            "parkingCapacity",
+            "parked_num",
+            "parkedNum",
+            "STATUS",
+        )
+        for name in passthrough:
+            value = cls._routing_first(record, name, default=None)
+            if value is not None:
+                attrs[name] = value
+        if "roadIndex" in attrs:
+            attrs["road_index"] = attrs["roadIndex"]
+        return attrs
+
+    @staticmethod
+    def _routing_edge_attrs_from(node_attrs):
+        keys = (
+            "distance",
+            "travel_time",
+            "energy_consumption",
+            "avg_energy_consumption",
+            "energy_consumed",
+            "total_energy",
+            "length",
+            "weight",
+            "speed_limit",
+            "r_type",
+        )
+        return {key: node_attrs[key] for key in keys if key in node_attrs}
+
+    @classmethod
+    def _apply_routing_graph_metadata(cls, graph, response):
+        graph.graph["edge_cost_road"] = "source"
+        graph.graph["snapshot_required"] = cls._routing_truthy(response.get("snapshotRequired", False))
+        metadata_fields = (
+            ("tick", "tick"),
+            ("TICK", "tick"),
+            ("topologyVersion", "topology_version"),
+            ("version", "metric_version"),
+            ("version", "weight_version"),
+            ("weightVersion", "weight_version"),
+        )
+        for response_key, graph_key in metadata_fields:
+            if response_key in response:
+                graph.graph[graph_key] = response[response_key]
+
+    def query_routing_graph_updates(self):
+        """Query road routing-metric deltas since the last full road snapshot.
+
+        The updated SIM endpoint returns ``DATA`` records only for roads whose
+        routing metrics changed. If topology changed, the response sets
+        ``snapshotRequired`` and callers should rebuild with
+        :meth:`query_routing_graph`.
         """
-        # Step 1: get all road IDs by querying without arguments
+        msg = {"TYPE": "QUERY_routingGraphUpdates"}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_routingGraphUpdates", res["TYPE"]
+        return res
+
+    def query_routing_graph(self, batch_size=500):
+        """Build and return the full road-level NetworkX routing graph.
+
+        Nodes are SUMO road IDs. Directed edges represent downstream road
+        connectivity, with source-road metrics copied onto the edge. Useful
+        edge weights include ``weight`` / ``travel_time``, ``distance``, and
+        ``energy_consumption``.
+        """
         all_roads_res = self.query_road()
-        road_ids = all_roads_res['orig_id']
+        if all_roads_res.get("CODE") == "KO":
+            raise RuntimeError(f"METS-R SIM rejected QUERY_road: {all_roads_res}")
+        road_ids = all_roads_res.get("id_list") or all_roads_res.get("orig_id") or []
 
-        # Step 2: query road details in batches of 10 and build the graph
         graph = nx.DiGraph()
-        batch_size = 10
+        downstream_by_road = {}
+        metadata_response = all_roads_res
+        batch_size = max(1, int(batch_size or 1))
         for batch_start in range(0, len(road_ids), batch_size):
-            batch = road_ids[batch_start : batch_start + batch_size]
-            res = self.query_road(id=batch)
-            for road in res['DATA']:
-                src = road['ID']
-                graph.add_node(src, length=road['length'], speed_limit=road['speed_limit'], r_type=road['r_type'])
-                for dst in road['down_stream_road']:
-                    graph.add_edge(src, dst)
+            batch = road_ids[batch_start: batch_start + batch_size]
+            response = self.query_road(id=batch)
+            if response.get("CODE") == "KO":
+                raise RuntimeError(f"METS-R SIM rejected QUERY_road batch: {response}")
+            metadata_response = response
+            for road in response.get("DATA", []):
+                if not isinstance(road, dict):
+                    continue
+                road_id = self._routing_road_id_from(road)
+                if road_id is None:
+                    continue
+                graph.add_node(road_id, **self._routing_node_attrs_from(road))
+                downstream_by_road[road_id] = self._routing_downstream_from(road, default=[])
 
+        for road_id, downstream_ids in downstream_by_road.items():
+            edge_attrs = self._routing_edge_attrs_from(graph.nodes[road_id])
+            for downstream_id in downstream_ids or []:
+                graph.add_edge(road_id, downstream_id, **edge_attrs)
+
+        self._apply_routing_graph_metadata(graph, metadata_response)
+        graph.graph["snapshot_required"] = False
+        return graph
+
+    def update_routing_graph(
+            self,
+            graph,
+            update_response=None,
+            include_topology=False,
+            reload_on_snapshot_required=True,
+            batch_size=500):
+        """Apply ``QUERY_routingGraphUpdates`` results to an existing graph.
+
+        Normal update responses are metric-only. When SIM reports
+        ``snapshotRequired``, the topology has changed and this method reloads a
+        full graph unless ``reload_on_snapshot_required`` is false.
+        ``include_topology`` is kept for compatibility and is used only if an
+        update record explicitly carries downstream road IDs.
+        """
+        if update_response is None:
+            update_response = self.query_routing_graph_updates()
+        if update_response.get("CODE") == "KO":
+            raise RuntimeError(f"METS-R SIM rejected QUERY_routingGraphUpdates: {update_response}")
+
+        if self._routing_truthy(update_response.get("snapshotRequired", False)):
+            if not reload_on_snapshot_required:
+                self._apply_routing_graph_metadata(graph, update_response)
+                raise RuntimeError("METS-R SIM requested a fresh routing graph snapshot")
+            return self.query_routing_graph(batch_size=batch_size)
+
+        removed_ids = update_response.get("removed", []) or update_response.get("REMOVED", []) or []
+        for road_id in removed_ids:
+            road_id = str(road_id)
+            if road_id in graph:
+                graph.remove_node(road_id)
+
+        for road in update_response.get("DATA", []):
+            if not isinstance(road, dict):
+                continue
+            road_id = self._routing_road_id_from(road)
+            if road_id is None:
+                continue
+            status = str(road.get("STATUS", road.get("status", "OK"))).upper()
+            if status in {"KO", "REMOVED", "DELETE", "DELETED"}:
+                if road_id in graph and status != "KO":
+                    graph.remove_node(road_id)
+                continue
+
+            previous = graph.nodes[road_id] if road_id in graph else {}
+            graph.add_node(road_id, **self._routing_node_attrs_from(road, previous=previous))
+            edge_attrs = self._routing_edge_attrs_from(graph.nodes[road_id])
+            downstream_ids = self._routing_downstream_from(road, default=None)
+            if downstream_ids is not None:
+                graph.remove_edges_from(list(graph.out_edges(road_id)))
+                for downstream_id in downstream_ids:
+                    graph.add_edge(road_id, downstream_id, **edge_attrs)
+            else:
+                for _, downstream_id in list(graph.out_edges(road_id)):
+                    graph.edges[road_id, downstream_id].update(edge_attrs)
+
+        self._apply_routing_graph_metadata(graph, update_response)
         return graph
 
     # CONTROL: change the state of the simulator
@@ -2146,8 +2446,9 @@ class METSRClient:
 
         ``dist`` is the distance to the downstream junction. Recent METS-R SIM
         versions also accept ``x``/``y`` coordinates, which are projected onto
-        the target lane by the simulator; set ``transform_coords=True`` when
-        those coordinates need the simulator CRS transform.
+        the target lane by the simulator. Set ``transform_coords=True`` when
+        those coordinates are projected/local SUMO, XODR, or CARLA-meter
+        coordinates; leave it ``False`` for SIM/internal coordinates.
         """
         msg = {
                 "TYPE": "CTRL_teleportTraceReplayVeh",
@@ -2881,7 +3182,7 @@ class METSRClient:
     # Dynamically add one or more zones at given coordinates.
     # x, y: map coordinates; z: elevation (default 0.0);
     # capacity: zone capacity; zone_type: zone type int;
-    # transform_coord: set True if coords need network CRS transform.
+    # transform_coord: set True for projected/local SUMO coordinates.
     # Returns assigned zone IDs.
     def add_zone(self, x, y, capacity, zone_type, z=0.0, transform_coord=False):
         msg = {"TYPE": "CTRL_addZone", "DATA": []}
@@ -2992,7 +3293,7 @@ class METSRClient:
     # Dynamically add one or more charging stations at given coordinates.
     # num_l2/l3/bus: charger counts; price_l2/l3: per-unit prices;
     # z: elevation (default 0.0);
-    # transform_coord: set True if coords need network CRS transform.
+    # transform_coord: set True for projected/local SUMO coordinates.
     # Returns assigned (negative) station IDs.
     def add_charging_station(self, x, y, num_l2, num_l3, num_bus, price_l2, price_l3, z=0.0, transform_coord=False):
         msg = {"TYPE": "CTRL_addChargingStation", "DATA": []}
