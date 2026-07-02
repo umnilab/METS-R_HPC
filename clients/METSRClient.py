@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import socket
 import struct
@@ -30,8 +31,10 @@ from utils.util import (
     _trajectory_format_name,
     _trajectory_format_score,
     _trajectory_manifest_summary,
+    register_metsr_client,
     run_visualization_server,
     stop_visualization_server,
+    unregister_metsr_client,
     str_list_mapper_gen,
 )
 
@@ -705,7 +708,9 @@ class METSRClient:
         self.viz_port = None
 
         self.viz_stream_server = None
+        self.viz_stream_servers = []
         self.viz_stream_thread = None
+        self.viz_stream_threads = []
         self.viz_stream_stop_event = None
         self.viz_stream_host = None
         self.viz_stream_port = None
@@ -767,6 +772,7 @@ class METSRClient:
         self.receive_msg(ignore_heartbeats=False, return_ready=True)
 
         self.lock = threading.Lock()
+        register_metsr_client(self)
 
     def _fatal_log_error(self):
         if not self.sim_folder:
@@ -3470,6 +3476,7 @@ class METSRClient:
 
         if self.viz_stream_server is not None:
             self.stop_viz_stream()
+        unregister_metsr_client(self)
 
 
     def _query_viz_road_dictionary(self):
@@ -3675,7 +3682,11 @@ class METSRClient:
         last_error = None
         while time.time() <= deadline:
             try:
-                with socket.create_connection((connect_host, int(server_port)), timeout=0.5):
+                try:
+                    websocket = connect(uri, open_timeout=0.5)
+                except TypeError:
+                    websocket = connect(uri)
+                with websocket:
                     return
             except Exception as exc:
                 last_error = exc
@@ -3751,7 +3762,7 @@ class METSRClient:
     def start_viz(
             self,
             server_port=8765,
-            host="127.0.0.1",
+            host="0.0.0.0",
             tick_interval=1,
             transform_coords=False,
             include_public=True,
@@ -3790,6 +3801,9 @@ class METSRClient:
             raise RuntimeError(
                 "start_viz requires the 'websockets' package from requirements.txt."
             ) from exc
+
+        for logger_name in ("websockets", "websockets.server", "websockets.sync.server"):
+            logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
         tick_interval = max(1, int(tick_interval))
         coord_scale = max(1, int(coord_scale))
@@ -3865,13 +3879,30 @@ class METSRClient:
 
         def handler(websocket):
             self._serve_viz_stream_connection(websocket, stop_event, manifest)
+        servers = []
+        server_threads = []
 
-        server = serve(handler, host, int(server_port))
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
+        def start_server(bind_host):
+            server = serve(handler, bind_host, int(server_port))
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            servers.append(server)
+            server_threads.append(server_thread)
+            return server, server_thread
+
+        server, server_thread = start_server(host)
+        if host in (None, "", "0.0.0.0", "127.0.0.1", "localhost"):
+            try:
+                start_server("::1")
+            except Exception:
+                # Optional compatibility binding for browsers that resolve
+                # localhost to IPv6 before IPv4 on Windows.
+                pass
 
         self.viz_stream_server = server
+        self.viz_stream_servers = servers
         self.viz_stream_thread = server_thread
+        self.viz_stream_threads = server_threads
         self.viz_stream_stop_event = stop_event
         self.viz_stream_host = host
         self.viz_stream_port = int(server_port)
@@ -3883,19 +3914,37 @@ class METSRClient:
         with self.viz_stream_lock:
             self.viz_stream_clients = []
 
+        localhost_reachable = False
         try:
             self._wait_for_viz_stream_server(host, server_port, startup_timeout=startup_timeout)
+            try:
+                localhost_timeout = max(0.1, min(1.0, float(startup_timeout or 1.0)))
+                self._wait_for_viz_stream_server(
+                    "localhost",
+                    server_port,
+                    startup_timeout=localhost_timeout,
+                )
+                localhost_reachable = True
+            except Exception:
+                localhost_reachable = False
         except Exception:
             self.stop_viz_stream()
             raise
 
+
         connect_host = host if host not in ("", "0.0.0.0", "::") else "127.0.0.1"
         url = f"ws://{connect_host}:{int(server_port)}"
+        localhost_url = f"ws://localhost:{int(server_port)}"
+        browser_url = localhost_url if localhost_reachable else url
         print(f"METS-R Vis live stream is available at {url}; origin=({initial_x}, {initial_y}); call render() to send frames.")
         return {
             "host": host,
             "port": int(server_port),
             "url": url,
+            "local_url": url,
+            "localhost_url": localhost_url,
+            "browser_url": browser_url,
+            "localhost_reachable": localhost_reachable,
             "manifest": manifest,
             "initial_x": float(initial_x),
             "initial_y": float(initial_y),
@@ -4044,21 +4093,30 @@ class METSRClient:
                 except Exception:
                     pass
 
-        server = self.viz_stream_server
-        if server is not None:
+        servers = list(getattr(self, "viz_stream_servers", []) or [])
+        if self.viz_stream_server is not None and self.viz_stream_server not in servers:
+            servers.append(self.viz_stream_server)
+        for server in servers:
             shutdown = getattr(server, "shutdown", None)
             close = getattr(server, "close", None)
-            if callable(shutdown):
-                shutdown()
-            elif callable(close):
-                close()
+            try:
+                if callable(shutdown):
+                    shutdown()
+                elif callable(close):
+                    close()
+            except Exception:
+                pass
 
-
-        if self.viz_stream_thread is not None:
-            self.viz_stream_thread.join(timeout=join_timeout)
+        threads = list(getattr(self, "viz_stream_threads", []) or [])
+        if self.viz_stream_thread is not None and self.viz_stream_thread not in threads:
+            threads.append(self.viz_stream_thread)
+        for thread in threads:
+            thread.join(timeout=join_timeout)
 
         self.viz_stream_server = None
+        self.viz_stream_servers = []
         self.viz_stream_thread = None
+        self.viz_stream_threads = []
         self.viz_stream_stop_event = None
         self.viz_stream_host = None
         self.viz_stream_port = None
@@ -4229,18 +4287,18 @@ class METSRClient:
             "mode": "offline",
         }
 
-    def stop_offline_viz(self):
+    def stop_offline_viz(self, verbose=True):
         if self.viz_server is not None:
-            stop_visualization_server(self.viz_event, self.viz_server, self.viz_port or 8000)
+            stop_visualization_server(self.viz_event, self.viz_server, self.viz_port or 8000, verbose=verbose)
         self.viz_event = None
         self.viz_server = None
         self.viz_port = None
 
-    def stop_viz(self):
+    def stop_viz(self, verbose=True):
         if self.viz_stream_server is not None:
             self.stop_viz_stream()
         if self.viz_server is not None:
-            self.stop_offline_viz()
+            self.stop_offline_viz(verbose=verbose)
 
     def _logMessage(self, direction, msg):
         self._messagesLog.append(
