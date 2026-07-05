@@ -109,6 +109,7 @@ def get_arguments(argv):
     args = parser.parse_args(argv)
 
     config = read_run_config(args.run_config)
+    config.run_config = args.run_config
     config.display_all = args.display_all
     config.cosim_roads = args.cosim_roads
     config.all_cosim_roads = args.all_cosim_roads
@@ -164,6 +165,8 @@ def open_metsr_client(config):
         sim_folder=configured_sim_folder(config),
         timeout=getattr(config, "timeout", 30),
         verbose=getattr(config, "verbose", False),
+        config_json=getattr(config, "run_config", None),
+        config=config,
     )
 
 

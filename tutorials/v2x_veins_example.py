@@ -278,6 +278,8 @@ def connect_metsr_client(args, config):
         verbose=args.verbose,
         max_connection_attempts=1,
         max_connection_wait=args.metsr_connect_wait,
+        config_json=args.run_config if args.run_config else None,
+        config=config,
     )
     return client
 

@@ -20,6 +20,7 @@ from utils.util import (
     _configured_trajectory_roots,
     _is_sequence,
     _latest_trajectory_directory,
+    _load_raw_config,
     _looks_like_centerline,
     _normalize_sensor_type,
     _read_property_values,
@@ -31,7 +32,10 @@ from utils.util import (
     _trajectory_format_name,
     _trajectory_format_score,
     _trajectory_manifest_summary,
+    prepare_sim_dirs,
     register_metsr_client,
+    read_run_config,
+    run_simulation_in_docker,
     run_visualization_server,
     stop_visualization_server,
     unregister_metsr_client,
@@ -40,6 +44,49 @@ from utils.util import (
 
 str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
+
+
+def _normalize_config_json_path(config_json):
+    if config_json is None:
+        return None
+    return os.path.abspath(os.fspath(config_json))
+
+
+def _config_signature_from_path(config_json):
+    if config_json is None:
+        return None
+    raw_config = _load_raw_config(config_json)
+    return json.dumps(raw_config, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _port_from_config(config, sim_index=0, default=None):
+    if config is None:
+        return default
+
+    for attr_name in ("ports", "metsr_port"):
+        ports = getattr(config, attr_name, None)
+        if ports is None:
+            continue
+        if isinstance(ports, (list, tuple)):
+            if not ports:
+                continue
+            return int(ports[int(sim_index)])
+        return int(ports)
+    return default
+
+
+def _sim_folder_from_config(config, sim_dirs=None, sim_index=0, default=None):
+    candidates = sim_dirs if sim_dirs is not None else getattr(config, "sim_dirs", None)
+    if candidates:
+        return candidates[int(sim_index)]
+
+    sim_folder = getattr(config, "sim_folder", None)
+    if isinstance(sim_folder, (list, tuple)):
+        return sim_folder[int(sim_index)]
+    if sim_folder:
+        return sim_folder
+    return default
+
 
 _VIZ_STREAM_MAGIC = b"MRTB"
 _VIZ_STREAM_VERSION = 8
@@ -685,13 +732,28 @@ class METSRClient:
             verbose = False,
             connection_retry_interval = 0.5,
             connection_open_timeout = 1,
-            max_connection_wait = None):
+            max_connection_wait = None,
+            config_json = None,
+            run_config = None,
+            config = None,
+            sim_index = 0):
         super().__init__()
 
         # Websocket config
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}"
+
+        self.config_json = _normalize_config_json_path(config_json or run_config)
+        self.config_signature = _config_signature_from_path(self.config_json)
+        self.config = config
+        self.sim_index = int(sim_index)
+        self._connection_settings = {
+            "max_connection_attempts": max_connection_attempts,
+            "connection_retry_interval": connection_retry_interval,
+            "connection_open_timeout": connection_open_timeout,
+            "max_connection_wait": max_connection_wait,
+        }
 
         self.sim_folder = sim_folder # this is required for open the visualization server
         self.state = "connecting"
@@ -716,11 +778,13 @@ class METSRClient:
         self.viz_stream_port = None
         self.viz_stream_manifest = None
         self.viz_stream_options = None
+        self.viz_stream_start_kwargs = None
         self.viz_stream_clients = []
         self.viz_stream_lock = threading.Lock()
         self.viz_stream_chunk_counter = 0
         self.viz_stream_last_tick = None
         self.viz_stream_last_active_road_ids = set()
+        self.offline_viz_start_kwargs = None
  
         # Track the tick of the corresponding simulator
         self.current_tick = None
@@ -773,6 +837,53 @@ class METSRClient:
 
         self.lock = threading.Lock()
         register_metsr_client(self)
+
+    def _connect(
+            self,
+            max_connection_attempts = 5,
+            connection_retry_interval = 0.5,
+            connection_open_timeout = 1,
+            max_connection_wait = None):
+        connection_start = time.time()
+        max_connection_wait = (
+            max_connection_wait
+            if max_connection_wait is not None
+            else max_connection_attempts * 10
+        )
+        failed_attempts = 0
+        while True:
+            try:
+                self.ws = connect(
+                    self.uri,
+                    max_size = 10 * 1024 * 1024,
+                    ping_interval = None,
+                    ping_timeout = None,
+                    open_timeout = connection_open_timeout,
+                )
+                self.state = "connected"
+                if self.verbose:
+                    print(f"Connected to {self.uri}")
+                break
+            except OSError as exc:
+                failed_attempts += 1
+                elapsed = time.time() - connection_start
+                if elapsed >= max_connection_wait:
+                    self.state = "failed"
+                    raise RuntimeError(
+                        f"Could not connect to METS-R SIM at {self.uri} "
+                        f"after {elapsed:.1f} seconds and {failed_attempts} attempts"
+                    ) from exc
+
+                sleep_seconds = min(connection_retry_interval, max_connection_wait - elapsed)
+                if self.verbose:
+                    print(
+                        f"Attempt {failed_attempts} to connect to {self.uri} failed. "
+                        f"Retrying in {sleep_seconds:.1f} seconds..."
+                    )
+                time.sleep(sleep_seconds)
+
+        print("Connection established!")
+        self.receive_msg(ignore_heartbeats=False, return_ready=True)
 
     def _fatal_log_error(self):
         if not self.sim_folder:
@@ -3397,8 +3508,37 @@ class METSRClient:
         return res
      
     
-    # reset the simulation with a property file
-    def reset(self):
+    def _remember_config(self, config_json=None, config_signature=None, config=None):
+        if config_json is not None:
+            self.config_json = _normalize_config_json_path(config_json)
+        if config_signature is not None or config_json is not None:
+            self.config_signature = (
+                config_signature
+                if config_signature is not None
+                else _config_signature_from_path(self.config_json)
+            )
+        if config is not None:
+            self.config = config
+
+    def _read_reset_config(self, config_json):
+        config_json_path = _normalize_config_json_path(config_json)
+        config_signature = _config_signature_from_path(config_json_path)
+        config = read_run_config(config_json_path)
+        return config_json_path, config_signature, config
+
+    def _config_requires_restart(self, config_json_path, config_signature, config):
+        if self.config_signature is not None:
+            return config_signature != self.config_signature
+        if self.config_json is not None:
+            return config_json_path != self.config_json
+
+        target_host = getattr(config, "metsr_host", self.host)
+        target_port = _port_from_config(config, self.sim_index, default=self.port)
+        if str(target_host) != str(self.host):
+            return True
+        return target_port is not None and int(target_port) != int(self.port)
+
+    def _reset_current_simulation(self):
         msg = {"TYPE": "CTRL_reset"}
         res = self.send_receive_msg(msg, ignore_heartbeats=True, max_attempts=-1)
 
@@ -3419,6 +3559,106 @@ class METSRClient:
             time.sleep(1)
 
             self.start_offline_viz()
+
+        return res
+
+    def _capture_viz_state(self):
+        live_kwargs = None
+        if self.viz_stream_server is not None:
+            live_kwargs = dict(self.viz_stream_start_kwargs or {})
+            if not live_kwargs:
+                live_kwargs = {
+                    "server_port": self.viz_stream_port or 8765,
+                    "host": self.viz_stream_host or "0.0.0.0",
+                }
+
+        offline_kwargs = None
+        if self.viz_server is not None:
+            offline_kwargs = dict(self.offline_viz_start_kwargs or {})
+            if not offline_kwargs:
+                offline_kwargs = {"server_port": self.viz_port or 8000}
+
+        return live_kwargs, offline_kwargs
+
+    def _restore_viz_state(self, live_kwargs=None, offline_kwargs=None):
+        if live_kwargs is not None:
+            self.start_viz(**live_kwargs)
+        if offline_kwargs is not None:
+            self.start_offline_viz(**offline_kwargs)
+
+    def _terminate_simulation_only(self):
+        if self.ws is None:
+            return None
+        try:
+            msg = {"TYPE": "CTRL_end"}
+            res = self.send_receive_msg(msg, ignore_heartbeats=True)
+            if res is not None:
+                assert res["TYPE"] == "CTRL_end", res["TYPE"]
+                assert res["CODE"] == "OK", res["CODE"]
+            return res
+        finally:
+            if self.ws is not None:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+                self.ws = None
+            self.state = "closed"
+
+    def _wait_for_sim_port_release(self, host, port, timeout=10):
+        if str(host) not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+            return
+        deadline = time.time() + max(0.0, float(timeout or 0.0))
+        while time.time() <= deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", int(port)), timeout=0.25):
+                    pass
+            except OSError:
+                return
+            time.sleep(0.2)
+
+    def _restart_simulation_with_config(self, config_json_path, config_signature, config):
+        sim_dirs = prepare_sim_dirs(config)
+        target_host = getattr(config, "metsr_host", self.host)
+        target_port = _port_from_config(config, self.sim_index, default=self.port)
+        if target_port is None:
+            raise RuntimeError("Restart config does not define a METS-R websocket port.")
+
+        live_kwargs, offline_kwargs = self._capture_viz_state()
+        old_host = self.host
+        old_port = self.port
+
+        self._terminate_simulation_only()
+        self._wait_for_sim_port_release(old_host, old_port)
+        run_simulation_in_docker(config)
+
+        self.host = target_host
+        self.port = int(target_port)
+        self.uri = f"ws://{self.host}:{self.port}"
+        self.sim_folder = _sim_folder_from_config(
+            config,
+            sim_dirs=sim_dirs,
+            sim_index=self.sim_index,
+            default=self.sim_folder,
+        )
+        self.current_tick = None
+        self._remember_config(config_json_path, config_signature, config)
+        self._connect(**self._connection_settings)
+        self._restore_viz_state(live_kwargs, offline_kwargs)
+
+    # reset the current simulation; restart the simulator if a different config json is supplied
+    def reset(self, config_json=None):
+        if config_json is None:
+            self._reset_current_simulation()
+            return
+
+        config_json_path, config_signature, config = self._read_reset_config(config_json)
+        if not self._config_requires_restart(config_json_path, config_signature, config):
+            self._remember_config(config_json_path, config_signature, config)
+            self._reset_current_simulation()
+            return
+
+        self._restart_simulation_with_config(config_json_path, config_signature, config)
 
     # save the simulation instance to zip
     def save(self, filename):
@@ -3795,6 +4035,32 @@ class METSRClient:
         `sim_folder/data/Data.properties` so the live stream uses the same
         origin as the run config prepared for METS-R.
         """
+        start_kwargs = {
+            "server_port": server_port,
+            "host": host,
+            "tick_interval": tick_interval,
+            "transform_coords": transform_coords,
+            "include_public": include_public,
+            "include_private": include_private,
+            "vehicle_ids": vehicle_ids,
+            "private_veh": private_veh,
+            "public_vehicle_ids": public_vehicle_ids,
+            "private_vehicle_ids": private_vehicle_ids,
+            "batch_size": batch_size,
+            "coord_scale": coord_scale,
+            "initial_x": initial_x,
+            "initial_y": initial_y,
+            "link_snapshot_interval": link_snapshot_interval,
+            "road_id_dictionary": road_id_dictionary,
+            "zone_dictionary": zone_dictionary,
+            "charging_station_dictionary": charging_station_dictionary,
+            "include_links": include_links,
+            "include_zones": include_zones,
+            "include_charging_stations": include_charging_stations,
+            "link_batch_size": link_batch_size,
+            "facility_batch_size": facility_batch_size,
+            "startup_timeout": startup_timeout,
+        }
         try:
             from websockets.sync.server import serve
         except ImportError as exc:
@@ -3936,6 +4202,7 @@ class METSRClient:
         url = f"ws://{connect_host}:{int(server_port)}"
         localhost_url = f"ws://localhost:{int(server_port)}"
         browser_url = localhost_url if localhost_reachable else url
+        self.viz_stream_start_kwargs = start_kwargs
         print(f"METS-R Vis live stream is available at {url}; origin=({initial_x}, {initial_y}); call render() to send frames.")
         return {
             "host": host,
@@ -4122,6 +4389,7 @@ class METSRClient:
         self.viz_stream_port = None
         self.viz_stream_manifest = None
         self.viz_stream_options = None
+        self.viz_stream_start_kwargs = None
         self.viz_stream_chunk_counter = 0
         self.viz_stream_last_tick = None
         self.viz_stream_last_active_road_ids = set()
@@ -4240,6 +4508,13 @@ class METSRClient:
             prefer_binary=True,
             wait_seconds=30,
             startup_timeout=3):
+        start_kwargs = {
+            "trajectory_output_dir": trajectory_output_dir,
+            "server_port": server_port,
+            "prefer_binary": prefer_binary,
+            "wait_seconds": wait_seconds,
+            "startup_timeout": startup_timeout,
+        }
         if trajectory_output_dir is not None:
             if os.path.isabs(str(trajectory_output_dir)):
                 latest_directory = os.path.normpath(str(trajectory_output_dir))
@@ -4278,6 +4553,7 @@ class METSRClient:
         except Exception:
             self.stop_offline_viz()
             raise
+        self.offline_viz_start_kwargs = start_kwargs
         print(f"Visualization files are available at http://127.0.0.1:{server_port}/")
         return {
             "directory": latest_directory,
@@ -4293,6 +4569,7 @@ class METSRClient:
         self.viz_event = None
         self.viz_server = None
         self.viz_port = None
+        self.offline_viz_start_kwargs = None
 
     def stop_viz(self, verbose=True):
         if self.viz_stream_server is not None:
