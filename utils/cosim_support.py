@@ -452,11 +452,12 @@ def first_present(record, *keys):
 class CarlaSensorPanel:
     """Owns CARLA demo sensors and keeps only the latest callback frame."""
 
-    def __init__(self, world, carla_module, destroy_actor_func, vehicle_camera_enabled=True):
+    def __init__(self, world, carla_module, destroy_actor_func, vehicle_camera_enabled=True, lidar_enabled=True):
         self.world = world
         self.carla = carla_module
         self.destroy_actor = destroy_actor_func
         self.vehicle_camera_enabled = bool(vehicle_camera_enabled)
+        self.lidar_enabled = bool(lidar_enabled)
         self.camera_actor = None
         self.vehicle_camera_actor = None
         self.lidar_actor = None
@@ -686,7 +687,8 @@ class CarlaSensorPanel:
         target_actor = self._select_target_actor(state, preferred_vehicle_ids=preferred_vehicle_ids)
         if target_actor is not None:
             self.track_target_actor(target_actor)
-            self.attach_lidar(target_actor)
+            if self.lidar_enabled:
+                self.attach_lidar(target_actor)
             if self.vehicle_camera_enabled:
                 self.attach_vehicle_camera(target_actor)
 
@@ -1950,7 +1952,7 @@ class TRACRSimu5GBSMStream:
             return []
 
 class TRACRDashboard:
-    def __init__(self, viz_url="https://engineering.purdue.edu/HSEES/METSRVis/", stream_url=None, fullscreen=False, local_viz_patch=False, bsm_stream_label="Kafka", bsm_ego_only=True, metsr_viz_map=METS_R_VIS_PURDUE_MAP_ID, metsr_viz_vehicle_type=METS_R_VIS_PRIVATE_VEHICLE_TYPE, lidar_min_update_interval_s=1.0):
+    def __init__(self, viz_url="https://engineering.purdue.edu/HSEES/METSRVis/", stream_url=None, fullscreen=False, local_viz_patch=False, bsm_stream_label="Kafka", bsm_ego_only=True, metsr_viz_map=METS_R_VIS_PURDUE_MAP_ID, metsr_viz_vehicle_type=METS_R_VIS_PRIVATE_VEHICLE_TYPE, lidar_min_update_interval_s=1.0, external_speedy_mode=False):
         try:
             import ipywidgets as widgets
         except ImportError:
@@ -1979,6 +1981,7 @@ class TRACRDashboard:
         self.external_stop_event = None
         self.external_server_thread = None
         self.external_port = None
+        self.external_speedy_mode = bool(external_speedy_mode)
         self.external_min_update_interval_s = 0.12
         self.media_min_update_interval_s = 0.12
         self.lidar_min_update_interval_s = float(lidar_min_update_interval_s or 0.0)
@@ -2107,12 +2110,13 @@ class TRACRDashboard:
                 f"local stream patch failed: {str(exc).splitlines()[0]}"
             )
 
-    def display_external(self, directory="output/tracr_dashboard", port=8899, open_browser=False):
+    def display_external(self, directory="output/tracr_dashboard", port=8899, open_browser=False, speedy_mode=False):
         from IPython.display import HTML, display
         from utils.util import run_visualization_server
 
         self.external_directory = os.path.abspath(directory)
         self.external_port = int(port)
+        self.external_speedy_mode = bool(speedy_mode)
         os.makedirs(self.external_directory, exist_ok=True)
         self._prepare_external_viz_frame()
         self._write_external_page()
@@ -2199,6 +2203,9 @@ class TRACRDashboard:
 
     def _bsm_panel_show_map(self):
         return bool(getattr(self, "bsm_show_map", True))
+
+    def _external_speedy_mode_enabled(self):
+        return bool(getattr(self, "external_speedy_mode", False))
 
     def _viz_html(self, viz_url, stream_url):
         stream = escape(stream_url or "not started yet")
@@ -2572,6 +2579,8 @@ class TRACRDashboard:
         bsm_show_map = self._bsm_panel_show_map()
         bsm_layout_class = "bsm-layout" if bsm_show_map else "bsm-layout bsm-layout--table-only"
         bsm_map_hidden = "" if bsm_show_map else " hidden"
+        speedy_mode = self._external_speedy_mode_enabled()
+        speedy_hidden = " hidden" if speedy_mode else ""
         return f"""<!doctype html>
 <html>
 <head>
@@ -2586,10 +2595,10 @@ class TRACRDashboard:
     <div id="status" class="tracr-note">Ready</div>
     <div class="tracr-grid">
       <div class="tracr-panel tracr-panel--major"><h3>METS-R Viz live stream</h3><div class="tracr-frame"><iframe id="metsr-viz-frame" src="{frame_url}" allow="local-network-access; clipboard-read; clipboard-write" referrerpolicy="no-referrer-when-downgrade"></iframe><div class="tracr-note">METS-R Viz URL carries map, stream, and vehicle selection: <code id="stream-url">{stream}</code> | <a id="viz-popout" href="{frame_url}" target="_blank" rel="noopener">open top-level</a></div><div class="tracr-note">{frame_status}</div><div id="stream-probe" class="tracr-note"></div></div></div>
-      <div class="tracr-panel tracr-panel--major"><h3>CARLA bird-eye tracking camera</h3><img id="camera" alt="CARLA bird-eye tracking camera"></div>
-      <div class="tracr-panel tracr-panel--major tracr-panel--bsm"><h3 id="bsm-panel-title">{bsm_panel_title}</h3><div id="bsm-layout" class="{bsm_layout_class}"><img id="bsm-map" alt="{bsm_panel_title}"{bsm_map_hidden}><div id="bsm-table"></div></div></div>
-      <div class="tracr-panel tracr-panel--minor"><h3>CARLA LiDAR</h3><img id="lidar" alt="CARLA LiDAR"></div>
-      <div class="tracr-panel tracr-panel--minor"><h3>CARLA vehicle camera</h3><img id="vehicle-camera" alt="CARLA vehicle camera"></div>
+      <div id="camera-panel" class="tracr-panel tracr-panel--major"><h3>CARLA bird-eye tracking camera</h3><img id="camera" alt="CARLA bird-eye tracking camera"></div>
+      <div id="bsm-panel" class="tracr-panel tracr-panel--major tracr-panel--bsm"{speedy_hidden}><h3 id="bsm-panel-title">{bsm_panel_title}</h3><div id="bsm-layout" class="{bsm_layout_class}"><img id="bsm-map" alt="{bsm_panel_title}"{bsm_map_hidden}><div id="bsm-table"></div></div></div>
+      <div id="lidar-panel" class="tracr-panel tracr-panel--minor"{speedy_hidden}><h3>CARLA LiDAR</h3><img id="lidar" alt="CARLA LiDAR"></div>
+      <div id="vehicle-camera-panel" class="tracr-panel tracr-panel--minor"{speedy_hidden}><h3>CARLA vehicle camera</h3><img id="vehicle-camera" alt="CARLA vehicle camera"></div>
     </div>
   </div>
   <script>
@@ -2632,9 +2641,16 @@ class TRACRDashboard:
             streamProbeNode.className = 'tracr-note';
           }}
         }}
+        const speedyMode = !!state.speedy_mode;
+        for (const id of ['vehicle-camera-panel', 'lidar-panel', 'bsm-panel']) {{
+          const node = document.getElementById(id);
+          if (node) node.hidden = speedyMode;
+        }}
         document.getElementById('camera').src = state.camera_png || '';
-        document.getElementById('vehicle-camera').src = state.vehicle_camera_png || '';
-        document.getElementById('lidar').src = state.lidar_png || '';
+        if (!speedyMode) {{
+          document.getElementById('vehicle-camera').src = state.vehicle_camera_png || '';
+          document.getElementById('lidar').src = state.lidar_png || '';
+        }}
         const bsmPanelTitle = document.getElementById('bsm-panel-title');
         if (bsmPanelTitle) bsmPanelTitle.textContent = state.bsm_panel_title || 'BSM stream';
         const showBsmMap = state.bsm_show_map !== false;
@@ -2642,10 +2658,10 @@ class TRACRDashboard:
         if (bsmLayout) bsmLayout.classList.toggle('bsm-layout--table-only', !showBsmMap);
         const bsmMap = document.getElementById('bsm-map');
         if (bsmMap) {{
-          bsmMap.hidden = !showBsmMap;
-          bsmMap.src = showBsmMap ? (state.bsm_map_png || '') : '';
+          bsmMap.hidden = speedyMode || !showBsmMap;
+          bsmMap.src = (!speedyMode && showBsmMap) ? (state.bsm_map_png || '') : '';
         }}
-        document.getElementById('bsm-table').innerHTML = state.bsm_table_html || '';
+        if (!speedyMode) document.getElementById('bsm-table').innerHTML = state.bsm_table_html || '';
       }} catch (error) {{
         console.debug('TRACR dashboard refresh failed', error);
       }}
@@ -2658,13 +2674,15 @@ class TRACRDashboard:
 """
 
     def _external_state(self):
+        speedy_mode = self._external_speedy_mode_enabled()
         return {
             "status": str(self._status_text),
+            "speedy_mode": speedy_mode,
             "camera_png": self._png_uri(self._camera_png),
-            "lidar_png": self._png_uri(self._lidar_png),
-            "vehicle_camera_png": self._png_uri(self._vehicle_camera_png),
-            "bsm_map_png": self._png_uri(self._bsm_map_png),
-            "bsm_table_html": self._bsm_table_html,
+            "lidar_png": "" if speedy_mode else self._png_uri(self._lidar_png),
+            "vehicle_camera_png": "" if speedy_mode else self._png_uri(self._vehicle_camera_png),
+            "bsm_map_png": "" if speedy_mode else self._png_uri(self._bsm_map_png),
+            "bsm_table_html": "" if speedy_mode else self._bsm_table_html,
             "stream_url": self.stream_url,
             "ego_vehicle_id": None if self.ego_vehicle_id is None else str(self.ego_vehicle_id),
             "metsr_vis_selected_vehicle_id": None if self._metsr_vis_selected_vehicle_id() is None else str(self._metsr_vis_selected_vehicle_id()),
@@ -2756,6 +2774,7 @@ class TRACRDashboard:
             self._refresh_plain_display()
         self._refresh_external_state(force=force_external)
     def update(self, runtime, step_result, bsm_records, render_info=None, render_error=None):
+        speedy_mode = self._external_speedy_mode_enabled()
         target_vehicle_id = None
         target_actor_id = None
         if runtime.sensor_panel is not None:
@@ -2772,14 +2791,19 @@ class TRACRDashboard:
             elif self.metsr_vis_highlight_vehicle_type is None:
                 self.metsr_vis_highlight_vehicle_type = selected_vehicle_type
         self._sync_metsr_vis_frame_url(force_external=selected_vehicle_type is not None)
-        ego_state = _runtime_vehicle_record(runtime, ego_vehicle_id)
-        bsm_display_records, bsm_view_mode = _filter_bsm_records_for_ego(
-            bsm_records,
-            ego_vehicle_id,
-            ego_only=self.bsm_ego_only,
-            broadcast_as_ego=str(getattr(runtime, "bsm_stream_source", "")).lower() == "kafka",
-            ego_state=ego_state,
-        )
+        if speedy_mode:
+            ego_state = None
+            bsm_display_records = []
+            bsm_view_mode = "speedy"
+        else:
+            ego_state = _runtime_vehicle_record(runtime, ego_vehicle_id)
+            bsm_display_records, bsm_view_mode = _filter_bsm_records_for_ego(
+                bsm_records,
+                ego_vehicle_id,
+                ego_only=self.bsm_ego_only,
+                broadcast_as_ego=str(getattr(runtime, "bsm_stream_source", "")).lower() == "kafka",
+                ego_state=ego_state,
+            )
 
         now = time.time()
         refresh_media = (
@@ -2790,56 +2814,61 @@ class TRACRDashboard:
             self.lidar_min_update_interval_s <= 0
             or now - self._lidar_last_update_time >= self.lidar_min_update_interval_s
         )
-        if refresh_media or refresh_lidar:
+        if refresh_media or (not speedy_mode and refresh_lidar):
             camera_png = self._camera_png
             lidar_png = self._lidar_png
             vehicle_camera_png = self._vehicle_camera_png
             if runtime.sensor_panel is not None:
                 if refresh_media:
                     camera_png = runtime.sensor_panel.camera_png()
-                    if getattr(runtime.sensor_panel, "vehicle_camera_enabled", False):
+                    if not speedy_mode and getattr(runtime.sensor_panel, "vehicle_camera_enabled", False):
                         vehicle_camera_fn = getattr(runtime.sensor_panel, "vehicle_camera_png", None)
                         if callable(vehicle_camera_fn):
                             vehicle_camera_png = vehicle_camera_fn()
-                if refresh_lidar:
+                if not speedy_mode and refresh_lidar:
                     lidar_png = runtime.sensor_panel.lidar_png()
-            source_label = getattr(runtime, "bsm_stream_label", self.bsm_stream_label)
-            self.bsm_stream_label = str(source_label or self.bsm_stream_label)
-            bsm_has_fields = bsm_records_have_display_fields(bsm_display_records)
-            if refresh_media and bsm_has_fields:
-                bsm_png = bsm_map_png(
-                    bsm_display_records,
-                    source_label=self.bsm_stream_label,
-                    ego_vehicle_id=ego_vehicle_id,
-                    ego_state=ego_state,
-                    ego_marker_records=bsm_records,
-                )
-                bsm_html = bsm_table_html(
-                    bsm_display_records,
-                    source_label=self.bsm_stream_label,
-                    ego_vehicle_id=ego_vehicle_id,
-                    total_records=len(bsm_records or []),
-                    view_mode=bsm_view_mode,
-                )
+
+            bsm_has_fields = False
+            if not speedy_mode:
+                source_label = getattr(runtime, "bsm_stream_label", self.bsm_stream_label)
+                self.bsm_stream_label = str(source_label or self.bsm_stream_label)
+                bsm_has_fields = bsm_records_have_display_fields(bsm_display_records)
+                if refresh_media and bsm_has_fields:
+                    bsm_png = bsm_map_png(
+                        bsm_display_records,
+                        source_label=self.bsm_stream_label,
+                        ego_vehicle_id=ego_vehicle_id,
+                        ego_state=ego_state,
+                        ego_marker_records=bsm_records,
+                    )
+                    bsm_html = bsm_table_html(
+                        bsm_display_records,
+                        source_label=self.bsm_stream_label,
+                        ego_vehicle_id=ego_vehicle_id,
+                        total_records=len(bsm_records or []),
+                        view_mode=bsm_view_mode,
+                    )
 
             if refresh_media:
                 self._camera_png = camera_png
-                self._vehicle_camera_png = vehicle_camera_png
-                if bsm_has_fields:
-                    self._bsm_map_png = bsm_png
-                    self._bsm_table_html = bsm_html
+                if not speedy_mode:
+                    self._vehicle_camera_png = vehicle_camera_png
+                    if bsm_has_fields:
+                        self._bsm_map_png = bsm_png
+                        self._bsm_table_html = bsm_html
                 self._media_last_update_time = now
-            if refresh_lidar:
+            if not speedy_mode and refresh_lidar:
                 self._lidar_png = lidar_png
                 self._lidar_last_update_time = now
             if self.widgets is not None:
                 if refresh_media:
                     self.camera_image.value = camera_png
-                    self.vehicle_camera_image.value = vehicle_camera_png
-                    if bsm_has_fields:
-                        self.bsm_map.value = bsm_png
-                        self.bsm_table.value = bsm_html
-                if refresh_lidar:
+                    if not speedy_mode:
+                        self.vehicle_camera_image.value = vehicle_camera_png
+                        if bsm_has_fields:
+                            self.bsm_map.value = bsm_png
+                            self.bsm_table.value = bsm_html
+                if not speedy_mode and refresh_lidar:
                     self.lidar_image.value = lidar_png
 
         state = step_result.get("state") if isinstance(step_result, dict) else None
@@ -2847,12 +2876,15 @@ class TRACRDashboard:
         if state is not None:
             carla_actors = len(state.active_vehicles) + len(state.display_vehicles)
         tick = getattr(runtime.metsr, "current_tick", None)
-        unique_bsm = bsm_unique_sender_count(bsm_display_records)
         configured_v2x = len(getattr(runtime, "v2x_vehicle_ids", []) or [])
-        source_label = getattr(runtime, "bsm_stream_label", self.bsm_stream_label)
-        message = f"tick={tick} | CARLA actors={carla_actors} | {source_label} ego BSM rows={len(bsm_display_records)}/{len(bsm_records or [])} | BSM emitters={unique_bsm}/{configured_v2x}"
-        if ego_vehicle_id is not None:
-            message += f" | BSM ego={ego_vehicle_id} view={bsm_view_mode}"
+        if speedy_mode:
+            message = f"tick={tick} | CARLA actors={carla_actors} | speedy external visualization"
+        else:
+            unique_bsm = bsm_unique_sender_count(bsm_display_records)
+            source_label = getattr(runtime, "bsm_stream_label", self.bsm_stream_label)
+            message = f"tick={tick} | CARLA actors={carla_actors} | {source_label} ego BSM rows={len(bsm_display_records)}/{len(bsm_records or [])} | BSM emitters={unique_bsm}/{configured_v2x}"
+            if ego_vehicle_id is not None:
+                message += f" | BSM ego={ego_vehicle_id} view={bsm_view_mode}"
         bsm_stream_error = step_result.get("bsm_stream_error", "") if isinstance(step_result, dict) else ""
         if bsm_stream_error:
             message += f" | BSM stream waiting: {bsm_stream_error}"
@@ -3066,6 +3098,7 @@ def launch_tracr_demo(
     projection_heading_smoothing=0.35,
     projection_z_offset=0.05,
     vehicle_camera_enabled=True,
+    lidar_enabled=True,
     random_seed=None,
 ):
     deps = _deps()
@@ -3165,6 +3198,7 @@ def launch_tracr_demo(
             deps["carla"],
             deps["destroy_carla_actor"],
             vehicle_camera_enabled=vehicle_camera_enabled,
+            lidar_enabled=lidar_enabled,
         )
         sensor_panel.spawn_overhead_camera(z=carla_camera_z)
 

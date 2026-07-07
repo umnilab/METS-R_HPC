@@ -4,6 +4,7 @@ import socket
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import shutil
@@ -601,6 +602,22 @@ def get_classpath2(options, includeBin=True, separator=":"):
 # Simulation launch helpers
 # ---------------------------------------------------------------------------
 
+def _shell_args(value):
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return shlex.split(value)
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _default_appcontainer_executable():
+    for candidate in ("apptainer", "singularity", "appcontainer"):
+        if shutil.which(candidate):
+            return candidate
+    return "apptainer"
+
 def run_simulations(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
@@ -693,6 +710,101 @@ def run_simulation_in_docker(options):
         # container_id = result.stdout.strip()
         os.chdir(cwd)
 
+
+def run_simulation_in_appcontainer(options):
+    """Launch METS-R SIM with an AppContainer/Apptainer-style runtime.
+
+    This mode starts only the METS-R Java simulator. Kafka/docker-compose
+    services are not available here, so Kafka-backed V2X examples should still
+    use Docker mode or an externally managed Kafka service.
+
+    Optional config/environment overrides:
+      - appcontainer_executable / METSR_APPCONTAINER_EXECUTABLE
+      - appcontainer_image / METSR_APPCONTAINER_IMAGE
+      - appcontainer_args / METSR_APPCONTAINER_ARGS
+      - appcontainer_bind_target / METSR_APPCONTAINER_BIND_TARGET
+      - appcontainer_command / METSR_APPCONTAINER_COMMAND
+    """
+    note = (
+        "NOTE: AppContainer mode starts only METS-R SIM; Kafka/docker-compose "
+        "services are not available in this mode."
+    )
+    if (
+        getattr(options, "verbose", False)
+        or getattr(options, "kafka_bootstrap_servers", None)
+        or getattr(options, "kafka_topics", None)
+    ):
+        print(note)
+
+    executable = (
+        getattr(options, "appcontainer_executable", None)
+        or os.environ.get("METSR_APPCONTAINER_EXECUTABLE")
+        or _default_appcontainer_executable()
+    )
+    image = (
+        getattr(options, "appcontainer_image", None)
+        or os.environ.get("METSR_APPCONTAINER_IMAGE")
+        or "docker://ennuilei/mets-r_sim"
+    )
+    runtime_args = _shell_args(
+        getattr(options, "appcontainer_args", None)
+        or os.environ.get("METSR_APPCONTAINER_ARGS")
+    )
+    bind_target = (
+        getattr(options, "appcontainer_bind_target", None)
+        or os.environ.get("METSR_APPCONTAINER_BIND_TARGET")
+        or "/home/test"
+    )
+    command_name = (
+        getattr(options, "appcontainer_command", None)
+        or os.environ.get("METSR_APPCONTAINER_COMMAND")
+        or "exec"
+    )
+
+    for i in range(0, options.num_simulations):
+        cwd = str(os.getcwd())
+        log_file = None
+        try:
+            os.chdir(options.sim_dirs[i])
+
+            sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
+                "-cp " + \
+                get_classpath2(options, False) + ' ' + \
+                "repast.simphony.batch.BatchMain " + \
+                "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
+                "-interactive " + options.sim_dir + "mets_r.rs"
+
+            appcontainer_command = [
+                executable,
+                command_name,
+                *runtime_args,
+                "--bind",
+                f"{os.getcwd()}:{bind_target}",
+                image,
+                "/bin/bash",
+                "-lc",
+                f"cd {shlex.quote(bind_target)} && {sim_command}",
+            ]
+
+            if getattr(options, "verbose", False):
+                process = subprocess.Popen(appcontainer_command)
+                print("AppContainer METS-R process ID:", process.pid)
+            else:
+                log_file = open("sim_{}.log".format(i), "a")
+                process = subprocess.Popen(
+                    appcontainer_command,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"AppContainer executable {executable!r} was not found. "
+                "Set options.appcontainer_executable or METSR_APPCONTAINER_EXECUTABLE."
+            ) from exc
+        finally:
+            if log_file is not None:
+                log_file.close()
+            os.chdir(cwd)
 
 def clear_all(patterns=None, docker_executable="docker", verbose=True, stop_servers=True):
     """Stop process-local METS-R helper servers and running METS-R Docker containers.
