@@ -819,6 +819,10 @@ class CORSRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(200, "ok")
         self.end_headers()
 
+    def log_message(self, format, *args):
+        """Suppress noisy dashboard polling access logs."""
+        return
+
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
