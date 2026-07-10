@@ -244,15 +244,15 @@ def _viz_origin_from_sim_folder(sim_folder):
     )
 
 
-def _viz_resolve_origin(sim_folder, initial_x=None, initial_y=None):
-    folder_origin = _viz_origin_from_sim_folder(sim_folder)
-    if folder_origin is not None:
-        if initial_x is None:
-            initial_x = folder_origin[0]
-        if initial_y is None:
-            initial_y = folder_origin[1]
+def _viz_resolve_origin(sim_folder, initial_x=0.0, initial_y=0.0):
+    initial_x = _viz_float(initial_x, default=0.0)
+    initial_y = _viz_float(initial_y, default=0.0)
+    if sim_folder and initial_x == 0.0 and initial_y == 0.0:
+        folder_origin = _viz_origin_from_sim_folder(sim_folder)
+        if folder_origin is not None:
+            return folder_origin
 
-    return _viz_float(initial_x, default=0.0), _viz_float(initial_y, default=0.0)
+    return initial_x, initial_y
 
 
 def _viz_manifest(road_id_dictionary, coord_scale, initial_x, initial_y, tick_interval,
@@ -755,7 +755,7 @@ class METSRClient:
             "max_connection_wait": max_connection_wait,
         }
 
-        self.sim_folder = sim_folder # this is required for open the visualization server
+        self.sim_folder = sim_folder # optional for live viz; used for origin fallback and offline trajectory lookup
         self.state = "connecting"
         self.timeout = timeout  # time out for resending the same message if no response
         self.verbose = verbose
@@ -4013,8 +4013,8 @@ class METSRClient:
             private_vehicle_ids=None,
             batch_size=1000,
             coord_scale=_VIZ_STREAM_DEFAULT_COORD_SCALE,
-            initial_x=None,
-            initial_y=None,
+            initial_x=0.0,
+            initial_y=0.0,
             link_snapshot_interval=1,
             road_id_dictionary=None,
             zone_dictionary=None,
@@ -4031,9 +4031,10 @@ class METSRClient:
         to each connected browser. Call :meth:`render` whenever you want to
         query METS-R and push a new frame into METSR_VIS.
 
-        If `initial_x` and `initial_y` are omitted, they are read from
-        `sim_folder/data/Data.properties` so the live stream uses the same
-        origin as the run config prepared for METS-R.
+        `sim_folder` is optional for live streaming. If `initial_x` and
+        `initial_y` are both 0 and `sim_folder` is available, they are read
+        from `sim_folder/data/Data.properties`; otherwise the provided origin
+        values are used as-is.
         """
         start_kwargs = {
             "server_port": server_port,

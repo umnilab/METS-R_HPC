@@ -8,7 +8,7 @@ contextily # for figures in tutorial notebooks
 pyproj
 ujson
 websockets
-
+networkx
 # Optional
 # kafka-python
 # adtk
