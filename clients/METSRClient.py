@@ -97,6 +97,7 @@ _VIZ_STREAM_FRAME_GROUPS = [
     "ev_occupied",
     "ev_relocation",
     "ev_charging",
+    "ev_attack",
     "bus",
     "link",
     "zone",
@@ -108,6 +109,7 @@ _VIZ_STREAM_VEHICLE_FRAME_GROUPS = [
     "ev_occupied",
     "ev_relocation",
     "ev_charging",
+    "ev_attack",
     "bus",
 ]
 _VIZ_STREAM_VEHICLE_TYPES = {
@@ -117,6 +119,7 @@ _VIZ_STREAM_VEHICLE_TYPES = {
     "ev_relocation": 3,
     "ev_charging": 4,
     "bus": 5,
+    "ev_attack": 6,
 }
 _INT32_MIN = -(2 ** 31)
 _INT32_MAX = 2 ** 31 - 1
@@ -347,12 +350,21 @@ def _viz_vehicle_group_key(record):
     vehicle_class = _viz_vehicle_class(record)
     state = _viz_vehicle_state(record)
     private_flag = _viz_first(record, "_viz_private_veh", default=None)
+    attack_flag = _viz_first(
+        record,
+        "_viz_attack_vehicle",
+        "isAttack",
+        "attackVehicle",
+        default=False,
+    )
 
     if vehicle_class == 0:
         return "vehicle"
     if vehicle_class == 2 or state == 3:
         return "bus"
     if vehicle_class == 1:
+        if bool(attack_flag):
+            return "ev_attack"
         if state == 4:
             return "ev_charging"
         if state == 1:
@@ -479,7 +491,7 @@ def _viz_vehicle_group_record_bytes(group_key, record, coord_scale, initial_x, i
         return _viz_vehicle_record_bytes(record, coord_scale, initial_x, initial_y)
     if group_key == "ev_private":
         return _viz_private_ev_record_bytes(record, coord_scale, initial_x, initial_y)
-    if group_key in ("ev_occupied", "ev_relocation", "ev_charging"):
+    if group_key in ("ev_occupied", "ev_relocation", "ev_charging", "ev_attack"):
         return _viz_etaxi_record_bytes(record, coord_scale, initial_x, initial_y)
     if group_key == "bus":
         return _viz_bus_record_bytes(record, coord_scale, initial_x, initial_y)
@@ -784,6 +796,7 @@ class METSRClient:
         self.viz_stream_chunk_counter = 0
         self.viz_stream_last_tick = None
         self.viz_stream_last_active_road_ids = set()
+        self._attack_vehicle_keys = set()
         self.offline_viz_start_kwargs = None
  
         # Track the tick of the corresponding simulator
@@ -2651,6 +2664,9 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_reachDest", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        with self.viz_stream_lock:
+            for veh_id, private_flag in zip(vehID, private_veh):
+                self._attack_vehicle_keys.discard((bool(private_flag), str(veh_id)))
         return res
     
     # control vehicle with specified acceleration  
@@ -2670,6 +2686,58 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_controlVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
+
+    def set_attack_vehicle(self, vehID, is_attack = True, private_veh = False):
+        """Mark electric taxi trip(s) for attack visualization.
+
+        The simulator accepts public electric taxis only. private_veh=False
+        therefore matches the normal use case; unsupported vehicle types are
+        reported with STATUS='KO' in the response DATA list. A successful
+        designation lasts for the taxi's current trip and is also cleared by
+        passing is_attack=False.
+
+        vehID, is_attack, and private_veh may be scalars or equal-length lists.
+        The generated request records contain the upstream API fields vehID,
+        vehType, and isAttack.
+        """
+        veh_ids = _as_list(vehID)
+        count = len(veh_ids)
+
+        def _field_values(value, name):
+            if _is_sequence(value):
+                values = list(value)
+                if len(values) != count:
+                    raise ValueError(f"{name} must have the same length as vehID")
+                return values
+            return [value] * count
+
+        attack_flags = _field_values(is_attack, "is_attack")
+        private_flags = _field_values(private_veh, "private_veh")
+        msg = {"TYPE": "CTRL_setAttackVehicle", "DATA": []}
+        for veh_id, private_flag, attack_flag in zip(
+                veh_ids, private_flags, attack_flags):
+            msg["DATA"].append({
+                "vehID": veh_id,
+                "vehType": bool(private_flag),
+                "isAttack": bool(attack_flag),
+            })
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_setAttackVehicle", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+
+        with self.viz_stream_lock:
+            for request, status in zip(msg["DATA"], res.get("DATA") or []):
+                if not isinstance(status, dict) or status.get("STATUS") != "OK":
+                    continue
+                key = (bool(request["vehType"]), str(request["vehID"]))
+                if request["isAttack"]:
+                    self._attack_vehicle_keys.add(key)
+                else:
+                    self._attack_vehicle_keys.discard(key)
+        return res
+
+    setAttackVehicle = set_attack_vehicle
     
     def update_vehicle_sensor_type(self, vehID, sensorType, private_veh = False):
         """Update vehicle sensor type used by V2X/DSRC data collection.
@@ -3545,6 +3613,9 @@ class METSRClient:
         assert res["TYPE"] == "CTRL_reset", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
 
+        with self.viz_stream_lock:
+            self._attack_vehicle_keys.clear()
+
         if "TICK" in res or "tick" in res:
             self.current_tick = int(res.get("TICK", res.get("tick")))
         else:
@@ -3644,6 +3715,8 @@ class METSRClient:
         self.current_tick = None
         self._remember_config(config_json_path, config_signature, config)
         self._connect(**self._connection_settings)
+        with self.viz_stream_lock:
+            self._attack_vehicle_keys.clear()
         self._restore_viz_state(live_kwargs, offline_kwargs)
 
     # reset the current simulation; restart the simulator if a different config json is supplied
@@ -3867,6 +3940,9 @@ class METSRClient:
                 False,
             )
 
+        automatic_fleet_query = not query_groups
+        public_fleet_keys = None
+
         if not query_groups:
             try:
                 fleet = self.query_on_road_vehicles(roadID=road_ids)
@@ -3888,12 +3964,26 @@ class METSRClient:
             if include_private:
                 add_query_group(fleet.get("private_vids") or [], True)
             if include_public:
-                add_query_group(fleet.get("public_vids") or [], False)
+                public_ids = fleet.get("public_vids") or []
+                add_query_group(public_ids, False)
+                public_fleet_keys = {
+                    (False, str(veh_id)) for veh_id in public_ids
+                }
+
+        if automatic_fleet_query and include_public:
+            with self.viz_stream_lock:
+                self._attack_vehicle_keys = {
+                    key
+                    for key in self._attack_vehicle_keys
+                    if key[0] or key in (public_fleet_keys or set())
+                }
 
         if not query_groups:
             return []
 
         records = []
+        with self.viz_stream_lock:
+            attack_vehicle_keys = set(self._attack_vehicle_keys)
         batch_size = max(1, int(batch_size or 1))
         for group_ids, private_flag in query_groups:
             for start in range(0, len(group_ids), batch_size):
@@ -3912,6 +4002,10 @@ class METSRClient:
                     if _viz_stream_record(record):
                         record = dict(record)
                         record["_viz_private_veh"] = bool(private_flag)
+                        record["_viz_attack_vehicle"] = (
+                            (bool(private_flag), str(_viz_vehicle_id(record)))
+                            in attack_vehicle_keys
+                        )
                         records.append(record)
         return records
 
