@@ -3,6 +3,7 @@ networkx
 shapely
 psutil
 seaborn
+Pillow  # fast dashboard image encoding
 geopandas
 contextily # for figures in tutorial notebooks
 pyproj

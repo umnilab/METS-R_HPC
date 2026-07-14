@@ -414,15 +414,68 @@ def first_present(record, *keys):
     return None
 
 
+@dataclass(frozen=True)
+class CarlaLidarFrame:
+    '''One immutable CARLA LiDAR callback, kept coherent for rendering.'''
+
+    points: np.ndarray
+    frame: object = None
+    timestamp: object = None
+    horizontal_angle: object = None
+    sensor_yaw_degrees: object = None
+
+
+def _set_carla_blueprint_attribute(blueprint, name, value):
+    '''Set a CARLA blueprint attribute when the running version supports it.'''
+
+    has_attribute = getattr(blueprint, 'has_attribute', None)
+    if callable(has_attribute):
+        try:
+            if not has_attribute(name):
+                return False
+        except (RuntimeError, TypeError, ValueError):
+            pass
+    try:
+        blueprint.set_attribute(name, str(value))
+        return True
+    except (RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _carla_world_fps(world, fallback=20.0):
+    '''Return synchronous CARLA FPS, falling back for asynchronous worlds.'''
+
+    try:
+        fixed_delta = float(world.get_settings().fixed_delta_seconds)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        fixed_delta = 0.0
+    if np.isfinite(fixed_delta) and fixed_delta > 0.0:
+        return 1.0 / fixed_delta
+    return float(fallback)
+
+
 class CarlaSensorPanel:
     """Owns CARLA demo sensors and keeps only the latest callback frame."""
 
-    def __init__(self, world, carla_module, destroy_actor_func, vehicle_camera_enabled=True, lidar_enabled=True):
+    def __init__(
+        self,
+        world,
+        carla_module,
+        destroy_actor_func,
+        vehicle_camera_enabled=True,
+        lidar_enabled=True,
+        lidar_render_mode="carla_3d",
+        lidar_max_points=60000,
+    ):
         self.world = world
         self.carla = carla_module
         self.destroy_actor = destroy_actor_func
         self.vehicle_camera_enabled = bool(vehicle_camera_enabled)
         self.lidar_enabled = bool(lidar_enabled)
+        self.lidar_render_mode = str(lidar_render_mode or "carla_3d")
+        self.lidar_max_points = max(1, int(lidar_max_points))
+        self.lidar_range = 100.0
+        self.lidar_attenuation_rate = 0.004
         self.camera_actor = None
         self.vehicle_camera_actor = None
         self.lidar_actor = None
@@ -438,6 +491,9 @@ class CarlaSensorPanel:
         self.latest_camera = None
         self.latest_vehicle_camera = None
         self.latest_lidar = None
+        self.latest_lidar_snapshot = None
+        self._lidar_png_cache_key = None
+        self._lidar_png_cache = None
         self.latest_camera_frame = None
         self.latest_vehicle_camera_frame = None
         self.latest_lidar_frame = None
@@ -537,19 +593,40 @@ class CarlaSensorPanel:
         parent_actor,
         z=2.0,
         lidar_range=100,
-        channels=64,
-        points_per_second=600000,
-        rotation_frequency=20,
+        channels=32,
+        points_per_second=300000,
+        rotation_frequency=None,
+        upper_fov=15.0,
+        lower_fov=-25.0,
+        atmosphere_attenuation_rate=0.004,
+        dropoff_general_rate=0.45,
+        dropoff_intensity_limit=0.8,
+        dropoff_zero_intensity=0.4,
+        noise_stddev=0.2,
+        sensor_tick=0.0,
     ):
         parent_id = getattr(parent_actor, "id", None)
         if parent_id is None:
             return None
+        resolved_rotation_frequency = (
+            _carla_world_fps(self.world)
+            if rotation_frequency is None
+            else float(rotation_frequency)
+        )
         settings = (
             float(z),
             float(lidar_range),
             int(channels),
             int(points_per_second),
-            float(rotation_frequency),
+            float(resolved_rotation_frequency),
+            float(upper_fov),
+            float(lower_fov),
+            float(atmosphere_attenuation_rate),
+            float(dropoff_general_rate),
+            float(dropoff_intensity_limit),
+            float(dropoff_zero_intensity),
+            float(noise_stddev),
+            float(sensor_tick),
         )
         if self.lidar_actor is not None and self.lidar_parent_id == parent_id:
             try:
@@ -563,17 +640,33 @@ class CarlaSensorPanel:
             self.lidar_parent_id = None
             self.lidar_settings = None
             self.latest_lidar = None
+            self.latest_lidar_snapshot = None
             self.latest_lidar_yaw = None
+            self._lidar_png_cache_key = None
+            self._lidar_png_cache = None
 
         blueprint = self.world.get_blueprint_library().find("sensor.lidar.ray_cast")
-        blueprint.set_attribute("range", str(lidar_range))
-        blueprint.set_attribute("channels", str(channels))
-        blueprint.set_attribute("points_per_second", str(points_per_second))
-        blueprint.set_attribute("rotation_frequency", str(rotation_frequency))
+        for name, value in (
+            ("range", lidar_range),
+            ("channels", channels),
+            ("points_per_second", points_per_second),
+            ("rotation_frequency", resolved_rotation_frequency),
+            ("upper_fov", upper_fov),
+            ("lower_fov", lower_fov),
+            ("atmosphere_attenuation_rate", atmosphere_attenuation_rate),
+            ("dropoff_general_rate", dropoff_general_rate),
+            ("dropoff_intensity_limit", dropoff_intensity_limit),
+            ("dropoff_zero_intensity", dropoff_zero_intensity),
+            ("noise_stddev", noise_stddev),
+            ("sensor_tick", sensor_tick),
+        ):
+            _set_carla_blueprint_attribute(blueprint, name, value)
         transform = self.carla.Transform(self.carla.Location(x=0.0, y=0.0, z=float(z)))
         self.lidar_actor = self.world.spawn_actor(blueprint, transform, attach_to=parent_actor)
         self.lidar_parent_id = parent_id
         self.lidar_settings = settings
+        self.lidar_range = float(lidar_range)
+        self.lidar_attenuation_rate = float(atmosphere_attenuation_rate)
         self.lidar_actor.listen(self._on_lidar)
         return self.lidar_actor
 
@@ -668,12 +761,35 @@ class CarlaSensorPanel:
         return image_array_to_png(self.latest_vehicle_camera)
 
     def lidar_png(self):
-        if self.latest_lidar is None or len(self.latest_lidar) == 0:
+        snapshot = self.latest_lidar_snapshot
+        if snapshot is None and self.latest_lidar is not None:
+            snapshot = CarlaLidarFrame(
+                points=self.latest_lidar,
+                frame=self.latest_lidar_frame,
+                sensor_yaw_degrees=self._latest_lidar_yaw_degrees(),
+            )
+        if snapshot is None or len(snapshot.points) == 0:
             return blank_png("Waiting for CARLA LiDAR")
-        return lidar_points_to_png(
-            self.latest_lidar,
-            sensor_yaw_degrees=self._latest_lidar_yaw_degrees(),
+        cache_key = (
+            id(snapshot),
+            self.lidar_render_mode,
+            self.lidar_max_points,
+            self.lidar_range,
+            self.lidar_attenuation_rate,
         )
+        if cache_key == self._lidar_png_cache_key and self._lidar_png_cache is not None:
+            return self._lidar_png_cache
+        png = lidar_points_to_png(
+            snapshot.points,
+            max_points=self.lidar_max_points,
+            sensor_yaw_degrees=snapshot.sensor_yaw_degrees,
+            lidar_range=self.lidar_range,
+            attenuation_rate=self.lidar_attenuation_rate,
+            render_mode=self.lidar_render_mode,
+        )
+        self._lidar_png_cache_key = cache_key
+        self._lidar_png_cache = png
+        return png
 
     def _latest_lidar_yaw_degrees(self):
         if self.latest_lidar_yaw is not None:
@@ -694,6 +810,11 @@ class CarlaSensorPanel:
         self.lidar_actor = None
         self.lidar_parent_id = None
         self.lidar_settings = None
+        self.latest_lidar = None
+        self.latest_lidar_frame = None
+        self.latest_lidar_snapshot = None
+        self._lidar_png_cache_key = None
+        self._lidar_png_cache = None
         self.latest_lidar_yaw = None
         self.vehicle_camera_parent_id = None
         self.target_actor_id = None
@@ -716,18 +837,31 @@ class CarlaSensorPanel:
 
     def _on_lidar(self, measurement):
         points = np.frombuffer(measurement.raw_data, dtype=np.float32)
-        if points.size == 0:
-            self.latest_lidar = np.empty((0, 4), dtype=np.float32)
+        usable_values = points.size - (points.size % 4)
+        if usable_values == 0:
+            point_array = np.empty((0, 4), dtype=np.float32)
         else:
-            self.latest_lidar = points.reshape((-1, 4)).copy()
-        self.latest_lidar_frame = measurement.frame
+            point_array = points[:usable_values].reshape((-1, 4)).copy()
+        point_array.setflags(write=False)
         transform = getattr(measurement, "transform", None)
         rotation = getattr(transform, "rotation", None)
         yaw = getattr(rotation, "yaw", None)
         try:
-            self.latest_lidar_yaw = None if yaw is None else float(yaw)
+            sensor_yaw = None if yaw is None else float(yaw)
         except (TypeError, ValueError):
-            self.latest_lidar_yaw = None
+            sensor_yaw = None
+        snapshot = CarlaLidarFrame(
+            points=point_array,
+            frame=getattr(measurement, "frame", None),
+            timestamp=getattr(measurement, "timestamp", None),
+            horizontal_angle=getattr(measurement, "horizontal_angle", None),
+            sensor_yaw_degrees=sensor_yaw,
+        )
+        self.latest_lidar_snapshot = snapshot
+        # Retain the original public fields for existing notebook code.
+        self.latest_lidar = snapshot.points
+        self.latest_lidar_frame = snapshot.frame
+        self.latest_lidar_yaw = snapshot.sensor_yaw_degrees
 
 
 def _rotate_lidar_xy_to_carla_world(xy, sensor_yaw_degrees):
@@ -748,143 +882,220 @@ def _rotate_lidar_xy_to_carla_world(xy, sensor_yaw_degrees):
     return rotated
 
 
-def _paint_lidar_background(width, height):
-    top = np.array([8, 13, 24], dtype=np.float32)
-    bottom = np.array([15, 23, 42], dtype=np.float32)
-    y = np.linspace(0.0, 1.0, int(height), dtype=np.float32)[:, None, None]
-    canvas = (top * (1.0 - y) + bottom * y).repeat(int(width), axis=1)
+def _carla_lidar_plasma_lut():
+    cached = getattr(_carla_lidar_plasma_lut, '_cached', None)
+    if cached is not None:
+        return cached
+    try:
+        import matplotlib
 
-    yy, xx = np.ogrid[:height, :width]
-    cx = width * 0.5
-    cy = height * 0.5
-    distance = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    grid_color = np.array([42, 55, 78], dtype=np.float32)
-    for radius in (0.18, 0.34, 0.50, 0.66, 0.82):
-        ring = np.abs(distance - radius * min(width, height) * 0.47) <= 0.7
-        canvas[ring] = canvas[ring] * 0.70 + grid_color * 0.30
+        colors = matplotlib.colormaps['plasma'](np.linspace(0.0, 1.0, 256))[:, :3]
+        lut = np.rint(colors * 255.0).astype(np.uint8)
+    except Exception:
+        # Compact fallback sampled from Matplotlib's plasma palette.
+        positions = np.linspace(0.0, 1.0, 8, dtype=np.float32)
+        anchors = np.array(
+            [
+                [13, 8, 135],
+                [75, 3, 161],
+                [125, 3, 168],
+                [168, 34, 150],
+                [203, 70, 121],
+                [229, 107, 93],
+                [248, 159, 58],
+                [240, 249, 33],
+            ],
+            dtype=np.float32,
+        )
+        samples = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        lut = np.stack(
+            [np.interp(samples, positions, anchors[:, channel]) for channel in range(3)],
+            axis=1,
+        ).astype(np.uint8)
+    setattr(_carla_lidar_plasma_lut, '_cached', lut)
+    return lut
 
-    grid_step = max(32, min(width, height) // 5)
-    center_x = int(cx)
-    center_y = int(cy)
-    canvas[:, center_x::grid_step] = canvas[:, center_x::grid_step] * 0.82 + grid_color * 0.18
-    canvas[:, center_x::-grid_step] = canvas[:, center_x::-grid_step] * 0.82 + grid_color * 0.18
-    canvas[center_y::grid_step, :] = canvas[center_y::grid_step, :] * 0.82 + grid_color * 0.18
-    canvas[center_y::-grid_step, :] = canvas[center_y::-grid_step, :] * 0.82 + grid_color * 0.18
-    canvas[center_y - 1 : center_y + 2, :] = canvas[center_y - 1 : center_y + 2, :] * 0.75 + grid_color * 0.25
-    canvas[:, center_x - 1 : center_x + 2] = canvas[:, center_x - 1 : center_x + 2] * 0.75 + grid_color * 0.25
+
+def _carla_lidar_intensity_colors(intensity, lidar_range=100.0, attenuation_rate=0.004):
+    intensity = np.asarray(intensity, dtype=np.float32)
+    safe_intensity = np.clip(intensity, 1e-6, 1.0)
+    attenuation_span = float(attenuation_rate) * max(float(lidar_range), 1e-6)
+    if np.isfinite(attenuation_span) and attenuation_span > 1e-6:
+        normalized = 1.0 + np.log(safe_intensity) / attenuation_span
+    else:
+        normalized = safe_intensity
+    indices = np.rint(np.clip(normalized, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return _carla_lidar_plasma_lut()[indices]
+
+
+def _prepare_lidar_points(points, lidar_range=100.0, max_points=60000):
+    points = np.asarray(points, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] < 3 or points.size == 0:
+        return np.empty((0, 4), dtype=np.float32)
+
+    xyz = points[:, :3]
+    finite = np.isfinite(xyz).all(axis=1)
+    if points.shape[1] > 3:
+        finite &= np.isfinite(points[:, 3])
+    points = points[finite]
+    if len(points) == 0:
+        return np.empty((0, 4), dtype=np.float32)
+
+    xyz = points[:, :3]
+    range_squared = max(float(lidar_range), 1e-6) ** 2
+    inside_range = np.einsum('ij,ij->i', xyz, xyz) <= range_squared
+    points = points[inside_range]
+    if len(points) == 0:
+        return np.empty((0, 4), dtype=np.float32)
+
+    if points.shape[1] == 3:
+        distance = np.linalg.norm(points[:, :3], axis=1)
+        inferred_intensity = np.exp(-0.004 * distance).astype(np.float32)
+        points = np.column_stack((points, inferred_intensity))
+    else:
+        points = points[:, :4]
+
+    max_points = max(1, int(max_points))
+    if len(points) > max_points:
+        indices = np.arange(max_points, dtype=np.int64) * len(points) // max_points
+        points = points[indices]
+    return np.ascontiguousarray(points, dtype=np.float32)
+
+
+def _carla_lidar_camera(width, height, lidar_range, vertical_fov_degrees=55.0):
+    key = (int(width), int(height), float(lidar_range), float(vertical_fov_degrees))
+    cache = getattr(_carla_lidar_camera, '_cache', {})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    lidar_range = max(float(lidar_range), 1e-6)
+    eye = np.array([-1.4 * lidar_range, 0.0, 0.8 * lidar_range], dtype=np.float32)
+    target = np.array([0.1 * lidar_range, 0.0, -0.3 * lidar_range], dtype=np.float32)
+    forward = target - eye
+    forward /= np.linalg.norm(forward)
+    right = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    up = np.cross(forward, right)
+    up /= np.linalg.norm(up)
+    basis = np.stack((right, up, forward), axis=0)
+    focal_pixels = 0.5 * float(height) / math.tan(math.radians(vertical_fov_degrees) * 0.5)
+    cached = (eye, basis, float(focal_pixels))
+    cache[key] = cached
+    setattr(_carla_lidar_camera, '_cache', cache)
+    return cached
+
+
+def _project_lidar_points(
+    xyz,
+    width,
+    height,
+    lidar_range=100.0,
+    render_mode='carla_3d',
+    sensor_yaw_degrees=None,
+):
+    xyz = np.asarray(xyz, dtype=np.float32)
+    mode = str(render_mode or 'carla_3d').strip().lower()
+    if mode in {'bev', 'top', 'top_down', 'bev_world', 'world_bev'}:
+        projected_xyz = xyz
+        if mode in {'bev_world', 'world_bev'}:
+            projected_xyz = xyz.copy()
+            projected_xyz[:, :2] = _rotate_lidar_xy_to_carla_world(
+                projected_xyz[:, :2], sensor_yaw_degrees
+            )
+        scale = 0.47 * min(int(width), int(height)) / max(float(lidar_range), 1e-6)
+        px = np.rint(float(width) * 0.5 + projected_xyz[:, 1] * scale).astype(np.int32)
+        py = np.rint(float(height) * 0.5 - projected_xyz[:, 0] * scale).astype(np.int32)
+        depth = -projected_xyz[:, 2]
+        visible = (
+            (px >= 0)
+            & (px < int(width))
+            & (py >= 0)
+            & (py < int(height))
+        )
+        return px, py, depth, visible
+
+    eye, basis, focal_pixels = _carla_lidar_camera(width, height, lidar_range)
+    camera_points = (xyz - eye) @ basis.T
+    depth = camera_points[:, 2]
+    in_front = depth > max(0.1, float(lidar_range) * 0.005)
+    safe_depth = np.where(in_front, depth, 1.0)
+    px = np.rint(float(width) * 0.5 + camera_points[:, 0] * focal_pixels / safe_depth).astype(np.int32)
+    py = np.rint(float(height) * 0.5 - camera_points[:, 1] * focal_pixels / safe_depth).astype(np.int32)
+    visible = (
+        in_front
+        & (px >= 0)
+        & (px < int(width))
+        & (py >= 0)
+        & (py < int(height))
+    )
+    return px, py, depth, visible
+
+
+def _render_lidar_array(
+    points,
+    max_points=60000,
+    width=704,
+    height=396,
+    sensor_yaw_degrees=None,
+    lidar_range=100.0,
+    attenuation_rate=0.004,
+    render_mode='carla_3d',
+):
+    width = max(1, int(width))
+    height = max(1, int(height))
+    canvas = np.empty((height, width, 3), dtype=np.uint8)
+    canvas[:] = (3, 5, 8)
+
+    prepared = _prepare_lidar_points(points, lidar_range=lidar_range, max_points=max_points)
+    if len(prepared) == 0:
+        return canvas
+
+    px, py, depth, visible = _project_lidar_points(
+        prepared[:, :3],
+        width,
+        height,
+        lidar_range=lidar_range,
+        render_mode=render_mode,
+        sensor_yaw_degrees=sensor_yaw_degrees,
+    )
+    if not np.any(visible):
+        return canvas
+
+    pixel_ids = py[visible].astype(np.int64) * width + px[visible]
+    visible_depth = depth[visible]
+    colors = _carla_lidar_intensity_colors(
+        prepared[visible, 3],
+        lidar_range=lidar_range,
+        attenuation_rate=attenuation_rate,
+    )
+    depth_buffer = np.full(width * height, np.inf, dtype=np.float32)
+    np.minimum.at(depth_buffer, pixel_ids, visible_depth)
+    winners = visible_depth <= depth_buffer[pixel_ids] + 1e-6
+    canvas.reshape((-1, 3))[pixel_ids[winners]] = colors[winners]
     return canvas
 
 
-def _paint_lidar_points(canvas, px, py, colors, width, height):
-    glow = np.zeros((height, width, 3), dtype=np.float32)
-    alpha = np.zeros((height, width), dtype=np.float32)
-    offsets = []
-    for dy in range(-3, 4):
-        for dx in range(-3, 4):
-            distance = math.hypot(dx, dy)
-            if distance <= 3.25:
-                offsets.append((dx, dy, math.exp(-(distance * distance) / 5.0)))
-
-    colors_f = colors.astype(np.float32, copy=False)
-    for dx, dy, weight in offsets:
-        xx = px + dx
-        yy = py + dy
-        valid = (xx >= 0) & (xx < width) & (yy >= 0) & (yy < height)
-        if not np.any(valid):
-            continue
-        yy_valid = yy[valid]
-        xx_valid = xx[valid]
-        np.maximum.at(alpha, (yy_valid, xx_valid), min(0.88, 0.18 + 0.62 * weight))
-        for channel in range(3):
-            np.maximum.at(
-                glow[:, :, channel],
-                (yy_valid, xx_valid),
-                colors_f[valid, channel] * (0.45 + 0.55 * weight),
-            )
-
-    alpha_3 = alpha[:, :, None]
-    styled = canvas * (1.0 - alpha_3) + glow * alpha_3
-    center_x = width // 2
-    center_y = height // 2
-    center_color = np.array([244, 63, 94], dtype=np.float32)
-    styled[center_y - 2 : center_y + 3, center_x - 10 : center_x + 11] = center_color
-    styled[center_y - 10 : center_y + 11, center_x - 2 : center_x + 3] = center_color
-    return np.clip(styled, 0, 255).astype(np.uint8)
-
-
-def _pil_lidar_png_from_array(array):
-    try:
-        from PIL import Image, ImageFilter
-
-        image = Image.fromarray(np.asarray(array, dtype=np.uint8))
-        image = image.filter(ImageFilter.UnsharpMask(radius=1.1, percent=110, threshold=3))
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG", compress_level=1)
-        return buffer.getvalue()
-    except Exception:
-        return None
-
-
-def lidar_points_to_png(points, max_points=60000, width=704, height=396, sensor_yaw_degrees=None):
-    points = np.asarray(points)
-    if points.size == 0:
-        return blank_png("Waiting for CARLA LiDAR")
-    if points.ndim != 2 or points.shape[1] < 2:
-        return blank_png("Waiting for CARLA LiDAR")
-    if len(points) > max_points:
-        step = max(1, len(points) // max_points)
-        points = points[::step]
-
-    xy = points[:, :2].astype(np.float32, copy=False)
-    finite = np.isfinite(xy).all(axis=1)
-    if not np.any(finite):
-        return blank_png("Waiting for CARLA LiDAR")
-    xy = xy[finite]
-    kept_points = points[finite]
-    xy = _rotate_lidar_xy_to_carla_world(xy, sensor_yaw_degrees)
-
-    radius = max(
-        abs(float(np.min(xy[:, 0]))),
-        abs(float(np.max(xy[:, 0]))),
-        abs(float(np.min(xy[:, 1]))),
-        abs(float(np.max(xy[:, 1]))),
-        1.0,
+def lidar_points_to_png(
+    points,
+    max_points=60000,
+    width=704,
+    height=396,
+    sensor_yaw_degrees=None,
+    lidar_range=100.0,
+    attenuation_rate=0.004,
+    render_mode='carla_3d',
+):
+    canvas = _render_lidar_array(
+        points,
+        max_points=max_points,
+        width=width,
+        height=height,
+        sensor_yaw_degrees=sensor_yaw_degrees,
+        lidar_range=lidar_range,
+        attenuation_rate=attenuation_rate,
+        render_mode=render_mode,
     )
-    scale = 0.47 * min(width, height) / radius
-    px = (width * 0.5 + xy[:, 0] * scale).astype(np.int32)
-    py = (height * 0.5 + xy[:, 1] * scale).astype(np.int32)
-    visible = (px >= 0) & (px < width) & (py >= 0) & (py < height)
-    if not np.any(visible):
-        return blank_png("Waiting for CARLA LiDAR")
-    px = px[visible]
-    py = py[visible]
-    kept_points = kept_points[visible]
-
-    if kept_points.shape[1] > 3:
-        intensity = kept_points[:, 3].astype(np.float32, copy=False)
-    else:
-        intensity = np.hypot(kept_points[:, 0], kept_points[:, 1]).astype(np.float32, copy=False)
-    finite_intensity = np.isfinite(intensity)
-    if np.any(finite_intensity):
-        low = float(np.percentile(intensity[finite_intensity], 5))
-        high = float(np.percentile(intensity[finite_intensity], 95))
-    else:
-        low, high = 0.0, 1.0
-    denom = max(high - low, 1e-6)
-    t = np.clip((intensity - low) / denom, 0.0, 1.0)
-
-    canvas = _paint_lidar_background(width, height)
-    colors = np.stack(
-        [
-            (35 + 220 * t).astype(np.uint8),
-            (205 + 45 * (1.0 - np.abs(t - 0.55))).clip(0, 255).astype(np.uint8),
-            (120 + 110 * (1.0 - t)).astype(np.uint8),
-        ],
-        axis=1,
-    )
-    canvas = _paint_lidar_points(canvas, px, py, colors, width, height)
-
-    png = _pil_lidar_png_from_array(canvas)
+    png = _pil_png_from_array(canvas)
     if png is not None:
         return png
 
@@ -892,7 +1103,7 @@ def lidar_points_to_png(points, max_points=60000, width=704, height=396, sensor_
 
     fig, ax = plt.subplots(figsize=(6.4, 3.6))
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-    ax.imshow(canvas, interpolation="bilinear", resample=True)
+    ax.imshow(canvas, interpolation="nearest")
     ax.set_axis_off()
     return fig_to_png(fig)
 
@@ -3727,188 +3938,6 @@ def _sync_tracr_road_context_vehicles(runtime, deps):
             info["destroyed"] += 1
     return info
 
-
-def _elapsed_ms(start):
-    return (time.perf_counter() - start) * 1000.0
-
-
-def _summarize_profile_samples(samples):
-    samples = [sample for sample in samples or [] if isinstance(sample, dict)]
-    if not samples:
-        return {}
-    keys = sorted({key for sample in samples for key in sample})
-    summary = {}
-    for key in keys:
-        values = np.asarray([sample[key] for sample in samples if key in sample], dtype=float)
-        if values.size == 0:
-            continue
-        summary[key] = {
-            "mean": float(values.mean()),
-            "p50": float(np.percentile(values, 50)),
-            "p95": float(np.percentile(values, 95)),
-            "max": float(values.max()),
-            "total": float(values.sum()),
-        }
-    return summary
-
-
-def _should_run_every(index, every, total_ticks=None):
-    every = max(1, int(every or 1))
-    if every <= 1:
-        return True
-    if total_ticks is not None and index == int(total_ticks) - 1:
-        return True
-    return index % every == 0
-
-
-def step_tracr_demo(
-    runtime,
-    dashboard=None,
-    render_wait_timeout=0,
-    profile=False,
-    render=True,
-    update_dashboard=True,
-    update_sensors=True,
-    poll_bsm=True,
-):
-    timings = {}
-    total_start = time.perf_counter()
-
-    start = time.perf_counter()
-    deps = _deps()
-    timings["deps"] = _elapsed_ms(start)
-
-    start = time.perf_counter()
-    if runtime.world is not None:
-        runtime.world.tick()
-    runtime.metsr.tick(wait_forever=True, poll_timeout=5)
-    step_result = {
-        "state": runtime.carla_state,
-        "vehicles": [],
-        "fleet_controlled": True,
-    }
-    timings["metsr_step"] = _elapsed_ms(start)
-
-    start = time.perf_counter()
-    projection_info = _sync_tracr_road_context_vehicles(runtime, deps)
-    timings["road_projection"] = _elapsed_ms(start)
-    step_result["tracr_projection"] = projection_info
-
-    start = time.perf_counter()
-    _keep_carla_projection_passive(runtime.carla_state, deps["carla"])
-    timings["passive_carla"] = _elapsed_ms(start)
-
-    if update_sensors and runtime.sensor_panel is not None:
-        start = time.perf_counter()
-        preferred_vehicle_ids = []
-        if projection_info.get("focus_vehicle") is not None:
-            preferred_vehicle_ids.append(projection_info.get("focus_vehicle"))
-        preferred_vehicle_ids.extend(getattr(runtime, "v2x_vehicle_ids", None) or [])
-        runtime.sensor_panel.ensure_sensors(
-            runtime.carla_state,
-            preferred_vehicle_ids=preferred_vehicle_ids,
-        )
-        timings["sensor_sync"] = _elapsed_ms(start)
-    else:
-        timings["sensor_sync"] = 0.0
-
-    start = time.perf_counter()
-    bsm_stream = getattr(runtime, "bsm_stream", None) or getattr(runtime, "kafka_processor", None)
-    bsm_records = list(getattr(runtime, "_tracr_last_bsm_records", []) or [])
-    if bsm_stream is not None and poll_bsm:
-        timeout_ms = int(getattr(runtime, "bsm_poll_timeout_ms", 1) or 1)
-        max_records = int(getattr(runtime, "bsm_max_records", 120) or 120)
-        try:
-            bsm_records = bsm_stream.process_bsm(runtime=runtime, timeout_ms=timeout_ms, max_records=max_records) or []
-        except TypeError:
-            bsm_records = bsm_stream.process_bsm(timeout_ms=timeout_ms, max_records=max_records) or []
-        setattr(runtime, "_tracr_last_bsm_records", list(bsm_records))
-    if getattr(bsm_stream, "last_error", ""):
-        step_result["bsm_stream_error"] = getattr(bsm_stream, "last_error", "")
-    timings["bsm_stream"] = _elapsed_ms(start) if poll_bsm else 0.0
-
-    render_info = None
-    render_error = None
-    if render:
-        start = time.perf_counter()
-        try:
-            render_info = runtime.metsr.render(client_wait_timeout=render_wait_timeout)
-            ego_vehicle_id = _runtime_ego_vehicle_id(runtime, step_result)
-            if isinstance(render_info, dict):
-                render_info["tracr_viz_selected_vehicle_id"] = ego_vehicle_id
-                ego_vehicle_type = _runtime_metsr_vis_vehicle_type(runtime, ego_vehicle_id)
-                if ego_vehicle_type is not None:
-                    render_info["tracr_viz_selected_vehicle_type"] = ego_vehicle_type
-        except Exception as exc:
-            render_error = str(exc).splitlines()[0]
-        timings["metsr_viz_render"] = _elapsed_ms(start)
-    else:
-        render_info = {"skipped": True}
-        timings["metsr_viz_render"] = 0.0
-
-    if dashboard is not None and update_dashboard:
-        start = time.perf_counter()
-        dashboard.update(runtime, step_result, bsm_records, render_info=render_info, render_error=render_error)
-        timings["dashboard_update"] = _elapsed_ms(start)
-    else:
-        timings["dashboard_update"] = 0.0
-
-    timings["total"] = _elapsed_ms(total_start)
-    result = {
-        "step_result": step_result,
-        "bsm_records": bsm_records,
-        "render_info": render_info,
-        "render_error": render_error,
-    }
-    if profile:
-        result["profile_ms"] = timings
-        step_result["profile_ms"] = timings
-    return result
-
-
-def run_tracr_demo(
-    runtime,
-    dashboard,
-    ticks=600,
-    sleep_s=0.0,
-    render_wait_timeout=0,
-    profile=False,
-    render_every=2,
-    dashboard_every=3,
-    sensor_every=1,
-    bsm_every=3,
-):
-    result = None
-    samples = []
-    ticks = int(ticks)
-    for tick_index in range(ticks):
-        result = step_tracr_demo(
-            runtime,
-            dashboard=dashboard,
-            render_wait_timeout=render_wait_timeout,
-            profile=profile,
-            render=_should_run_every(tick_index, render_every, ticks),
-            update_dashboard=_should_run_every(tick_index, dashboard_every, ticks),
-            update_sensors=_should_run_every(tick_index, sensor_every, ticks),
-            poll_bsm=_should_run_every(tick_index, bsm_every, ticks),
-        )
-        if profile and result and result.get("profile_ms"):
-            samples.append(result["profile_ms"])
-        if sleep_s:
-            time.sleep(float(sleep_s))
-    if profile and result is not None:
-        result = dict(result)
-        result["profile_samples"] = len(samples)
-        result["profile_summary_ms"] = _summarize_profile_samples(samples)
-    return result
-
-
-def benchmark_tracr_demo(runtime, dashboard=None, ticks=60, **kwargs):
-    kwargs.setdefault("render_every", 2)
-    kwargs.setdefault("dashboard_every", 3)
-    kwargs.setdefault("bsm_every", 3)
-    kwargs.setdefault("sensor_every", 1)
-    return run_tracr_demo(runtime, dashboard, ticks=ticks, profile=True, **kwargs)
 
 def _keep_carla_projection_passive(state, carla_module=None):
     if state is None:
