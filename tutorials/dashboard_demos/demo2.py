@@ -1253,6 +1253,18 @@ def compile_scenario(args: Args, scenic_module: Any, set_debugging_options: Any,
     return scenic_module.scenarioFromFile(path=args.scenic_file, model=args.scenic_model, mode2D=True, params=params)
 
 
+def generate_scene_for_run(scenario: Any, set_seed: Any, run_seed: int, run_name: Path) -> Any:
+    """Generate a reseeded scene without recompiling Scenic's cached road model."""
+    run_seed = int(run_seed)
+    params = getattr(scenario, "params", None)
+    if isinstance(params, dict):
+        params["seed"] = run_seed
+        if "run_name" in params:
+            params["run_name"] = str(run_name)
+    set_seed(run_seed)
+    return scenario.generate()
+
+
 def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Path] = None) -> Any:
     base_run_name = Path(run_name) if run_name is not None else run_data_base_path(args)
     metsr_output_path = None
@@ -1386,18 +1398,11 @@ def run(args: Args) -> int:
             print(f"Starting simulation number: {run_index} seed={run_seed}")
 
             try:
-                if run_index == 0:
-                    run_scenario = scenario
-                else:
-                    dashboard.update_run_status(run_number, "compiling")
-                    print(f"Compiling Scenic scenario for seed {run_seed}")
-                    run_scenario = compile_scenario(args, scenic, setDebuggingOptions, setSeed, run_seed)
-
                 dashboard.update_run_status(run_number, "running")
                 dashboard.set_status(f"Starting Scenic simulation {run_number}/{args.total_simulations}", run_state="running")
                 before_evlogs = snapshot_evlogs(args.output_root)
                 run_start = time.time()
-                scene, _ = run_scenario.generate()
+                scene, _ = generate_scene_for_run(scenario, setSeed, run_seed, run_base)
                 simulation = simulator.simulate(scene)
                 if not simulation:
                     raise RuntimeError(f"Scenic returned no simulation result for run {run_index}")
