@@ -81,6 +81,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--viz-stream-port", type=int, default=8767)
     parser.add_argument("--dashboard-dir", default=str(_DEFAULT_DASHBOARD_DIR))
     parser.add_argument("--dashboard-port", type=int, default=8897)
+    parser.add_argument(
+        "--carla-host",
+        default=None,
+        help=(
+            "CARLA server host override. When omitted under WSL with a Windows "
+            "CARLA executable, the Windows host address is detected automatically."
+        ),
+    )
     parser.add_argument("--carla-camera-z", type=float, default=85.0)
     parser.add_argument("--render-every", type=_positive_int, default=2)
     parser.add_argument("--dashboard-every", type=_positive_int, default=2)
@@ -103,6 +111,69 @@ def _resolve_repo_path(path: str) -> Path:
     if not candidate.is_absolute():
         candidate = _REPO_ROOT / candidate
     return candidate.resolve()
+
+
+def _wsl_windows_host() -> Optional[str]:
+    """Return the Windows-host gateway address when running inside WSL."""
+    if os.name != "posix":
+        return None
+
+    try:
+        kernel_release = Path("/proc/sys/kernel/osrelease").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        kernel_release = ""
+    if (
+        "microsoft" not in kernel_release.lower()
+        and "WSL_DISTRO_NAME" not in os.environ
+    ):
+        return None
+
+    try:
+        route_lines = Path("/proc/net/route").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for line in route_lines[1:]:
+        fields = line.split()
+        if len(fields) < 4 or fields[1] != "00000000":
+            continue
+        try:
+            gateway = int(fields[2], 16)
+            flags = int(fields[3], 16)
+        except ValueError:
+            continue
+        if not flags & 0x2:
+            continue
+        address = ".".join(
+            str((gateway >> (8 * index)) & 0xFF) for index in range(4)
+        )
+        if address != "0.0.0.0":
+            return address
+    return None
+
+
+def _configure_carla_host(config: Any, override: Optional[str]) -> None:
+    """Apply a CLI host override or route Windows CARLA through the WSL gateway."""
+    if override:
+        config.carla_host = str(override)
+        return
+
+    configured_host = str(getattr(config, "carla_host", "127.0.0.1"))
+    carla_dir = str(getattr(config, "carla_dir", ""))
+    uses_loopback = configured_host.lower() in {"127.0.0.1", "localhost", "::1"}
+    uses_windows_carla = carla_dir.lower().endswith(".exe")
+    if not (uses_loopback and uses_windows_carla):
+        return
+
+    windows_host = _wsl_windows_host()
+    if windows_host:
+        config.carla_host = windows_host
+        print(
+            f"WSL detected: using Windows host {windows_host} for CARLA "
+            f"instead of {configured_host}."
+        )
 
 
 def _camera_label(spec: Mapping[str, Any], index: int) -> str:
@@ -775,6 +846,7 @@ def run(args: argparse.Namespace) -> int:
     config.v2x = False
     config.display_all = False
     config.verbose = False
+    _configure_carla_host(config, args.carla_host)
 
     sim_dirs: List[str] = []
     traffic_manager = None
