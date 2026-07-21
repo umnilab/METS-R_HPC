@@ -59,6 +59,7 @@ class Args:
     increment_seed: bool = True
     total_simulations: int = 1
     address: str = "127.0.0.1"
+    carla_host: Optional[str] = None
     town: str = "Town06"
     map_locations: str = str(_DEFAULT_MAP_DIR)
     num_commuters: int = 5
@@ -68,6 +69,7 @@ class Args:
     metsr_host: str = "localhost"
     metsr_port: int = 4000
     carla_port: int = 2000
+    carla_timeout_s: float = 60.0
     output_root: str = str(_REPO_ROOT / "output")
     metsr_sim_dir: Optional[str] = None
     export_folder: str = str(_DEFAULT_EXPORT_DIR)
@@ -162,6 +164,48 @@ def resolve_metsr_sim_folder(args: Args) -> Optional[str]:
     return str((output_root / raw_path).resolve())
 
 
+def wsl_windows_host() -> Optional[str]:
+    """Return the Windows host address when running under WSL NAT."""
+    if os.name != "posix":
+        return None
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+    except OSError:
+        release = ""
+    if "microsoft" not in release.lower() and "WSL_DISTRO_NAME" not in os.environ:
+        return None
+
+    try:
+        route_lines = Path("/proc/net/route").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        route_lines = []
+    for line in route_lines[1:]:
+        columns = line.split()
+        if len(columns) < 4 or columns[1] != "00000000":
+            continue
+        try:
+            gateway = int(columns[2], 16)
+            flags = int(columns[3], 16)
+        except ValueError:
+            continue
+        if flags & 0x2:
+            address = ".".join(
+                str((gateway >> (8 * index)) & 0xFF) for index in range(4)
+            )
+            if address != "0.0.0.0":
+                return address
+
+    try:
+        resolv_lines = Path("/etc/resolv.conf").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in resolv_lines:
+        columns = line.split()
+        if len(columns) == 2 and columns[0] == "nameserver":
+            return columns[1]
+    return None
+
+
 def normalize_args(args: Args) -> Args:
     args.scenic_file = str(Path(args.scenic_file).expanduser().resolve())
     map_root = Path(args.map_locations).expanduser().resolve()
@@ -175,6 +219,19 @@ def normalize_args(args: Args) -> Args:
     map_dir = town_road_dir if town_road_dir.is_dir() else map_root
     args.opendrive_map = str(Path(args.opendrive_map).expanduser().resolve()) if args.opendrive_map else str(map_dir / f"{args.town}.xodr")
     args.sumo_map = str(Path(args.sumo_map).expanduser().resolve()) if args.sumo_map else str(map_dir / f"{args.town}.net.xml")
+    configured_host = str(args.carla_host or args.address)
+    if args.carla_host:
+        args.address = configured_host
+    elif configured_host.lower() in {"127.0.0.1", "localhost", "::1"}:
+        detected_host = wsl_windows_host()
+        if detected_host:
+            args.address = detected_host
+            print(
+                f"WSL detected: using Windows CARLA host {detected_host} "
+                f"instead of {configured_host}."
+            )
+    if float(args.carla_timeout_s) <= 0:
+        raise ValueError("--carla-timeout-s must be greater than zero")
     if args.metsr_sim_dir:
         args.metsr_sim_dir = resolve_metsr_sim_folder(args)
     return args
@@ -1276,6 +1333,7 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
         metsr_port=int(args.metsr_port),
         address=args.address,
         carla_port=int(args.carla_port),
+        timeout=float(args.carla_timeout_s),
         carla_map=args.town,
         xml_map=args.sumo_map,
         map_path=args.opendrive_map,

@@ -64,6 +64,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--verbosity", type=int, default=2)
     parser.add_argument("--seed", type=int, default=33)
     parser.add_argument("--address", default="127.0.0.1")
+    parser.add_argument(
+        "--carla-host",
+        default=None,
+        help=(
+            "CARLA server host override. In WSL NAT mode the Windows-host "
+            "gateway is detected automatically when this is omitted."
+        ),
+    )
     parser.add_argument("--town", default="Town06")
     parser.add_argument("--map-locations", default=str(_MAP_ROOT))
     parser.add_argument("--num-commuters", type=_positive_int, default=100)
@@ -96,6 +104,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--metsr-host", default="localhost")
     parser.add_argument("--metsr-port", type=int, default=4000)
     parser.add_argument("--carla-port", type=int, default=2000)
+    parser.add_argument("--carla-timeout-s", type=float, default=60.0)
     parser.add_argument("--metsr-sim-dir", default=None)
     parser.add_argument("--metsr-viz-port", type=int, default=8080)
     parser.add_argument("--viz-stream-host", default="0.0.0.0")
@@ -117,6 +126,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         args.scenic_file = args.scenic_file_arg
     if args.town != "Town06":
         parser.error("demo4 currently requires --town Town06")
+    configured_host = str(args.carla_host or args.address)
+    if args.carla_host:
+        args.address = configured_host
+    elif configured_host.lower() in {"127.0.0.1", "localhost", "::1"}:
+        detected_host = scenic_demo.wsl_windows_host()
+        if detected_host:
+            args.address = detected_host
+            print(
+                f"WSL detected: using Windows CARLA host {detected_host} "
+                f"instead of {configured_host}."
+            )
     if args.candidate_offset < 0:
         parser.error("--candidate-offset cannot be negative")
     if args.timestep <= 0 or args.metsr_client_timestep <= 0:
@@ -131,6 +151,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     if args.attack_red_dominance <= 1.0:
         parser.error("--attack-red-dominance must be greater than 1")
     positive = (
+        args.carla_timeout_s,
         args.attack_max_distance_m,
         args.attack_roi_scale,
         args.free_flow_speed_mps,
@@ -498,13 +519,13 @@ class Demo4Dashboard(pcla_demo.PCLADashboard):
         page = super()._external_page_html()
         page = re.sub(
             r"<title>.*?</title>",
-            "<title>TRACR Town06 Scenic ? PCLA stop-sign attack</title>",
+            "<title>TRACR Town06 Scenic + PCLA stop-sign attack</title>",
             page,
             count=1,
         )
         return re.sub(
             r"<h1>.*?</h1>",
-            "<h1>TRACR Town06 ? Scenic stop-sign search ? PCLA red?blue patch</h1>",
+            "<h1>TRACR Town06 | Scenic stop-sign search | PCLA red-to-blue patch</h1>",
             page,
             count=1,
         )
@@ -819,13 +840,13 @@ class RunRuntime:
             "target_id": self.spec.candidate.actor_id,
             "target_xyz": self.spec.candidate.location_text,
             "target_distance_m": (
-                "?" if tap is None or tap.last_target_distance_m is None
+                "n/a" if tap is None or tap.last_target_distance_m is None
                 else f"{tap.last_target_distance_m:.1f}"
             ),
             "patched_frames": 0 if tap is None else tap.frames_patched,
             "patched_pixels": 0 if tap is None else tap.pixels_patched,
             "ego_speed_kmh": f"{pcla_demo._speed_kmh(actor):.1f}",
-            "network_speed_kmh": "?" if avg_speed is None else f"{avg_speed * 3.6:.1f}",
+            "network_speed_kmh": "n/a" if avg_speed is None else f"{avg_speed * 3.6:.1f}",
             "network_delay_s": f"{self.stats.network_delay_s:.1f}",
             "queue_vehicle_s": f"{self.stats.queue_vehicle_s:.1f}",
             "congestion_score_s": f"{self.stats.congestion_score_s:.1f}",
@@ -842,11 +863,11 @@ class RunRuntime:
             self._update_camera(actor)
         if self.stats.steps % self.args.dashboard_every == 0:
             status = (
-                f"Scenic run {self.spec.run_number} ? {self.spec.phase} ? "
+                f"Scenic run {self.spec.run_number} | {self.spec.phase} | "
                 f"{self.spec.candidate.label}"
             )
             if self.render_error:
-                status += f" ? METS-R Viz waiting: {self.render_error}"
+                status += f" | METS-R Viz waiting: {self.render_error}"
             self.dashboard.publish(
                 status=status,
                 telemetry=self._telemetry(actor),
@@ -875,7 +896,7 @@ class RunRuntime:
             "patched_frames": 0 if tap is None else tap.frames_patched,
             "patched_pixels": 0 if tap is None else tap.pixels_patched,
             "minimum_target_distance_m": (
-                None if tap is None else tap.last_target_distance_m
+                None if tap is None else tap.minimum_target_distance_m
             ),
             "avg_network_speed_mps": self.stats.avg_network_speed_mps,
             "network_delay_s": self.stats.network_delay_s,
@@ -1001,7 +1022,7 @@ def best_result_text(rows: Sequence[Mapping[str, Any]], paired: bool) -> str:
     if not attacks:
         return "pending"
     best = max(attacks, key=lambda row: float(row["attack_delta_s"]))
-    label = "?" if paired else "score"
+    label = "delta" if paired else "score"
     return f"stop[{best['candidate_index']}] {label}={float(best['attack_delta_s']):.1f}s"
 
 
@@ -1012,6 +1033,7 @@ def _simulator_kwargs(args: argparse.Namespace, cls: Any, run_name: Path) -> Dic
         "metsr_port": args.metsr_port,
         "address": args.address,
         "carla_port": args.carla_port,
+        "timeout": args.carla_timeout_s,
         "carla_map": args.town,
         "xml_map": str(map_dir / f"{args.town}.net.xml"),
         "map_path": str(map_dir / f"{args.town}.xodr"),
@@ -1148,7 +1170,7 @@ def run(args: argparse.Namespace) -> int:
             _start_stream(simulator.metsr_client, args),
             args.open_browser,
         )
-        print(f"TRACR Scenic ? PCLA stop-sign dashboard: {dashboard.start()}")
+        print(f"TRACR Scenic + PCLA stop-sign dashboard: {dashboard.start()}")
         install_runtime_hook(simulator, holder)
         specs = _run_specs(candidates, args.seed, args.attack_only)
 
@@ -1181,8 +1203,8 @@ def run(args: argparse.Namespace) -> int:
             )
             dashboard.publish(
                 status=(
-                    f"Starting Scenic run {spec.run_number}/{len(specs)} ? "
-                    f"{spec.phase} ? {spec.candidate.label}"
+                    f"Starting Scenic run {spec.run_number}/{len(specs)} | "
+                    f"{spec.phase} | {spec.candidate.label}"
                 ),
                 telemetry={
                     "run": f"{spec.run_number}/{len(specs)}",
@@ -1252,7 +1274,7 @@ def run(args: argparse.Namespace) -> int:
             effect = "attack minus baseline" if paired else "attack score"
             dashboard.publish(
                 status=(
-                    f"Worst congestion: stop[{best['candidate_index']}] ? "
+                    f"Worst congestion: stop[{best['candidate_index']}] | "
                     f"{effect}={float(best['attack_delta_s']):.1f}s"
                 ),
                 telemetry={
