@@ -1,5 +1,5 @@
 """IP address for CARLA client communication"""
-param address = "10.0.0.122"
+param address = "169.233.199.10"
 """ Size of CoSim region in meters """
 param bubble_size = 100
 """ Map to be simulated """
@@ -20,9 +20,24 @@ param seed = 33
 param export_folder = localPath('../data_logs/CARLA_06/constant_flow')
 """ Target csv name for generated data"""
 param run_name = f"{globalParameters.export_folder}/vehs_{globalParameters.num_commuters}_simtime_{globalParameters.length}_seed_{globalParameters.seed}"
+"""Whether spawning should be allowed inside the ego's co-simulation bubble."""
+param allow_bubble_spawns = False
+"""PCLA agent name and optional route used by the ego behavior."""
+param pcla_agent = "simlingo_simlingo"
+param pcla_route = None
 
 model scenic.simulators.cosim.model
 
+import os
+import sys
+
+pcla_home = os.environ.get("PCLA_HOME")
+if pcla_home and pcla_home not in sys.path:
+    sys.path.append(pcla_home)
+
+from PCLA import PCLA
+from pcla_functions.route_maker import route_maker
+from pcla_functions.location_to_waypoint import location_to_waypoint
 
 behavior hard_break(attack_duration):
     """
@@ -75,7 +90,12 @@ scenario SpawnCar(veh_num):
             Spawns a new NPCCar on the road if the total target vehicles has not yet been generated
     """
     if veh_num < globalParameters.num_commuters:
-        veh = new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior()
+        if not globalParameters.allow_bubble_spawns:
+            target = simulation().objects[0]
+            spawn_region = workspace.network.drivableRegion.difference(target.bubble)
+            veh = new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior(), in spawn_region
+        else:
+            veh = new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior()
     terminate after 1 steps
 
 scenario ContinuousSpawn():
@@ -90,13 +110,36 @@ scenario ContinuousSpawn():
             do SpawnCar(n_vehicles)
             n_vehicles += 1
 
+
+behavior PCLAAgent(agentType=globalParameters.pcla_agent, route=globalParameters.pcla_route):
+    """
+        Drive the Scenic ego with a PCLA agent.
+
+        If no route is supplied, PCLA receives a route from the ego's current
+        location to a Scenic-sampled CARLA spawn point.
+    """
+    assert self.carlaActor
+
+    if route is None:
+        start_pos = self.carlaActor.get_transform().location
+        end_point = Uniform(*simulation().spawn_points).location
+        waypoints = location_to_waypoint(simulation().carla_client, start_pos, end_point)
+        route = localPath('../helpers/routes/ego_route.xml')
+        route_maker(waypoints, savePath=route)
+
+    self.pcla = PCLA(agentType, self.carlaActor, route, simulation().carla_client)
+
+    while True:
+        action = self.pcla.get_action()
+        take SetBrakeAction(action.brake), SetThrottleAction(action.throttle), SetSteerAction(action.steer)
+
 scenario Main():
     """
         Scenario Main:
             Generate an EgoCar with adversarial behavior, the continuously spawns NPC Cars
     """
     setup:
-        ego = new EgoCar with name "ego", with behavior DriveAvoidingCollisions()
+        ego = new EgoCar with name "ego", with behavior PCLAAgent()
         record {obj.name: obj.position for obj in (simulation().objects)} as all_positions
         record {obj.name: [obj.velocity.x, obj.velocity.y, obj.velocity.z] for obj in (simulation().objects)} as all_velocities
     compose:
