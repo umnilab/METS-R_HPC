@@ -12,6 +12,7 @@ run this script from the PCLA Conda environment after installing its weights.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import math
 import os
 import sys
@@ -544,6 +545,33 @@ class PCLACameraTap:
             self._interface.update_sensor = self._original_update
 
 
+def _validate_pcla_antlr_runtime() -> None:
+    """Fail early with the PCLA repair command for incompatible ANTLR installs."""
+    try:
+        runtime_version = importlib.metadata.version("antlr4-python3-runtime")
+    except importlib.metadata.PackageNotFoundError:
+        runtime_version = "not installed"
+
+    try:
+        # PCLA's Hydra/OmegaConf configuration imports a generated ANTLR parser.
+        # Import it here so a dependency mismatch is diagnosed before agent setup.
+        import omegaconf  # noqa: F401
+    except Exception as exc:
+        detail = str(exc).splitlines()[0]
+        if "Could not deserialize ATN" not in detail:
+            raise
+        repair = (
+            f'"{sys.executable}" -m pip install --force-reinstall '
+            "antlr4-python3-runtime==4.9.3"
+        )
+        raise RuntimeError(
+            "PCLA cannot load OmegaConf because its generated parser is "
+            "incompatible with the installed antlr4-python3-runtime "
+            f"({runtime_version}). PCLA pins version 4.9.3. Repair this "
+            f"Python environment with: {repair}"
+        ) from exc
+
+
 def _import_pcla(pcla_dir: Optional[str]) -> Any:
     if pcla_dir:
         root = Path(pcla_dir).expanduser().resolve()
@@ -551,6 +579,7 @@ def _import_pcla(pcla_dir: Optional[str]) -> Any:
             raise RuntimeError(f"--pcla-dir does not contain PCLA.py: {root}")
         if str(root) not in sys.path:
             sys.path.append(str(root))
+    _validate_pcla_antlr_runtime()
     try:
         import PCLA as pcla_module
     except ImportError as exc:

@@ -1,4 +1,4 @@
-"""Scenic search over Town06 stop-sign color patches with a PCLA ego.
+"""Scenic search over Town05 stop-sign color patches with a PCLA ego.
 
 Each selected stop sign is evaluated with the same Scenic seed in a baseline run
 and an attack run. The attack changes red pixels belonging to that one projected
@@ -18,6 +18,7 @@ import sys
 import threading
 import types
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -25,10 +26,10 @@ import numpy as np
 
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent.parent
-_SCENARIO = _REPO_ROOT / "scenic_exp" / "scenarios" / "town06_stop_sign_patch.scenic"
+_SCENARIO = _REPO_ROOT / "scenic_exp" / "scenarios" / "town05_stop_sign_patch.scenic"
 _MAP_ROOT = _REPO_ROOT / "data" / "CARLA"
 _DASHBOARD_DIR = _REPO_ROOT / "output" / "tracr_demo4_dashboard"
-_EXPORT_DIR = _REPO_ROOT / "scenic_exp" / "data_logs" / "CARLA_06" / "stop_sign_patch"
+_EXPORT_DIR = _REPO_ROOT / "scenic_exp" / "data_logs" / "CARLA_05" / "stop_sign_patch"
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -53,7 +54,7 @@ def _positive_int(value: str) -> int:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Use Scenic to compare Town06 stop-sign color-patch locations with "
+            "Use Scenic to compare Town05 stop-sign color-patch locations with "
             "a PCLA-controlled ego and a live TRACR dashboard."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -72,7 +73,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "gateway is detected automatically when this is omitted."
         ),
     )
-    parser.add_argument("--town", default="Town06")
+    parser.add_argument("--town", default="Town05")
     parser.add_argument("--map-locations", default=str(_MAP_ROOT))
     parser.add_argument("--num-commuters", type=_positive_int, default=100)
     parser.add_argument("--length", type=_positive_int, default=60)
@@ -84,10 +85,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--stop-sign-indices",
         default="",
-        help="Comma-separated indices from coordinate-sorted Town06 stop signs.",
+        help="Comma-separated indices from the printed, coordinate-sorted stop signs.",
     )
     parser.add_argument("--candidate-offset", type=int, default=0)
     parser.add_argument("--candidate-limit", type=_positive_int, default=3)
+    parser.add_argument(
+        "--approach-distance-m",
+        type=float,
+        default=35.0,
+        help="Place the Scenic/PCLA ego this far upstream of each selected stop.",
+    )
     parser.add_argument("--attack-only", action="store_true")
     parser.add_argument("--attack-max-distance-m", type=float, default=90.0)
     parser.add_argument("--attack-min-red", type=int, default=90)
@@ -124,8 +131,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.scenic_file_arg:
         args.scenic_file = args.scenic_file_arg
-    if args.town != "Town06":
-        parser.error("demo4 currently requires --town Town06")
     configured_host = str(args.carla_host or args.address)
     if args.carla_host:
         args.address = configured_host
@@ -156,6 +161,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         args.attack_roi_scale,
         args.free_flow_speed_mps,
         args.route_min_distance_m,
+        args.approach_distance_m,
     )
     if any(value <= 0 for value in positive):
         parser.error("attack, speed, and route distance values must be positive")
@@ -187,6 +193,11 @@ class StopSignCandidate:
     visual_location: Any
     visual_extent_m: float
     source: str
+    approach_transform: Any
+    approach_distance_m: float
+    same_road_distance_m: float
+    road_id: Optional[int]
+    route_is_junction: bool
 
     @property
     def location_text(self) -> str:
@@ -194,8 +205,19 @@ class StopSignCandidate:
         return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
 
     @property
+    def initial_location_text(self) -> str:
+        if self.approach_transform is None:
+            return "unavailable"
+        loc = self.approach_transform.location
+        return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
+
+    @property
     def label(self) -> str:
-        return f"stop[{self.index}] id={self.actor_id} {self.location_text}"
+        road = "?" if self.road_id is None else str(self.road_id)
+        return (
+            f"stop[{self.index}] road={road} id={self.actor_id} "
+            f"{self.location_text} start={self.approach_distance_m:.1f}m upstream"
+        )
 
 
 @dataclass(frozen=True)
@@ -234,7 +256,115 @@ def _environment_extent(obj: Any) -> float:
     return max((value for value in values if 0.05 <= value <= 5.0), default=0.65)
 
 
-def discover_stop_signs(world: Any, carla_module: Any) -> List[StopSignCandidate]:
+def _copy_location(location: Any, carla_module: Any) -> Any:
+    return carla_module.Location(
+        x=float(location.x), y=float(location.y), z=float(location.z)
+    )
+
+
+def _stop_trigger_location(actor: Any, carla_module: Any) -> Any:
+    """Return the world-space center of a stop actor's lane trigger."""
+    actor_location = actor.get_location()
+    volume_location = getattr(getattr(actor, "trigger_volume", None), "location", None)
+    transform = getattr(actor, "get_transform", lambda: None)()
+    if volume_location is None or transform is None:
+        return actor_location
+    route = _copy_location(volume_location, carla_module)
+    try:
+        transformed = transform.transform(route)
+        return route if transformed is None else transformed
+    except Exception:
+        return actor_location
+
+
+def _stop_waypoints(world_map: Any, actor: Any, route: Any) -> List[Any]:
+    waypoints: List[Any] = []
+    affected = getattr(actor, "get_affected_lane_waypoints", None)
+    if callable(affected):
+        try:
+            waypoints.extend(list(affected() or []))
+        except Exception:
+            pass
+    try:
+        projected = world_map.get_waypoint(route, project_to_road=True)
+    except Exception:
+        projected = None
+    if projected is not None:
+        waypoints.append(projected)
+    unique: Dict[Tuple[Any, ...], Any] = {}
+    for waypoint in waypoints:
+        transform = getattr(waypoint, "transform", None)
+        location = getattr(transform, "location", None)
+        if location is None:
+            continue
+        key = (
+            getattr(waypoint, "road_id", None),
+            getattr(waypoint, "section_id", None),
+            getattr(waypoint, "lane_id", None),
+            round(float(location.x), 2),
+            round(float(location.y), 2),
+        )
+        unique[key] = waypoint
+    return list(unique.values())
+
+
+def _find_stop_approach(
+    world_map: Any,
+    actor: Any,
+    route: Any,
+    requested_distance_m: float,
+) -> Tuple[Any, float, float, Optional[int], bool]:
+    """Find a driving waypoint upstream, favoring a long same-road lead-in."""
+    waypoints = _stop_waypoints(world_map, actor, route)
+    if not waypoints:
+        return None, 0.0, 0.0, None, False
+    route_waypoint = min(
+        waypoints,
+        key=lambda waypoint: _distance(waypoint.transform.location, route),
+    )
+    road_id = getattr(route_waypoint, "road_id", None)
+    is_junction = bool(getattr(route_waypoint, "is_junction", False))
+    distances: List[float] = []
+    distance = float(requested_distance_m)
+    while distance >= 5.0:
+        distances.append(distance)
+        distance -= 5.0
+    if not distances or not math.isclose(distances[-1], 5.0):
+        distances.append(5.0)
+
+    options: List[Tuple[float, float, float, Any]] = []
+    same_road_distance = 0.0
+    for waypoint in waypoints:
+        for requested in distances:
+            try:
+                previous = list(waypoint.previous(requested) or [])
+            except Exception:
+                previous = []
+            for upstream in previous:
+                transform = getattr(upstream, "transform", None)
+                location = getattr(transform, "location", None)
+                if location is None:
+                    continue
+                actual = _distance(route, location)
+                same_road = (
+                    actual if getattr(upstream, "road_id", None) == road_id else 0.0
+                )
+                same_road_distance = max(same_road_distance, same_road)
+                options.append((requested, same_road, actual, transform))
+    if not options:
+        return None, 0.0, same_road_distance, road_id, is_junction
+    _, _, actual, transform = max(
+        options,
+        key=lambda option: (option[0], option[1], option[2]),
+    )
+    return transform, actual, same_road_distance, road_id, is_junction
+
+
+def discover_stop_signs(
+    world: Any,
+    carla_module: Any,
+    approach_distance_m: float = 35.0,
+) -> List[StopSignCandidate]:
     try:
         actors = list(world.get_actors().filter("traffic.stop*"))
     except Exception:
@@ -258,9 +388,10 @@ def discover_stop_signs(world: Any, carla_module: Any) -> List[StopSignCandidate
     ]
     visual_pool = named_stops or sign_objects
 
-    raw: List[Tuple[str, Any, Any, float, str]] = []
+    world_map = world.get_map()
+    raw: List[Dict[str, Any]] = []
     for actor_id, actor in unique.items():
-        route = actor.get_location()
+        route = _stop_trigger_location(actor, carla_module)
         nearby = [
             (_distance(route, location), obj, location)
             for obj in visual_pool
@@ -272,30 +403,76 @@ def discover_stop_signs(world: Any, carla_module: Any) -> List[StopSignCandidate
             extent = _environment_extent(obj)
             source = f"traffic.stop + environment sign ({distance:.1f} m)"
         else:
+            actor_location = actor.get_location()
             visual = carla_module.Location(
-                x=float(route.x), y=float(route.y), z=float(route.z) + 2.25
+                x=float(actor_location.x),
+                y=float(actor_location.y),
+                z=float(actor_location.z) + 2.25,
             )
             extent = 0.65
-            source = "traffic.stop trigger"
-        raw.append((actor_id, route, visual, extent, source))
+            source = "traffic.stop actor"
+        approach, approach_distance, same_road_distance, road_id, is_junction = (
+            _find_stop_approach(world_map, actor, route, approach_distance_m)
+        )
+        raw.append(
+            {
+                "actor_id": actor_id,
+                "route": route,
+                "visual": visual,
+                "extent": extent,
+                "source": source,
+                "approach": approach,
+                "approach_distance": approach_distance,
+                "same_road_distance": same_road_distance,
+                "road_id": road_id,
+                "is_junction": is_junction,
+            }
+        )
 
     if not raw:
         for obj in named_stops:
             location = _environment_location(obj)
-            if location is not None:
-                raw.append(
-                    (
-                        str(getattr(obj, "id", len(raw))),
-                        location,
-                        location,
-                        _environment_extent(obj),
-                        "named CARLA environment stop sign",
-                    )
-                )
-    raw.sort(key=lambda row: (float(row[1].x), float(row[1].y), row[0]))
+            if location is None:
+                continue
+            approach, approach_distance, same_road_distance, road_id, is_junction = (
+                _find_stop_approach(world_map, obj, location, approach_distance_m)
+            )
+            raw.append(
+                {
+                    "actor_id": str(getattr(obj, "id", len(raw))),
+                    "route": location,
+                    "visual": location,
+                    "extent": _environment_extent(obj),
+                    "source": "named CARLA environment stop sign",
+                    "approach": approach,
+                    "approach_distance": approach_distance,
+                    "same_road_distance": same_road_distance,
+                    "road_id": road_id,
+                    "is_junction": is_junction,
+                }
+            )
+    raw.sort(
+        key=lambda row: (
+            float(row["route"].x),
+            float(row["route"].y),
+            row["actor_id"],
+        )
+    )
     return [
-        StopSignCandidate(index, actor_id, route, visual, extent, source)
-        for index, (actor_id, route, visual, extent, source) in enumerate(raw)
+        StopSignCandidate(
+            index=index,
+            actor_id=row["actor_id"],
+            route_location=row["route"],
+            visual_location=row["visual"],
+            visual_extent_m=row["extent"],
+            source=row["source"],
+            approach_transform=row["approach"],
+            approach_distance_m=row["approach_distance"],
+            same_road_distance_m=row["same_road_distance"],
+            road_id=row["road_id"],
+            route_is_junction=row["is_junction"],
+        )
+        for index, row in enumerate(raw)
     ]
 
 
@@ -306,9 +483,7 @@ def select_candidates(
     limit: int,
 ) -> List[StopSignCandidate]:
     if not candidates:
-        raise RuntimeError(
-            "Town06 exposed no traffic.stop actors or named stop-sign objects"
-        )
+        raise RuntimeError("The CARLA map exposed no modeled stop signs")
     if indices_text.strip():
         try:
             indices = [int(value.strip()) for value in indices_text.split(",") if value.strip()]
@@ -320,10 +495,30 @@ def select_candidates(
                 f"invalid stop-sign indices {invalid or indices}; valid range is "
                 f"[0, {len(candidates) - 1}]"
             )
-        return [candidates[index] for index in indices]
-    selected = list(candidates[offset : offset + limit])
+        selected = [candidates[index] for index in indices]
+    else:
+        ranked = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.approach_transform is None,
+                candidate.route_is_junction,
+                -candidate.same_road_distance_m,
+                -candidate.approach_distance_m,
+                candidate.index,
+            ),
+        )
+        selected = list(ranked[offset : offset + limit])
     if not selected:
         raise ValueError("the candidate offset/limit selected no stop signs")
+    missing = [
+        candidate.index
+        for candidate in selected
+        if candidate.approach_transform is None
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Could not find an upstream driving waypoint for stop signs {missing}"
+        )
     return selected
 
 
@@ -356,6 +551,55 @@ def _actor_transform_matrix(actor: Any) -> np.ndarray:
         float(loc.x), float(loc.y), float(loc.z),
         float(rot.roll), float(rot.pitch), float(rot.yaw),
     )
+
+
+def annotate_overhead_target(
+    rgb: np.ndarray,
+    camera_actor: Any,
+    target: Any,
+    fov: float = 80.0,
+) -> np.ndarray:
+    """Draw a cyan ring over the selected stop in the dashboard camera only."""
+    marked = np.array(rgb, copy=True)
+    if marked.ndim != 3 or marked.shape[2] < 3 or camera_actor is None:
+        return marked
+    try:
+        camera_from_world = np.linalg.inv(_actor_transform_matrix(camera_actor))
+        local = camera_from_world @ np.array(
+            [float(target.x), float(target.y), float(target.z), 1.0]
+        )
+    except Exception:
+        return marked
+    depth = float(local[0])
+    if depth <= 0.1:
+        return marked
+    height, width = marked.shape[:2]
+    focal = width / (2.0 * math.tan(math.radians(float(fov)) / 2.0))
+    center_x = int(round(width / 2.0 + focal * float(local[1]) / depth))
+    center_y = int(round(height / 2.0 - focal * float(local[2]) / depth))
+    if not (0 <= center_x < width and 0 <= center_y < height):
+        return marked
+
+    radius = 14
+    yy, xx = np.ogrid[:height, :width]
+    distance_sq = (xx - center_x) ** 2 + (yy - center_y) ** 2
+    ring = (distance_sq >= (radius - 2) ** 2) & (
+        distance_sq <= (radius + 2) ** 2
+    )
+    marked[ring, :3] = (0, 255, 255)
+    x0, x1 = max(0, center_x - radius - 6), min(width, center_x + radius + 7)
+    y0, y1 = max(0, center_y - radius - 6), min(height, center_y + radius + 7)
+    marked[max(0, center_y - 1) : min(height, center_y + 2), x0:x1, :3] = (
+        0,
+        255,
+        255,
+    )
+    marked[y0:y1, max(0, center_x - 1) : min(width, center_x + 2), :3] = (
+        0,
+        255,
+        255,
+    )
+    return marked
 
 
 def project_stop_sign(
@@ -514,21 +758,229 @@ class StopSignColorPatchTap:
         if getattr(self._interface, "update_sensor", None) is self._wrapped_update:
             self._interface.update_sensor = self._original_update
 
+
 class Demo4Dashboard(pcla_demo.PCLADashboard):
+    """PCLA dashboard with a live Scenic multi-run comparison table."""
+
+    _RUN_COLUMNS = (
+        ("run", "run"),
+        ("seed", "seed"),
+        ("phase", "phase"),
+        ("candidate_index", "stop"),
+        ("road_id", "road"),
+        ("status", "status"),
+        ("congestion_score_s", "score (s)"),
+        ("attack_delta_s", "delta (s)"),
+        ("rank", "rank"),
+        ("patched_frames", "patched"),
+    )
+
+    def __init__(
+        self,
+        directory: Path,
+        port: int,
+        viz_url: str,
+        stream_url: str,
+        open_browser: bool,
+        town: str,
+    ) -> None:
+        super().__init__(directory, port, viz_url, stream_url, open_browser)
+        self.town = str(town)
+        self.metsr_viz_map = scenic_demo.metsr_vis_map_for_town(self.town)
+        self._overhead_png = pcla_demo.blank_png(
+            f"Waiting for CARLA {self.town} traffic"
+        )
+        self._run_rows: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _run_value(key: str, value: Any) -> str:
+        if value in (None, ""):
+            return "n/a"
+        if key in {"congestion_score_s", "attack_delta_s"}:
+            try:
+                return f"{float(value):.1f}"
+            except (TypeError, ValueError):
+                pass
+        return str(value)
+
+    def _runs_table_html_locked(self) -> str:
+        if not self._run_rows:
+            return "<div class='runs-empty'>Waiting for Scenic run definitions...</div>"
+        header = "".join(
+            f"<th>{escape(label)}</th>" for _, label in self._RUN_COLUMNS
+        )
+        body = "".join(
+            "<tr class='scenic-run scenic-run--"
+            + re.sub(r"[^a-z0-9_-]", "-", str(row.get("status", "queued")).lower())
+            + "'>"
+            + "".join(
+                f"<td>{escape(self._run_value(key, row.get(key)))}</td>"
+                for key, _ in self._RUN_COLUMNS
+            )
+            + "</tr>"
+            for row in self._run_rows
+        )
+        return (
+            "<table class='scenic-runs-table'><thead><tr>"
+            f"{header}</tr></thead><tbody>{body}</tbody></table>"
+        )
+
+    def _update_run_locked(self, run_number: int, values: Mapping[str, Any]) -> None:
+        for row in self._run_rows:
+            if int(row.get("run", -1)) == int(run_number):
+                row.update(dict(values))
+                return
+        self._run_rows.append({"run": int(run_number), **dict(values)})
+
+    def configure_runs(self, specs: Sequence[RunSpec]) -> None:
+        with self._pcla_lock:
+            self._run_rows = [
+                {
+                    "run": spec.run_number,
+                    "seed": spec.seed,
+                    "phase": spec.phase,
+                    "candidate_index": spec.candidate.index,
+                    "road_id": spec.candidate.road_id,
+                    "status": "queued",
+                    "congestion_score_s": None,
+                    "attack_delta_s": None,
+                    "rank": None,
+                    "patched_frames": 0,
+                }
+                for spec in specs
+            ]
+        self._refresh_external_state(force=True)
+
+    def begin_run(self, spec: RunSpec) -> None:
+        with self._pcla_lock:
+            self._update_run_locked(spec.run_number, {"status": "running"})
+        self._refresh_external_state(force=True)
+
+    def update_results(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        with self._pcla_lock:
+            for row in rows:
+                run_number = int(row.get("run", 0) or 0)
+                if run_number > 0:
+                    self._update_run_locked(run_number, row)
+        self._refresh_external_state(force=True)
+
+    def _external_css(self) -> str:
+        return super()._external_css() + """
+          .pcla-sensors-panel {grid-column: span 8;}
+          .runs-panel {grid-column: span 4;}
+          #camera-grid {
+            flex: 1 1 auto;
+            min-height: 0;
+            padding: 6px;
+            overflow: auto;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+          }
+          #camera-grid .camera-panel {min-height: 145px;}
+          .camera-placeholder, .runs-empty {
+            height: 100%;
+            min-height: 80px;
+            display: grid;
+            place-items: center;
+            padding: 12px;
+            color: #94a3b8;
+            text-align: center;
+          }
+          #runs-table {flex: 1 1 auto; min-height: 0; overflow: auto;}
+          .scenic-runs-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 9.5px;
+            font-variant-numeric: tabular-nums;
+          }
+          .scenic-runs-table th, .scenic-runs-table td {
+            padding: 4px 5px;
+            border-bottom: 1px solid #303641;
+            text-align: left;
+            white-space: nowrap;
+          }
+          .scenic-runs-table th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            color: #bfdbfe;
+            background: #171b22;
+          }
+          .scenic-run--running td {background: #172554; color: #dbeafe;}
+          .scenic-run--finished td {background: #052e16; color: #dcfce7;}
+          .scenic-run--failed td, .scenic-run--interrupted td {
+            background: #450a0a;
+            color: #fee2e2;
+          }
+          @media (max-width: 900px) {
+            .pcla-sensors-panel, .runs-panel {grid-column: auto;}
+            #camera-grid {display: grid;}
+          }
+        """
+
     def _external_page_html(self) -> str:
         page = super()._external_page_html()
         page = re.sub(
             r"<title>.*?</title>",
-            "<title>TRACR Town06 Scenic + PCLA stop-sign attack</title>",
+            f"<title>TRACR {escape(self.town)} Scenic + PCLA stop-sign attack</title>",
             page,
             count=1,
         )
-        return re.sub(
+        page = re.sub(
             r"<h1>.*?</h1>",
-            "<h1>TRACR Town06 | Scenic stop-sign search | PCLA red-to-blue patch</h1>",
+            f"<h1>TRACR {escape(self.town)} | Scenic stop-sign search | PCLA red-to-blue patch</h1>",
             page,
             count=1,
         )
+        with self._pcla_lock:
+            runs_html = self._runs_table_html_locked()
+            overhead_uri = self._png_uri(self._overhead_png)
+        page = page.replace(
+            '<img id="overhead-camera" alt="CARLA ego tracking camera">',
+            '<img id="overhead-camera" alt="CARLA ego tracking camera" '
+            f'src="{overhead_uri}">',
+        )
+        page = page.replace(
+            "<h2>CARLA ego tracking camera</h2>",
+            "<h2>CARLA ego tracking camera (cyan marker = selected stop)</h2>",
+        )
+        page = page.replace(
+            '<div id="camera-grid"></div>',
+            """<section class="panel pcla-sensors-panel">
+        <h2>PCLA RGB sensor inputs</h2>
+        <div id="camera-grid"><div class="camera-placeholder" data-dashboard-placeholder>
+          Waiting for PCLA camera frames...
+        </div></div>
+      </section>
+      <section class="panel runs-panel">
+        <h2>Scenic multi-run congestion table</h2>
+        <div id="runs-table">""" + runs_html + """</div>
+      </section>""",
+        )
+        page = page.replace(
+            "const root = document.getElementById('camera-grid');",
+            "const root = document.getElementById('camera-grid');\n"
+            "      for (const node of root.querySelectorAll('[data-dashboard-placeholder]')) node.remove();",
+        )
+        page = page.replace(
+            "updateCameras(state.camera_views || []);",
+            "updateCameras(state.camera_views || []);\n"
+            "        const runsTable = document.getElementById('runs-table');\n"
+            "        if (runsTable && state.runs_table_html !== undefined) "
+            "runsTable.innerHTML = state.runs_table_html;",
+        )
+        page = page.replace(
+            "console.debug('TRACR PCLA dashboard refresh failed', error);",
+            "document.getElementById('status').textContent = "
+            "'Dashboard state unavailable: ' + String(error);\n"
+            "        console.debug('TRACR demo4 dashboard refresh failed', error);",
+        )
+        return page
+
+    def _external_state(self) -> Dict[str, Any]:
+        state = super()._external_state()
+        with self._pcla_lock:
+            state["runs_table_html"] = self._runs_table_html_locked()
+        return state
 
 
 def _call_route_maker(pcla_module: Any, waypoints: Sequence[Any], path: Path) -> None:
@@ -825,7 +1277,15 @@ class RunRuntime:
             state,
             preferred_vehicle_ids=[str(getattr(actor, "id", ""))],
         )
-        self.overhead_png = self.panel.camera_png()
+        latest = self.panel.latest_camera
+        camera_actor = self.panel.camera_actor
+        if latest is None:
+            self.overhead_png = self.panel.camera_png()
+        else:
+            marked = annotate_overhead_target(
+                latest, camera_actor, self.spec.candidate.visual_location
+            )
+            self.overhead_png = image_array_to_png(marked)
         if self.tap is not None:
             self.camera_views = self.tap.snapshots()
 
@@ -839,6 +1299,8 @@ class RunRuntime:
             "target_stop": self.spec.candidate.index,
             "target_id": self.spec.candidate.actor_id,
             "target_xyz": self.spec.candidate.location_text,
+            "target_road": self.spec.candidate.road_id,
+            "initial_xyz": self.spec.candidate.initial_location_text,
             "target_distance_m": (
                 "n/a" if tap is None or tap.last_target_distance_m is None
                 else f"{tap.last_target_distance_m:.1f}"
@@ -881,16 +1343,27 @@ class RunRuntime:
             return self.summary
         tap = self.tap
         candidate = self.spec.candidate
+        initial_transform = candidate.approach_transform
+        initial_location = initial_transform.location
+        initial_rotation = initial_transform.rotation
         self.summary = {
             "run": self.spec.run_number,
             "seed": self.spec.seed,
             "status": status,
             "candidate_index": candidate.index,
             "candidate_id": candidate.actor_id,
+            "road_id": candidate.road_id,
+            "approach_distance_m": candidate.approach_distance_m,
+            "same_road_distance_m": candidate.same_road_distance_m,
+            "initial_x": float(initial_location.x),
+            "initial_y": float(initial_location.y),
+            "initial_z": float(initial_location.z),
+            "initial_carla_yaw": float(initial_rotation.yaw),
+            "route_is_junction": candidate.route_is_junction,
+            "candidate_source": candidate.source,
             "target_x": float(candidate.route_location.x),
             "target_y": float(candidate.route_location.y),
             "target_z": float(candidate.route_location.z),
-            "candidate_source": candidate.source,
             "phase": self.spec.phase,
             "attack_enabled": self.spec.attack_enabled,
             "patched_frames": 0 if tap is None else tap.frames_patched,
@@ -930,45 +1403,86 @@ class RunRuntime:
             self.controller.close()
             self.controller = None
 
+
 class RuntimeHolder:
     def __init__(self) -> None:
         self.current: Optional[RunRuntime] = None
 
 
 def install_runtime_hook(simulator: Any, holder: RuntimeHolder) -> None:
-    original_create = simulator.createSimulation
+    """Install demo4 hooks before Scenic constructs and runs CosimSimulation."""
+    try:
+        from scenic.simulators.cosim import simulator as cosim_module
+        simulation_cls = getattr(cosim_module, "CosimSimulation", None)
+    except Exception:
+        simulation_cls = None
+    if simulation_cls is None:
+        raise RuntimeError("Could not find Scenic CosimSimulation for demo4 hooks")
 
-    def create_with_demo4(scene: Any, *args: Any, **kwargs: Any) -> Any:
-        simulation = original_create(scene, *args, **kwargs)
-        runtime = holder.current
-        if runtime is None:
-            raise RuntimeError("demo4 runtime was not configured before Scenic simulation")
-        runtime.attach(simulation)
-        original_step = simulation.step
-        original_destroy = simulation.destroy
+    patch_version = 1
+    if getattr(simulation_cls, "_tracr_demo4_patch_version", 0) < patch_version:
+        original_step = getattr(
+            simulation_cls, "_tracr_demo4_original_step", simulation_cls.step
+        )
+        original_destroy = getattr(
+            simulation_cls, "_tracr_demo4_original_destroy", simulation_cls.destroy
+        )
+        simulation_cls._tracr_demo4_original_step = original_step
+        simulation_cls._tracr_demo4_original_destroy = original_destroy
 
-        def step_with_demo4(self: Any, *step_args: Any, **step_kwargs: Any) -> Any:
+        def runtime_for(simulation: Any) -> Optional[RunRuntime]:
+            return getattr(simulation, "_tracr_demo4_runtime", None) or getattr(
+                type(simulation), "_tracr_demo4_pending_runtime", None
+            )
+
+        def step_with_demo4(self: Any, *args: Any, **kwargs: Any) -> Any:
+            runtime = runtime_for(self)
+            if runtime is None:
+                return original_step(self, *args, **kwargs)
+            if runtime.simulation is None:
+                runtime.attach(self)
             runtime.before_step()
-            result = original_step(*step_args, **step_kwargs)
+            result = original_step(self, *args, **kwargs)
             runtime.after_step()
             return result
 
-        def destroy_with_demo4(self: Any, *destroy_args: Any, **destroy_kwargs: Any) -> Any:
+        def destroy_with_demo4(self: Any, *args: Any, **kwargs: Any) -> Any:
+            runtime = runtime_for(self)
             try:
-                runtime.before_destroy()
+                return original_destroy(self, *args, **kwargs)
             finally:
-                return original_destroy(*destroy_args, **destroy_kwargs)
+                if runtime is not None:
+                    runtime.close()
 
-        simulation.step = types.MethodType(step_with_demo4, simulation)
-        simulation.destroy = types.MethodType(destroy_with_demo4, simulation)
-        return simulation
+        simulation_cls.step = step_with_demo4
+        simulation_cls.destroy = destroy_with_demo4
+        simulation_cls._tracr_demo4_patch_version = patch_version
+
+    original_create = simulator.createSimulation
+
+    def create_with_demo4(scene: Any, *args: Any, **kwargs: Any) -> Any:
+        runtime = holder.current
+        if runtime is None:
+            raise RuntimeError("demo4 runtime was not configured before Scenic simulation")
+        simulation_cls._tracr_demo4_pending_runtime = runtime
+        try:
+            simulation = original_create(scene, *args, **kwargs)
+            simulation._tracr_demo4_runtime = runtime
+            if runtime.simulation is None:
+                runtime.attach(simulation)
+            return simulation
+        finally:
+            if getattr(simulation_cls, "_tracr_demo4_pending_runtime", None) is runtime:
+                simulation_cls._tracr_demo4_pending_runtime = None
 
     simulator.createSimulation = create_with_demo4
 
 
 _RESULT_FIELDS = [
     "run", "seed", "status", "rank", "candidate_index", "candidate_id",
-    "target_x", "target_y", "target_z", "candidate_source", "phase",
+    "road_id", "route_is_junction", "target_x", "target_y", "target_z",
+    "initial_x", "initial_y", "initial_z", "initial_carla_yaw",
+    "approach_distance_m", "same_road_distance_m", "candidate_source", "phase",
     "attack_enabled", "patched_frames", "patched_pixels",
     "minimum_target_distance_m", "avg_network_speed_mps", "network_delay_s",
     "queue_vehicle_s", "ego_stopped_s", "congestion_score_s",
@@ -1050,11 +1564,27 @@ def _simulator_kwargs(args: argparse.Namespace, cls: Any, run_name: Path) -> Dic
     return kwargs
 
 
+def _scenic_initial_pose(candidate: StopSignCandidate) -> Dict[str, float]:
+    transform = candidate.approach_transform
+    if transform is None:
+        raise RuntimeError(f"No upstream initial pose is available for {candidate.label}")
+    location = transform.location
+    rotation = transform.rotation
+    heading = -math.radians(float(rotation.yaw) + 90.0)
+    heading = (heading + math.pi) % (2.0 * math.pi) - math.pi
+    return {
+        "initial_x": float(location.x),
+        "initial_y": -float(location.y),
+        "initial_heading": heading,
+    }
+
+
 def _compile_scenario(
     args: argparse.Namespace,
     scenic: Any,
     set_debugging_options: Any,
     set_seed: Any,
+    run_params: Optional[Mapping[str, Any]] = None,
 ) -> Any:
     set_debugging_options(verbosity=args.verbosity, fullBacktrace=False)
     set_seed(args.seed)
@@ -1073,7 +1603,12 @@ def _compile_scenario(
         "allow_bubble_spawns": args.allow_bubble_spawns,
         "attack_stop_index": 0,
         "attack_enabled": False,
+        "initial_x": 0.0,
+        "initial_y": 0.0,
+        "initial_heading": 0.0,
     }
+    if run_params:
+        params.update(dict(run_params))
     return scenic.scenarioFromFile(
         path=args.scenic_file,
         model=args.scenic_model,
@@ -1141,10 +1676,6 @@ def run(args: argparse.Namespace) -> int:
     simulator: Any = None
     dashboard: Optional[Demo4Dashboard] = None
     exit_code = 0
-    scenario = _compile_scenario(
-        args, scenic, setDebuggingOptions, setSeed
-    )
-
     try:
         simulator = CosimSimulator(
             **_simulator_kwargs(args, CosimSimulator, export_dir / "demo4_pending")
@@ -1152,6 +1683,7 @@ def run(args: argparse.Namespace) -> int:
         discovered = discover_stop_signs(
             simulator.world,
             RunRuntime._carla_module(),
+            args.approach_distance_m,
         )
         candidates = select_candidates(
             discovered,
@@ -1159,20 +1691,22 @@ def run(args: argparse.Namespace) -> int:
             args.candidate_offset,
             args.candidate_limit,
         )
-        print(f"Discovered {len(discovered)} Town06 stop signs.")
+        print(f"Discovered {len(discovered)} {args.town} stop signs.")
         for candidate in candidates:
             print(f"  selected {candidate.label} via {candidate.source}")
 
+        specs = _run_specs(candidates, args.seed, args.attack_only)
         dashboard = Demo4Dashboard(
             Path(args.dashboard_dir),
             args.dashboard_port,
             args.viz_url,
             _start_stream(simulator.metsr_client, args),
             args.open_browser,
+            args.town,
         )
+        dashboard.configure_runs(specs)
         print(f"TRACR Scenic + PCLA stop-sign dashboard: {dashboard.start()}")
         install_runtime_hook(simulator, holder)
-        specs = _run_specs(candidates, args.seed, args.attack_only)
 
         def best_provider() -> str:
             return best_result_text(rows, paired)
@@ -1182,16 +1716,18 @@ def run(args: argparse.Namespace) -> int:
                 export_dir
                 / f"stop_{spec.candidate.index}_{spec.phase}_seed_{spec.seed}_run_{spec.run_number}"
             )
-            params = getattr(scenario, "params", None)
-            if isinstance(params, dict):
-                params.update(
-                    {
-                        "seed": spec.seed,
-                        "attack_stop_index": spec.candidate.index,
-                        "attack_enabled": spec.attack_enabled,
-                        "run_name": str(run_base),
-                    }
-                )
+            run_params: Dict[str, Any] = _scenic_initial_pose(spec.candidate)
+            run_params.update(
+                {
+                    "seed": spec.seed,
+                    "attack_stop_index": spec.candidate.index,
+                    "attack_enabled": spec.attack_enabled,
+                    "run_name": str(run_base),
+                }
+            )
+            scenario = _compile_scenario(
+                args, scenic, setDebuggingOptions, setSeed, run_params
+            )
             setSeed(spec.seed)
             scene, _ = scenario.generate()
             simulator.run_name = str(run_base)
@@ -1201,6 +1737,7 @@ def run(args: argparse.Namespace) -> int:
                 f"Starting run {spec.run_number}/{len(specs)}: {spec.phase}, "
                 f"{spec.candidate.label}, seed={spec.seed}"
             )
+            dashboard.begin_run(spec)
             dashboard.publish(
                 status=(
                     f"Starting Scenic run {spec.run_number}/{len(specs)} | "
@@ -1262,6 +1799,7 @@ def run(args: argparse.Namespace) -> int:
                 holder.current = None
                 update_rankings(rows, paired)
                 write_results(result_path, rows)
+                dashboard.update_results(rows)
 
         attacks = [
             row for row in rows
