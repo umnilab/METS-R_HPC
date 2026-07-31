@@ -785,19 +785,28 @@ class KafkaDataProcessor:
 
         try:
             from kafka import KafkaConsumer
+            from kafka.errors import NoBrokersAvailable
         except ImportError as exc:
             raise ImportError(
                 "KafkaDataProcessor requires the optional 'kafka-python' package. "
                 "Install it with `pip install kafka-python` before consuming Kafka streams."
             ) from exc
 
-        self.consumer = KafkaConsumer(
-            bootstrap_servers=self.bootstrap_servers,
-            auto_offset_reset=_config_get(config, "kafka_auto_offset_reset", "earliest"),
-            enable_auto_commit=bool(_config_get(config, "kafka_enable_auto_commit", True)),
-            group_id=_config_get(config, "kafka_group_id", None),
-            value_deserializer=_json_deserialize,
-        )
+        try:
+            self.consumer = KafkaConsumer(
+                bootstrap_servers=self.bootstrap_servers,
+                auto_offset_reset=_config_get(config, "kafka_auto_offset_reset", "earliest"),
+                enable_auto_commit=bool(_config_get(config, "kafka_enable_auto_commit", True)),
+                group_id=_config_get(config, "kafka_group_id", None),
+                value_deserializer=_json_deserialize,
+            )
+        except NoBrokersAvailable as exc:
+            raise ConnectionError(
+                f"Kafka broker at {self.bootstrap_servers!r} is unavailable. "
+                "Start it with `start_kafka(config)` from `utils.util`, or run "
+                "`docker compose -f docker/docker-compose.yml up -d "
+                "zookeeper kafka init-kafka`, then retry."
+            ) from exc
         self.consumer.subscribe(self.topics)
 
     def process(

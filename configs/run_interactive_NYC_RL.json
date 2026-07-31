@@ -1,0 +1,16 @@
+{
+      "parent_config": "run_interactive_NYC.json",
+      "v2x": false,
+      "enable_data_collection": false,
+      "enable_aggregate_write": false,
+      "json_output": false,
+      "enable_trajectory_binary_write": false,
+      "enable_metrics_display": false,
+      "debug_network": false,
+      "rh_demand_factor": 0.0,
+      "num_etaxi": 0,
+      "num_ebus": 0,
+      "dispatching_controlled_by_control_apis": true,
+      "repositioning_controlled_by_control_apis": true,
+      "charging_controlled_by_control_apis": true
+}

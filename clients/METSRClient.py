@@ -1,10 +1,16 @@
+import gzip
+import hashlib
 import json
 import logging
+import math
 import os
+import posixpath
 import socket
 import struct
+import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime
 
 import networkx as nx
@@ -732,6 +738,10 @@ class METSRClient:
     SENSOR_CV2X = VEHICLE_SENSOR_CV2X
     SENSOR_MOBILE_DEVICE = VEHICLE_SENSOR_MOBILE_DEVICE
     VEHICLE_SENSOR_TYPES = VEHICLE_SENSOR_TYPES
+    _ROUTING_TOPOLOGY_SCHEMA_VERSION = 1
+    _ROUTING_TOPOLOGY_CACHE_LOCK = threading.Lock()
+    _ROUTING_TOPOLOGY_MEMORY_CACHE = {}
+    _NETWORK_SHA256_CACHE = {}
 
     def __init__(
             self,
@@ -760,6 +770,18 @@ class METSRClient:
         self.config_signature = _config_signature_from_path(self.config_json)
         self.config = config
         self.sim_index = int(sim_index)
+        if config is not None:
+            try:
+                self._client_config_values = dict(vars(config))
+            except TypeError:
+                self._client_config_values = {}
+        elif self.config_signature:
+            try:
+                self._client_config_values = json.loads(self.config_signature)
+            except (TypeError, ValueError):
+                self._client_config_values = {}
+        else:
+            self._client_config_values = {}
         self._connection_settings = {
             "max_connection_attempts": max_connection_attempts,
             "connection_retry_interval": connection_retry_interval,
@@ -772,6 +794,35 @@ class METSRClient:
         self.timeout = timeout  # time out for resending the same message if no response
         self.verbose = verbose
         self._messagesLog = []
+        self._last_fatal_log_check = float("-inf")
+        self._cached_fatal_log_error = None
+        self._last_response_bytes = 0
+        self._capabilities_cache = None
+        self._optimized_api_available = None
+        self._feature_support = {}
+        self._legacy_command_results = {}
+        self._profile_lock = threading.Lock()
+        self.rpc_profile = {
+            "rpc_count": 0,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "json_encode_time": 0.0,
+            "json_decode_time": 0.0,
+            "socket_wait_time": 0.0,
+            "server_tick_time": 0.0,
+            "server_ticks": 0,
+        }
+        # Readable alias for dashboards and lightweight experiment loggers.
+        self.profiling = self.rpc_profile
+        self.startup_timings = {
+            "connection_seconds": None,
+            "network_load_seconds": None,
+            "fleet_spawn_seconds": None,
+        }
+        self.websocket_max_size = max(
+            1024,
+            int(self._client_config_value("websocket_max_size", 10 * 1024 * 1024)),
+        )
 
         # a pointer to the manager, for HPC usage that one manager controls multiple clients
         self.manager = manager
@@ -804,6 +855,7 @@ class METSRClient:
 
         # Establish connection
         connection_start = time.time()
+        connection_profile_start = time.perf_counter()
         max_connection_wait = (
             max_connection_wait
             if max_connection_wait is not None
@@ -814,7 +866,7 @@ class METSRClient:
             try:
                 self.ws = connect(
                     self.uri,
-                    max_size = 10 * 1024 * 1024,
+                    max_size = self.websocket_max_size,
                     ping_interval = None,
                     ping_timeout = None,
                     open_timeout = connection_open_timeout,
@@ -847,9 +899,125 @@ class METSRClient:
         # Ensure server is initialized by waiting to receive an initial packet
         # (could be ANS_ready or a heartbeat)
         self.receive_msg(ignore_heartbeats=False, return_ready=True)
+        self.startup_timings["connection_seconds"] = (
+            time.perf_counter() - connection_profile_start
+        )
+        self.startup_timings.update(self._simulator_startup_log_timings())
+        self._record_launcher_startup_timings()
 
         self.lock = threading.Lock()
         register_metsr_client(self)
+
+    def _client_config_value(self, name, default=None):
+        if self.config is not None:
+            value = getattr(self.config, name, None)
+            if value is not None:
+                return value
+        value = self._client_config_values.get(name)
+        return default if value is None else value
+
+    def _configured_sim_step_size(self):
+        configured = self._client_config_value("sim_step_size", None)
+        if configured is not None:
+            value = float(configured)
+        else:
+            value = None
+            candidates = []
+            if self.sim_folder:
+                candidates.extend((
+                    os.path.join(self.sim_folder, "data", "Data.properties"),
+                    os.path.join(self.sim_folder, "Data.properties"),
+                ))
+            for properties_path in candidates:
+                try:
+                    with open(properties_path, "r", encoding="utf-8") as properties:
+                        for line in properties:
+                            key, separator, raw_value = line.partition("=")
+                            if separator and key.strip() == "SIMULATION_STEP_SIZE":
+                                value = float(raw_value.strip())
+                                break
+                except (OSError, TypeError, ValueError):
+                    continue
+                if value is not None:
+                    break
+        if value is None:
+            raise RuntimeError(
+                "Simulation step size is unavailable; pass config/config_json "
+                "with sim_step_size or provide sim_folder/data/Data.properties"
+            )
+        if value <= 0.0:
+            raise ValueError("sim_step_size must be positive")
+        return value
+
+    def _simulator_startup_log_timings(self):
+        timings = {
+            "network_load_seconds": None,
+            "fleet_spawn_seconds": None,
+        }
+        if not self.sim_folder:
+            return timings
+        log_path = os.path.join(self.sim_folder, "logs", "mets_r.log")
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+                lines = log_file.readlines()
+        except OSError:
+            return timings
+
+        build_ms = None
+        vehicle_ms = None
+        fleet_end_ms = None
+        for line in lines:
+            first_token = line.lstrip().split(None, 1)
+            if not first_token:
+                continue
+            token = first_token[0].strip("[]")
+            if not token.isdigit():
+                continue
+            relative_ms = int(token)
+            if "Building subcontexts" in line:
+                build_ms = relative_ms
+                vehicle_ms = None
+                fleet_end_ms = None
+            elif build_ms is not None and "VehicleContext creation" in line:
+                vehicle_ms = relative_ms
+            elif vehicle_ms is not None and "Total EV taxis generated" in line:
+                fleet_end_ms = relative_ms
+            elif vehicle_ms is not None and "Total EV buses generated" in line:
+                fleet_end_ms = relative_ms
+
+        if build_ms is not None and vehicle_ms is not None and vehicle_ms >= build_ms:
+            timings["network_load_seconds"] = (vehicle_ms - build_ms) / 1000.0
+        if vehicle_ms is not None and fleet_end_ms is not None and fleet_end_ms >= vehicle_ms:
+            timings["fleet_spawn_seconds"] = (fleet_end_ms - vehicle_ms) / 1000.0
+        return timings
+
+    def _record_launcher_startup_timings(self):
+        handles = getattr(self.config, "launch_handles", None) if self.config else None
+        if not handles:
+            return
+        try:
+            handle = handles[self.sim_index]
+        except (IndexError, KeyError, TypeError):
+            return
+        recorder = getattr(handle, "record_timing", None)
+        if not callable(recorder):
+            return
+        existing_timings = getattr(handle, "_timings", None)
+        if not isinstance(existing_timings, dict):
+            try:
+                candidate = getattr(handle, "timings", None)
+            except Exception:
+                candidate = None
+            existing_timings = candidate if isinstance(candidate, dict) else {}
+        for phase, key in (
+                ("connection", "connection_seconds"),
+                ("network_load", "network_load_seconds"),
+                ("fleet_spawn", "fleet_spawn_seconds")):
+            value = self.startup_timings.get(key)
+            if (
+                    value is not None
+                    and existing_timings.get(phase) is None):
+                recorder(phase, value)
 
     def _connect(
             self,
@@ -857,6 +1025,12 @@ class METSRClient:
             connection_retry_interval = 0.5,
             connection_open_timeout = 1,
             max_connection_wait = None):
+        self._cached_fatal_log_error = None
+        self._last_fatal_log_check = float("-inf")
+        self._capabilities_cache = None
+        self._optimized_api_available = None
+        self._feature_support.clear()
+        connection_profile_start = time.perf_counter()
         connection_start = time.time()
         max_connection_wait = (
             max_connection_wait
@@ -868,7 +1042,7 @@ class METSRClient:
             try:
                 self.ws = connect(
                     self.uri,
-                    max_size = 10 * 1024 * 1024,
+                    max_size = self.websocket_max_size,
                     ping_interval = None,
                     ping_timeout = None,
                     open_timeout = connection_open_timeout,
@@ -897,8 +1071,67 @@ class METSRClient:
 
         print("Connection established!")
         self.receive_msg(ignore_heartbeats=False, return_ready=True)
+        self.startup_timings["connection_seconds"] = (
+            time.perf_counter() - connection_profile_start
+        )
+        self.startup_timings.update(self._simulator_startup_log_timings())
+        self._record_launcher_startup_timings()
 
-    def _fatal_log_error(self):
+    def _profile_add(self, **values):
+        lock = getattr(self, "_profile_lock", None)
+        profile = getattr(self, "rpc_profile", None)
+        if lock is None or profile is None:
+            return
+        with lock:
+            for key, value in values.items():
+                profile[key] = profile.get(key, 0) + value
+
+    def get_rpc_profile(self, reset=False):
+        """Return a stable snapshot of cumulative client-side RPC timings."""
+        with self._profile_lock:
+            profile = dict(self.rpc_profile)
+            if reset:
+                for key in self.rpc_profile:
+                    self.rpc_profile[key] = (
+                        0.0 if key.endswith("_time") else 0
+                    )
+        profile["total_bytes"] = profile["request_bytes"] + profile["response_bytes"]
+        tick_count = profile["server_ticks"]
+        profile["average_server_tick_time"] = (
+            profile["server_tick_time"] / tick_count if tick_count else 0.0
+        )
+        return profile
+
+    def get_profile(self, reset=False):
+        """Return RPC profiling together with startup phase timings."""
+        profile = self.get_rpc_profile(reset=reset)
+        profile["startup_timings"] = dict(self.startup_timings)
+        profile.update(self.startup_timings)
+        return profile
+
+    def reset_rpc_profile(self):
+        """Reset RPC byte, count, JSON, socket, and stepping counters."""
+        with self._profile_lock:
+            for key in self.rpc_profile:
+                self.rpc_profile[key] = 0.0 if key.endswith("_time") else 0
+
+    def _record_server_tick_time(self, started_at, starting_tick):
+        if self.current_tick is None:
+            return
+        advanced = max(0, int(self.current_tick) - int(starting_tick))
+        if advanced:
+            self._profile_add(
+                server_tick_time=max(0.0, time.perf_counter() - started_at),
+                server_ticks=advanced,
+            )
+
+    def _fatal_log_error(self, force=False):
+        now = time.monotonic()
+        if self._cached_fatal_log_error is not None:
+            return self._cached_fatal_log_error
+        if not force and now - self._last_fatal_log_check < 1.0:
+            return None
+        self._last_fatal_log_check = now
         if not self.sim_folder:
             return None
 
@@ -929,18 +1162,32 @@ class METSRClient:
                 "Control API change. Add an Integer maxWaitingTime field to "
                 "MessageClass.ZoneIDOrigDestRouteNameNum and rebuild METS-R_SIM."
             )
-        return f"METS-R simulator reported a fatal JVM error in {log_path}:\n{excerpt}{guidance}"
+        self._cached_fatal_log_error = (
+            f"METS-R simulator reported a fatal JVM error in {log_path}:\n{excerpt}{guidance}"
+        )
+        return self._cached_fatal_log_error
 
     def send_msg(self, msg):
         if self.verbose:
             self._logMessage("SENT", msg)
-        self.ws.send(json.dumps(msg))
+        encode_start = time.perf_counter()
+        payload = json.dumps(msg)
+        encode_time = time.perf_counter() - encode_start
+        request_bytes = len(payload.encode("utf-8"))
+        self._profile_add(
+            rpc_count=1,
+            request_bytes=request_bytes,
+            json_encode_time=encode_time,
+        )
+        self.ws.send(payload)
 
     def _update_current_tick_from_message(self, msg):
         msg_type = msg.get("TYPE")
-        if msg_type not in {"STEP", "ANS_tick", "CTRL_load", "CTRL_reset"}:
+        if msg_type not in {
+                "STEP", "ANS_tick", "CTRL_load", "CTRL_reset",
+                "CTRL_advanceAndSnapshot"}:
             return False
-        tick_value = msg.get("TICK", msg.get("tick"))
+        tick_value = msg.get("TICK", msg.get("tick", msg.get("finalTick")))
         if tick_value is None:
             return False
         server_tick = int(tick_value)
@@ -958,7 +1205,8 @@ class METSRClient:
             waiting_forever = True,
             return_ready = False,
             print_timeout = True,
-            timeout = None):
+            timeout = None,
+            return_errors = False):
         timeout = self.timeout if timeout is None else timeout
         start_time = time.time()
         while True:
@@ -966,10 +1214,30 @@ class METSRClient:
             if fatal_error:
                 raise RuntimeError(fatal_error)
             try:
-                raw_msg = self.ws.recv(timeout = min(5, max(0.1, timeout)))
+                socket_wait_start = time.perf_counter()
+                try:
+                    raw_msg = self.ws.recv(timeout = min(5, max(0.1, timeout)))
+                finally:
+                    self._profile_add(
+                        socket_wait_time=time.perf_counter() - socket_wait_start
+                    )
 
                 # Decode the json string
-                msg = json.loads(str(raw_msg))
+                if isinstance(raw_msg, bytes):
+                    response_bytes = len(raw_msg)
+                    raw_text = raw_msg.decode("utf-8")
+                else:
+                    raw_text = str(raw_msg)
+                    response_bytes = len(raw_text.encode("utf-8"))
+                self._last_response_bytes = response_bytes
+                decode_start = time.perf_counter()
+                try:
+                    msg = json.loads(raw_text)
+                finally:
+                    self._profile_add(
+                        response_bytes=response_bytes,
+                        json_decode_time=time.perf_counter() - decode_start,
+                    )
 
                 if self.verbose:
                     self._logMessage("RECEIVED", msg)
@@ -984,13 +1252,16 @@ class METSRClient:
 
                 # Allow tick()
                 if msg["TYPE"] in {"ANS_ready"}:
-                    self.current_tick = 0
+                    if self.current_tick is None:
+                        self.current_tick = 0
                     if return_ready:
                         return msg
                     continue
 
                 # Allow error message
                 if msg["TYPE"] in {"ANS_error"}:
+                    if return_errors:
+                        return msg
                     print(f"Error: {msg['MSG']}")
                     return None
 
@@ -1000,9 +1271,12 @@ class METSRClient:
             except KeyboardInterrupt:
                 raise
             except TimeoutError:
+                fatal_error = self._fatal_log_error(force=True)
+                if fatal_error:
+                    raise RuntimeError(fatal_error)
                 pass
             except Exception as exc:
-                fatal_error = self._fatal_log_error()
+                fatal_error = self._fatal_log_error(force=True)
                 if fatal_error:
                     raise RuntimeError(fatal_error) from exc
                 self.state = "failed"
@@ -1013,7 +1287,56 @@ class METSRClient:
                     print("Timeout while waiting for message.")
                 return None
             
-    def send_receive_msg(self, msg, ignore_heartbeats, max_attempts=5): 
+    @staticmethod
+    def _retryable_control_message(msg, max_attempts, command_id=None):
+        # A stable ID makes retries observable and forward-compatible. As of
+        # SIM f1818b2, only CTRL_advanceAndSnapshot deduplicates by commandID;
+        # other CTRL handlers do not provide exactly-once execution.
+        msg_type = str(msg.get("TYPE", ""))
+        if not msg_type.startswith("CTRL_") or max_attempts == 1:
+            return msg
+
+        wire_msg = dict(msg)
+        data = wire_msg.get("DATA")
+        if command_id is None:
+            command_id = wire_msg.get("commandID") or wire_msg.get("idempotencyKey")
+        if command_id is None and isinstance(data, dict):
+            command_id = data.get("commandID") or data.get("idempotencyKey")
+        if command_id is None:
+            command_id = uuid.uuid4().hex
+        command_id = str(command_id)
+        wire_msg.setdefault("commandID", command_id)
+        wire_msg.setdefault("idempotencyKey", command_id)
+
+        if msg_type == "CTRL_advanceAndSnapshot" and isinstance(data, dict):
+            data = dict(data)
+            data.setdefault("commandID", command_id)
+            wire_msg["DATA"] = data
+        return wire_msg
+
+    @staticmethod
+    def _response_matches_request(request, response, response_matcher=None):
+        if (
+                isinstance(response, dict)
+                and response.get("TYPE") == "CTRL_advanceAndSnapshot"
+                and request.get("TYPE") != "CTRL_advanceAndSnapshot"):
+            return False
+        return response_matcher is None or bool(response_matcher(response))
+
+    def send_receive_msg(
+            self,
+            msg,
+            ignore_heartbeats,
+            max_attempts=5,
+            timeout=None,
+            return_errors=False,
+            command_id=None,
+            response_matcher=None):
+        msg = self._retryable_control_message(msg, max_attempts, command_id=command_id)
+        response_timeout = max(
+            0.1,
+            float(self.timeout if timeout is None else timeout),
+        )
         with self.lock:
             res = None
             num_attempts = 0
@@ -1021,19 +1344,48 @@ class METSRClient:
                 while res is None:
                     num_attempts += 1
                     self.send_msg(msg)
-                    if(max_attempts > 0):
-                        res = self.receive_msg(
-                            ignore_heartbeats=ignore_heartbeats,
-                            waiting_forever=False,
-                            print_timeout=False,
-                        )
-                        if num_attempts >= max_attempts:
+                    if max_attempts > 0:
+                        response_deadline = time.monotonic() + response_timeout
+                        while True:
+                            remaining = response_deadline - time.monotonic()
+                            if remaining <= 0.0:
+                                res = None
+                                break
+                            candidate = self.receive_msg(
+                                ignore_heartbeats=ignore_heartbeats,
+                                waiting_forever=False,
+                                print_timeout=False,
+                                timeout=remaining,
+                                return_errors=return_errors,
+                            )
+                            if candidate is None:
+                                res = None
+                                break
+                            if self._response_matches_request(
+                                    msg,
+                                    candidate,
+                                    response_matcher=response_matcher):
+                                res = candidate
+                                break
+                        if res is None and num_attempts >= max_attempts:
                             raise TimeoutError(
                                 f"No response received for '{msg.get('TYPE', 'unknown')}' "
                                 f"after {max_attempts} attempts; last STEP tick seen was {self.current_tick}"
                             )
                     else:
-                        res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
+                        while True:
+                            candidate = self.receive_msg(
+                                ignore_heartbeats=ignore_heartbeats,
+                                waiting_forever=True,
+                                timeout=timeout,
+                                return_errors=return_errors,
+                            )
+                            if self._response_matches_request(
+                                    msg,
+                                    candidate,
+                                    response_matcher=response_matcher):
+                                res = candidate
+                                break
             except KeyboardInterrupt:
                 print("\nKeyboardInterrupt detected. Stopping the current operation but keeping the server active.")
                 return None  # Return None to indicate the operation was interrupted
@@ -1069,6 +1421,96 @@ class METSRClient:
         """Return the current simulation tick reported by METS-R SIM."""
         res = self.send_receive_msg({"TYPE": "QUERY_tick"}, ignore_heartbeats=True)
         return self._apply_tick_response(res)
+
+    @staticmethod
+    def _is_unsupported_response(response):
+        if response is None or not isinstance(response, dict):
+            return True
+        if response.get("TYPE") == "ANS_error":
+            return True
+        if str(response.get("CODE", "OK")).upper() != "KO":
+            return False
+        detail = " ".join(
+            str(response.get(key, ""))
+            for key in ("MSG", "WARN", "REASON", "message")
+        ).lower()
+        return any(
+            marker in detail
+            for marker in ("unknown", "unsupported", "unrecognized", "not found")
+        )
+
+    def query_capabilities(self, refresh=False):
+        """Return simulator capabilities, with an automatic legacy fallback."""
+        if self._capabilities_cache is not None and not refresh:
+            return dict(self._capabilities_cache)
+
+        response = None
+        try:
+            response = self.send_receive_msg(
+                {"TYPE": "QUERY_capabilities"},
+                ignore_heartbeats=True,
+                max_attempts=1,
+                timeout=min(2.0, max(0.1, float(self.timeout))),
+                return_errors=True,
+            )
+        except TimeoutError:
+            response = None
+
+        if (
+                isinstance(response, dict)
+                and response.get("TYPE") in {"ANS_capabilities", "ANS_status"}
+                and str(response.get("CODE", "OK")).upper() == "OK"):
+            self._capabilities_cache = dict(response)
+            self._optimized_api_available = True
+            self._feature_support.update({
+                name: (
+                    self._routing_truthy(response[name])
+                    if name in response else True
+                )
+                for name in (
+                    "advanceAndSnapshot", "routingTopology", "fieldMasks"
+                )
+            })
+            return dict(response)
+
+        status = None
+        try:
+            status = self.send_receive_msg(
+                {"TYPE": "QUERY_stepStatus"},
+                ignore_heartbeats=True,
+                max_attempts=1,
+                timeout=min(2.0, max(0.1, float(self.timeout))),
+                return_errors=True,
+            )
+        except TimeoutError:
+            status = None
+        nested = status.get("capabilities") if isinstance(status, dict) else None
+        inferred_optimized = isinstance(nested, dict) and bool(nested)
+        fallback = {
+            "TYPE": "ANS_capabilities",
+            "CODE": "OK",
+            "legacyFallback": not inferred_optimized,
+        }
+        if inferred_optimized:
+            fallback.update(nested)
+        self._capabilities_cache = fallback
+        self._optimized_api_available = inferred_optimized
+        self._feature_support.update({
+            name: (
+                self._routing_truthy(nested[name])
+                if inferred_optimized and name in nested
+                else inferred_optimized
+            )
+            for name in (
+                "advanceAndSnapshot", "routingTopology", "fieldMasks"
+            )
+        })
+        return dict(fallback)
+
+    def _supports_feature(self, name):
+        if name not in self._feature_support:
+            self.query_capabilities()
+        return bool(self._feature_support.get(name, False))
 
     def query_tick_status(self):
         """Return server-side stepping status.
@@ -1127,6 +1569,7 @@ class METSRClient:
                 self.send_msg(msg)
                 last_send_time = time.time()
 
+            server_tick_started = time.perf_counter()
             send_step_request()
 
             while True:
@@ -1227,6 +1670,35 @@ class METSRClient:
 
                 if step_tick >= target_tick:
                     break
+
+        self._record_server_tick_time(server_tick_started, start_tick)
+
+    def advance_seconds(self, seconds, step_size=None, **tick_kwargs):
+        """Advance by at least ``seconds`` using the configured simulation step."""
+        seconds = float(seconds)
+        if seconds < 0.0:
+            raise ValueError("seconds must be non-negative")
+        if seconds == 0.0:
+            return self.current_tick
+        if step_size is None:
+            step_size = self._configured_sim_step_size()
+        step_size = float(step_size)
+        if step_size <= 0.0:
+            raise ValueError("step_size must be positive")
+        step_num = max(1, int(math.ceil(seconds / step_size)))
+        self.tick(step_num=step_num, **tick_kwargs)
+        return self.current_tick
+
+    def advance_minutes(self, minutes, step_size=None, **tick_kwargs):
+        """Advance by at least ``minutes`` using the configured simulation step."""
+        minutes = float(minutes)
+        if minutes < 0.0:
+            raise ValueError("minutes must be non-negative")
+        return self.advance_seconds(
+            minutes * 60.0,
+            step_size=step_size,
+            **tick_kwargs,
+        )
    
     # QUERY: inspect the state of the simulator
     # By default query public vehicles
@@ -2274,6 +2746,8 @@ class METSRClient:
             ("tick", "tick"),
             ("TICK", "tick"),
             ("topologyVersion", "topology_version"),
+            ("metricVersion", "metric_version"),
+            ("metricVersion", "weight_version"),
             ("version", "metric_version"),
             ("version", "weight_version"),
             ("weightVersion", "weight_version"),
@@ -2295,38 +2769,750 @@ class METSRClient:
         assert res["TYPE"] == "ANS_routingGraphUpdates", res["TYPE"]
         return res
 
-    def query_routing_graph(self, batch_size=500):
-        """Build and return the full road-level NetworkX routing graph.
+    def _routing_batch_settings(self, batch_size=None):
+        if batch_size is None:
+            batch_size = self._client_config_value("routing_graph_batch_size", 5000)
+        batch_size = max(1, int(batch_size))
+        minimum = max(
+            1,
+            int(self._client_config_value("routing_graph_min_batch_size", 500)),
+        )
+        minimum = min(minimum, batch_size)
+        target_bytes = int(self._client_config_value(
+            "routing_graph_response_bytes",
+            max(1024, int(self.websocket_max_size * 0.75)),
+        ))
+        target_bytes = max(1024, min(target_bytes, self.websocket_max_size - 1))
+        return batch_size, minimum, target_bytes
 
-        Nodes are SUMO road IDs. Directed edges represent downstream road
-        connectivity, with source-road metrics copied onto the edge. Useful
-        edge weights include ``weight`` / ``travel_time``, ``distance``, and
-        ``energy_consumption``.
+    def _recover_routing_connection(self):
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.ws = None
+        self._connect(**self._connection_settings)
+
+    @staticmethod
+    def _routing_response_size_error(error):
+        current = error
+        for _ in range(4):
+            if current is None:
+                break
+            detail = (
+                type(current).__name__ + " " + str(current)
+            ).lower().replace("-", " ")
+            if any(marker in detail for marker in (
+                    "payloadtoobig",
+                    "payload too big",
+                    "message too big",
+                    "frame exceeds limit",
+                    "max_size",
+                    "close code 1009",
+                    "received 1009")):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    def _query_road_records_adaptive(self, road_ids, batch_size=None):
+        requested_batch, minimum_batch, target_bytes = self._routing_batch_settings(
+            batch_size
+        )
+        records = []
+        metadata = {}
+        offset = 0
+        current_batch = requested_batch
+        while offset < len(road_ids):
+            count = min(current_batch, len(road_ids) - offset)
+            batch = road_ids[offset:offset + count]
+            try:
+                response = self.send_receive_msg(
+                    {"TYPE": "QUERY_road", "DATA": batch},
+                    ignore_heartbeats=True,
+                    max_attempts=1,
+                    return_errors=True,
+                )
+            except RuntimeError as exc:
+                if not self._routing_response_size_error(exc):
+                    raise
+                if count <= minimum_batch:
+                    raise
+                self._recover_routing_connection()
+                current_batch = max(minimum_batch, count // 2)
+                continue
+            except TimeoutError:
+                if count <= minimum_batch:
+                    raise
+                self._recover_routing_connection()
+                current_batch = max(minimum_batch, count // 2)
+                continue
+            if response.get("TYPE") != "ANS_road":
+                raise RuntimeError(
+                    f"Expected ANS_road, received {response.get('TYPE')}"
+                )
+            if str(response.get("CODE", "OK")).upper() == "KO":
+                raise RuntimeError(f"METS-R SIM rejected QUERY_road batch: {response}")
+
+            records.extend(response.get("DATA", []))
+            metadata = response
+            offset += count
+            response_bytes = max(1, int(self._last_response_bytes))
+            if response_bytes > target_bytes and count > minimum_batch:
+                scaled = int(count * target_bytes * 0.85 / response_bytes)
+                current_batch = max(minimum_batch, min(count, scaled))
+        self._last_routing_batch_size = current_batch
+        return records, metadata
+
+    def query_routing_topology(
+            self,
+            offset=0,
+            limit=None,
+            include_center=False,
+            compact=True,
+            legacy_fallback=True):
+        """Query one page of static road topology.
+
+        Optimized simulators return the compact schema introduced in
+        ``f1818b2``. Older simulators are synthesized from ``QUERY_road``.
         """
+        offset = max(0, int(offset))
+        if limit is not None:
+            limit = max(0, int(limit))
+        if self._supports_feature("routingTopology"):
+            msg = {
+                "TYPE": "QUERY_routingTopology",
+                "offset": offset,
+                "includeCenter": bool(include_center),
+                "compact": bool(compact),
+            }
+            if limit is not None:
+                msg["limit"] = limit
+            response = self.send_receive_msg(
+                msg,
+                ignore_heartbeats=True,
+                max_attempts=1,
+                return_errors=True,
+            )
+            if not self._is_unsupported_response(response):
+                if response.get("TYPE") != "ANS_routingTopology":
+                    raise RuntimeError(
+                        "Expected ANS_routingTopology, received "
+                        f"{response.get('TYPE')}"
+                    )
+                if str(response.get("CODE", "OK")).upper() != "OK":
+                    raise RuntimeError(
+                        f"METS-R SIM rejected QUERY_routingTopology: {response}"
+                    )
+                return response
+            self._feature_support["routingTopology"] = False
+
+        if include_center:
+            raise RuntimeError(
+                "include_center requires a METS-R SIM with routingTopology support"
+            )
+        if not legacy_fallback:
+            raise RuntimeError("Connected METS-R SIM does not support routingTopology")
+        index_response = self.query_road()
+        if str(index_response.get("CODE", "OK")).upper() == "KO":
+            raise RuntimeError(f"METS-R SIM rejected QUERY_road: {index_response}")
+        road_ids = index_response.get("id_list") or index_response.get("orig_id") or []
+        total = len(road_ids)
+        end = total if limit is None else min(total, offset + limit)
+        selected = road_ids[min(offset, total):end]
+        road_records, metadata = self._query_road_records_adaptive(
+            selected,
+            batch_size=limit,
+        ) if selected else ([], index_response)
+        static_records = self._static_topology_records(road_records)
+        if compact:
+            data = [
+                [
+                    record["roadID"],
+                    record["downstreamIDs"],
+                    record["length"],
+                ]
+                for record in static_records
+            ]
+        else:
+            data = static_records
+        return {
+            "TYPE": "ANS_routingTopology",
+            "CODE": "OK",
+            "DATA": data,
+            "offset": min(offset, total),
+            "count": len(data),
+            "total": total,
+            "hasMore": end < total,
+            "topologyVersion": metadata.get(
+                "topologyVersion",
+                index_response.get("topologyVersion"),
+            ),
+            "tick": metadata.get("tick", metadata.get("TICK", self.current_tick)),
+            "compact": bool(compact),
+            "schema": ["roadID", "downstreamIDs", "length"] if compact else None,
+            "legacyFallback": True,
+        }
+
+    def _thin_run_network_file_candidate(self, configured):
+        if not self.sim_folder:
+            return None
+        manifest_path = os.path.join(
+            self.sim_folder,
+            "data",
+            ".metsr_hpc_inputs.json",
+        )
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+                manifest = json.load(manifest_file)
+            if (
+                    not isinstance(manifest, dict)
+                    or int(manifest.get("schema_version")) != 1):
+                return None
+            host_source = os.path.expanduser(os.fspath(
+                manifest.get("host_data_source")
+            ))
+            container_target = os.fspath(
+                manifest.get("container_data_target")
+            ).replace("\\", "/")
+            if (
+                    not os.path.isabs(host_source)
+                    or not posixpath.isabs(container_target)):
+                return None
+            host_source = os.path.normpath(os.path.abspath(host_source))
+            container_target = posixpath.normpath(container_target)
+            configured_posix = posixpath.normpath(
+                os.fspath(configured).replace("\\", "/")
+            )
+
+            relative_path = None
+            try:
+                if posixpath.commonpath(
+                        (configured_posix, container_target)
+                ) == container_target:
+                    relative_path = posixpath.relpath(
+                        configured_posix,
+                        container_target,
+                    )
+            except ValueError:
+                pass
+            if relative_path is None:
+                if configured_posix == "data":
+                    relative_path = "."
+                elif configured_posix.startswith("data/"):
+                    relative_path = configured_posix[len("data/"):]
+                else:
+                    return None
+
+            candidate = os.path.abspath(os.path.join(
+                host_source,
+                *relative_path.split("/"),
+            ))
+            if os.path.commonpath((candidate, host_source)) != host_source:
+                return None
+            return candidate if os.path.isfile(candidate) else None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _resolved_network_file(self):
+        configured = self._client_config_value("network_file", None)
+        if not configured and self.sim_folder:
+            properties = _read_property_values(
+                os.path.join(self.sim_folder, "data", "Data.properties")
+            )
+            configured = properties.get("NETWORK_FILE")
+        if not configured:
+            return None
+        configured = os.fspath(configured)
+        candidates = [
+            candidate for candidate in (
+                self._thin_run_network_file_candidate(configured),
+            ) if candidate is not None
+        ]
+        if os.path.isabs(configured):
+            candidates.append(configured)
+        else:
+            if self.sim_folder:
+                candidates.append(os.path.join(self.sim_folder, configured))
+            candidates.append(os.path.abspath(configured))
+            if self.config_json:
+                candidates.append(os.path.join(
+                    os.path.dirname(self.config_json),
+                    configured,
+                ))
+        for candidate in candidates:
+            candidate = os.path.abspath(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _network_file_sha256(self):
+        network_file = self._resolved_network_file()
+        if network_file is None:
+            return None
+        try:
+            stat = os.stat(network_file)
+        except OSError:
+            return None
+        stat_key = (
+            network_file,
+            int(stat.st_size),
+            int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9))),
+        )
+        with self._ROUTING_TOPOLOGY_CACHE_LOCK:
+            cached = self._NETWORK_SHA256_CACHE.get(stat_key)
+            if cached is not None:
+                return cached
+            digest = hashlib.sha256()
+            try:
+                with open(network_file, "rb") as network_stream:
+                    for chunk in iter(lambda: network_stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                return None
+            value = digest.hexdigest()
+            self._NETWORK_SHA256_CACHE[stat_key] = value
+            return value
+
+    def _routing_topology_cache_schema(self, include_center=False):
+        return int(self._ROUTING_TOPOLOGY_SCHEMA_VERSION) * 2 + int(
+            bool(include_center)
+        )
+
+    def _routing_topology_cache_key(self, topology_version, include_center=False):
+        network_sha256 = self._network_file_sha256()
+        if network_sha256 is None or topology_version is None:
+            return None
+        return (
+            network_sha256,
+            self._routing_topology_cache_schema(include_center),
+            str(topology_version),
+        )
+
+    def _routing_topology_cache_dir(self):
+        configured = self._client_config_value("routing_topology_cache_dir", None)
+        if configured:
+            return os.path.abspath(os.path.expanduser(os.fspath(configured)))
+        base = (
+            os.environ.get("XDG_CACHE_HOME")
+            or os.environ.get("LOCALAPPDATA")
+            or os.path.join(os.path.expanduser("~"), ".cache")
+        )
+        return os.path.join(base, "metsr-hpc", "routing")
+
+    def _routing_topology_cache_path(self, cache_key):
+        network_sha256, schema_version, topology_version = cache_key
+        version_token = hashlib.sha256(
+            topology_version.encode("utf-8")
+        ).hexdigest()[:16]
+        filename = (
+            f"topology-v{schema_version}-{network_sha256}-{version_token}.json.gz"
+        )
+        return os.path.join(self._routing_topology_cache_dir(), filename)
+
+    def _load_routing_topology_cache(
+            self,
+            topology_version,
+            include_center=False,
+            expected_count=None):
+        if not self._routing_truthy(
+                self._client_config_value("routing_topology_cache", True)):
+            return None
+        cache_key = self._routing_topology_cache_key(topology_version, include_center)
+        if cache_key is None:
+            return None
+        with self._ROUTING_TOPOLOGY_CACHE_LOCK:
+            memory_payload = self._ROUTING_TOPOLOGY_MEMORY_CACHE.get(cache_key)
+        if memory_payload is not None:
+            memory_records = memory_payload.get("records")
+            if (
+                    isinstance(memory_records, list)
+                    and (
+                        expected_count is None
+                        or len(memory_records) == int(expected_count)
+                    )):
+                return memory_payload
+            with self._ROUTING_TOPOLOGY_CACHE_LOCK:
+                self._ROUTING_TOPOLOGY_MEMORY_CACHE.pop(cache_key, None)
+        cache_path = self._routing_topology_cache_path(cache_key)
+        try:
+            with gzip.open(cache_path, "rt", encoding="utf-8") as cache_file:
+                payload = json.load(cache_file)
+            payload_key = (
+                payload.get("networkSHA256"),
+                int(payload.get("schemaVersion")),
+                str(payload.get("topologyVersion")),
+            )
+            records = payload.get("records")
+            if (
+                    payload_key != cache_key
+                    or not isinstance(records, list)
+                    or (
+                        expected_count is not None
+                        and len(records) != int(expected_count)
+                    )):
+                return None
+        except (AttributeError, EOFError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        with self._ROUTING_TOPOLOGY_CACHE_LOCK:
+            self._ROUTING_TOPOLOGY_MEMORY_CACHE[cache_key] = payload
+        return payload
+
+    def _save_routing_topology_cache(self, topology_version, records, include_center=False):
+        if not self._routing_truthy(
+                self._client_config_value("routing_topology_cache", True)):
+            return
+        cache_key = self._routing_topology_cache_key(topology_version, include_center)
+        if cache_key is None:
+            return
+        payload = {
+            "networkSHA256": cache_key[0],
+            "schemaVersion": cache_key[1],
+            "topologyVersion": cache_key[2],
+            # Records are deliberately static: no speed, travel time, energy,
+            # flow, occupancy, metric version, or tick is persisted.
+            "records": records,
+        }
+        with self._ROUTING_TOPOLOGY_CACHE_LOCK:
+            self._ROUTING_TOPOLOGY_MEMORY_CACHE[cache_key] = payload
+        cache_dir = self._routing_topology_cache_dir()
+        temp_path = None
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            descriptor, temp_path = tempfile.mkstemp(
+                prefix=".topology-",
+                suffix=".tmp",
+                dir=cache_dir,
+            )
+            with os.fdopen(descriptor, "wb") as raw_file:
+                with gzip.GzipFile(fileobj=raw_file, mode="wb") as cache_file:
+                    cache_file.write(json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"))
+            os.replace(temp_path, self._routing_topology_cache_path(cache_key))
+            temp_path = None
+        except OSError:
+            pass
+        finally:
+            if temp_path is not None:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    @classmethod
+    def _static_topology_records(cls, records, schema=None):
+        normalized = []
+        schema = list(schema or [])
+        positions = {name: index for index, name in enumerate(schema)}
+        for raw in records:
+            if isinstance(raw, dict):
+                road_id = cls._routing_road_id_from(raw)
+                downstream = cls._routing_downstream_from(raw, default=None)
+                if downstream is None:
+                    downstream = raw.get("downstreamIDs", [])
+                length = cls._routing_float(
+                    raw, "length", "distance", "distance_m", default=0.0
+                )
+                center_x = raw.get("centerX")
+                center_y = raw.get("centerY")
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                road_index = positions.get("roadID", 0)
+                downstream_index = positions.get("downstreamIDs", 1)
+                length_index = positions.get("length", 2)
+                road_id = raw[road_index]
+                downstream = raw[downstream_index]
+                try:
+                    length = float(raw[length_index])
+                except (TypeError, ValueError):
+                    length = 0.0
+                center_x = (
+                    raw[positions["centerX"]]
+                    if "centerX" in positions and positions["centerX"] < len(raw)
+                    else None
+                )
+                center_y = (
+                    raw[positions["centerY"]]
+                    if "centerY" in positions and positions["centerY"] < len(raw)
+                    else None
+                )
+            else:
+                continue
+            if road_id is None:
+                continue
+            record = {
+                "roadID": str(road_id),
+                "downstreamIDs": [
+                    str(value) for value in (downstream or []) if value is not None
+                ],
+                "length": length,
+            }
+            if center_x is not None and center_y is not None:
+                record["centerX"] = center_x
+                record["centerY"] = center_y
+            normalized.append(record)
+        return normalized
+
+    def _build_static_topology_graph(
+            self,
+            records,
+            metadata,
+            cache_hit=False,
+            include_center=False):
+        graph = nx.DiGraph()
+        for record in records:
+            attrs = {
+                "distance": float(record.get("length", 0.0)),
+                "length": float(record.get("length", 0.0)),
+            }
+            if "centerX" in record and "centerY" in record:
+                attrs["center_x"] = record["centerX"]
+                attrs["center_y"] = record["centerY"]
+            graph.add_node(record["roadID"], **attrs)
+        for record in records:
+            edge_attrs = {
+                "distance": float(record.get("length", 0.0)),
+                "length": float(record.get("length", 0.0)),
+            }
+            for downstream_id in record.get("downstreamIDs", []):
+                graph.add_edge(record["roadID"], downstream_id, **edge_attrs)
+        graph.graph.update({
+            "edge_cost_road": "source",
+            "snapshot_required": False,
+            "topology_only": True,
+            "topology_cache_hit": bool(cache_hit),
+            "topology_schema_version": self._routing_topology_cache_schema(
+                include_center),
+            "topology_includes_center": bool(include_center),
+        })
+        if metadata.get("topologyVersion") is not None:
+            graph.graph["topology_version"] = metadata["topologyVersion"]
+        if metadata.get("tick", metadata.get("TICK")) is not None:
+            graph.graph["tick"] = metadata.get("tick", metadata.get("TICK"))
+        network_sha256 = self._network_file_sha256()
+        if network_sha256 is not None:
+            graph.graph["network_sha256"] = network_sha256
+        return graph
+
+    def _query_optimized_topology_graph(
+            self,
+            batch_size,
+            use_cache=True,
+            include_center=False):
+        probe = self.query_routing_topology(
+            offset=0,
+            limit=0,
+            include_center=include_center,
+            compact=True,
+            legacy_fallback=True,
+        )
+        if probe.get("legacyFallback"):
+            return None
+        if include_center:
+            probe_schema = set(probe.get("schema") or [])
+            if not {"centerX", "centerY"}.issubset(probe_schema):
+                raise RuntimeError(
+                    "METS-R SIM routingTopology response omitted requested centers"
+                )
+        topology_version = probe.get("topologyVersion")
+        total = max(0, int(probe.get("total", 0)))
+        if use_cache:
+            cached = self._load_routing_topology_cache(
+                topology_version,
+                include_center=include_center,
+                expected_count=total,
+            )
+            if cached is not None:
+                return self._build_static_topology_graph(
+                    cached["records"],
+                    probe,
+                    cache_hit=True,
+                    include_center=include_center,
+                )
+
+        requested_batch, minimum_batch, target_bytes = self._routing_batch_settings(
+            batch_size
+        )
+        offset = 0
+        current_batch = requested_batch
+        records = []
+        metadata = probe
+        correlation_failures = 0
+        while offset < total:
+            count = min(current_batch, total - offset)
+            try:
+                response = self.query_routing_topology(
+                    offset=offset,
+                    limit=count,
+                    include_center=include_center,
+                    compact=True,
+                    legacy_fallback=False,
+                )
+            except RuntimeError as exc:
+                if not self._routing_response_size_error(exc):
+                    raise
+                if count <= minimum_batch:
+                    raise
+                self._recover_routing_connection()
+                current_batch = max(minimum_batch, count // 2)
+                continue
+            except TimeoutError:
+                if count <= minimum_batch:
+                    raise
+                self._recover_routing_connection()
+                current_batch = max(minimum_batch, count // 2)
+                continue
+            try:
+                response_offset = int(response.get("offset"))
+                response_total = int(response.get("total"))
+            except (TypeError, ValueError):
+                response_offset = -1
+                response_total = -1
+            if response_offset != offset or response_total != total:
+                correlation_failures += 1
+                if correlation_failures > 1:
+                    raise RuntimeError(
+                        "METS-R SIM routingTopology page correlation failed: "
+                        f"requested offset/total {offset}/{total}, received "
+                        f"{response_offset}/{response_total}"
+                    )
+                self._recover_routing_connection()
+                continue
+            correlation_failures = 0
+            if str(response.get("topologyVersion")) != str(topology_version):
+                raise RuntimeError(
+                    "METS-R SIM topology changed while its graph was being loaded"
+                )
+            page_records = self._static_topology_records(
+                response.get("DATA", []),
+                schema=response.get("schema"),
+            )
+            records.extend(page_records)
+            received_count = int(response.get(
+                "count", len(response.get("DATA", []))
+            ))
+            if received_count <= 0:
+                raise RuntimeError(
+                    f"METS-R SIM returned an empty topology page at offset {offset}"
+                )
+            if len(page_records) != received_count:
+                raise RuntimeError(
+                    "METS-R SIM routingTopology count does not match "
+                    f"its DATA length at offset {offset}"
+                )
+            offset += received_count
+            metadata = response
+            response_bytes = max(1, int(self._last_response_bytes))
+            if response_bytes > target_bytes and count > minimum_batch:
+                scaled = int(count * target_bytes * 0.85 / response_bytes)
+                current_batch = max(minimum_batch, min(count, scaled))
+        self._last_routing_batch_size = current_batch
+        if use_cache:
+            self._save_routing_topology_cache(
+                topology_version,
+                records,
+                include_center=include_center,
+            )
+        graph = self._build_static_topology_graph(
+            records,
+            metadata,
+            cache_hit=False,
+            include_center=include_center,
+        )
+        graph.graph["routing_batch_size"] = current_batch
+        return graph
+
+    def query_routing_graph(
+            self,
+            batch_size=None,
+            topology_only=False,
+            use_cache=True,
+            include_center=False):
+        """Build and return the road-level NetworkX routing graph.
+
+        The default batch comes from ``routing_graph_batch_size`` (5,000 when
+        unset) and shrinks automatically when responses approach the
+        WebSocket byte limit.
+
+        ``topology_only=True`` omits all live metrics and caches only road IDs,
+        downstream connections, lengths, and optional centers. Cache keys are
+        the network-file SHA-256, client schema version, and simulator
+        topology version.
+        """
+        batch_size, _, _ = self._routing_batch_settings(batch_size)
+        if topology_only and self._supports_feature("routingTopology"):
+            optimized = self._query_optimized_topology_graph(
+                batch_size=batch_size,
+                use_cache=use_cache,
+                include_center=include_center,
+            )
+            if optimized is not None:
+                return optimized
+        if topology_only and include_center:
+            raise RuntimeError(
+                "include_center requires a METS-R SIM with routingTopology support"
+            )
+
         all_roads_res = self.query_road()
         if all_roads_res.get("CODE") == "KO":
             raise RuntimeError(f"METS-R SIM rejected QUERY_road: {all_roads_res}")
         road_ids = all_roads_res.get("id_list") or all_roads_res.get("orig_id") or []
+        topology_version = all_roads_res.get("topologyVersion")
+
+        if topology_only and use_cache:
+            cached = self._load_routing_topology_cache(
+                topology_version,
+                include_center=False,
+                expected_count=len(road_ids),
+            )
+            if cached is not None:
+                return self._build_static_topology_graph(
+                    cached["records"],
+                    all_roads_res,
+                    cache_hit=True,
+                    include_center=False,
+                )
+
+        road_records, metadata_response = self._query_road_records_adaptive(
+            road_ids,
+            batch_size=batch_size,
+        )
+        if not metadata_response:
+            metadata_response = all_roads_res
+        if topology_only:
+            static_records = self._static_topology_records(road_records)
+            if use_cache:
+                self._save_routing_topology_cache(
+                    metadata_response.get("topologyVersion", topology_version),
+                    static_records,
+                    include_center=False,
+                )
+            graph = self._build_static_topology_graph(
+                static_records,
+                metadata_response,
+                cache_hit=False,
+                include_center=False,
+            )
+            graph.graph["legacy_topology_fallback"] = True
+            graph.graph["routing_batch_size"] = getattr(
+                self, "_last_routing_batch_size", batch_size
+            )
+            return graph
 
         graph = nx.DiGraph()
         downstream_by_road = {}
-        metadata_response = all_roads_res
-        batch_size = max(1, int(batch_size or 1))
-        for batch_start in range(0, len(road_ids), batch_size):
-            batch = road_ids[batch_start: batch_start + batch_size]
-            response = self.query_road(id=batch)
-            if response.get("CODE") == "KO":
-                raise RuntimeError(f"METS-R SIM rejected QUERY_road batch: {response}")
-            metadata_response = response
-            for road in response.get("DATA", []):
-                if not isinstance(road, dict):
-                    continue
-                road_id = self._routing_road_id_from(road)
-                if road_id is None:
-                    continue
-                graph.add_node(road_id, **self._routing_node_attrs_from(road))
-                downstream_by_road[road_id] = self._routing_downstream_from(road, default=[])
-
+        for road in road_records:
+            if not isinstance(road, dict):
+                continue
+            road_id = self._routing_road_id_from(road)
+            if road_id is None:
+                continue
+            graph.add_node(road_id, **self._routing_node_attrs_from(road))
+            downstream_by_road[road_id] = self._routing_downstream_from(
+                road, default=[]
+            )
         for road_id, downstream_ids in downstream_by_road.items():
             edge_attrs = self._routing_edge_attrs_from(graph.nodes[road_id])
             for downstream_id in downstream_ids or []:
@@ -2334,6 +3520,10 @@ class METSRClient:
 
         self._apply_routing_graph_metadata(graph, metadata_response)
         graph.graph["snapshot_required"] = False
+        graph.graph["topology_only"] = False
+        graph.graph["routing_batch_size"] = getattr(
+            self, "_last_routing_batch_size", batch_size
+        )
         return graph
 
     def update_routing_graph(
@@ -2342,7 +3532,7 @@ class METSRClient:
             update_response=None,
             include_topology=False,
             reload_on_snapshot_required=True,
-            batch_size=500):
+            batch_size=None):
         """Apply ``QUERY_routingGraphUpdates`` results to an existing graph.
 
         Normal update responses are metric-only. When SIM reports
@@ -2360,7 +3550,14 @@ class METSRClient:
             if not reload_on_snapshot_required:
                 self._apply_routing_graph_metadata(graph, update_response)
                 raise RuntimeError("METS-R SIM requested a fresh routing graph snapshot")
-            return self.query_routing_graph(batch_size=batch_size)
+            return self.query_routing_graph(
+                batch_size=batch_size,
+                topology_only=bool(graph.graph.get("topology_only", False)),
+                include_center=bool(
+                    graph.graph.get("topology_includes_center", False)
+                ),
+                use_cache=True,
+            )
 
         removed_ids = update_response.get("removed", []) or update_response.get("REMOVED", []) or []
         for road_id in removed_ids:
@@ -2777,8 +3974,319 @@ class METSRClient:
     set_vehicle_sensor_type = update_vehicle_sensor_type
     updateVehicleSensorType = update_vehicle_sensor_type
     
+    @staticmethod
+    def _field_mask_set(field_mask, include_details=False):
+        if include_details:
+            return {"*"}
+        if field_mask is None:
+            return set()
+        if isinstance(field_mask, str):
+            return {
+                field.strip()
+                for field in field_mask.split(",")
+                if field.strip()
+            }
+        return {str(field) for field in field_mask}
+
+    @classmethod
+    def _masked_taxi_snapshot_record(cls, source, field_mask, taxi_id=None):
+        if not isinstance(source, dict):
+            return {"ID": taxi_id, "STATUS": "KO"}
+        fields = cls._field_mask_set(field_mask)
+        include_all = "*" in fields
+        result = {
+            "ID": source.get("ID", taxi_id),
+            "STATUS": source.get("STATUS", "OK"),
+        }
+
+        def wanted(name):
+            return include_all or name in fields
+
+        if wanted("state") and "state" in source:
+            result["state"] = source["state"]
+        if wanted("coordinates"):
+            for name in ("x", "y", "z"):
+                if name in source:
+                    result[name] = source[name]
+        if wanted("currentZoneID"):
+            for name in ("currentZoneID", "currentZone"):
+                if source.get(name) is not None:
+                    result["currentZoneID"] = source[name]
+                    break
+        if wanted("destinationZoneID"):
+            for name in ("destinationZoneID", "destZoneID", "dest"):
+                if source.get(name) is not None:
+                    result["destinationZoneID"] = source[name]
+                    break
+        if wanted("remainingDistance") and "remainingDistance" in source:
+            result["remainingDistance"] = source["remainingDistance"]
+        if wanted("requestIDs"):
+            for name in ("toBoardReqIDs", "onBoardReqIDs"):
+                if name in source:
+                    result[name] = source[name]
+        return result
+
+    def query_ride_hailing_snapshot(
+            self,
+            taxi_ids=None,
+            field_mask=None,
+            include_details=False,
+            future_supply_thresholds=None,
+            event_cursor=0):
+        """Return a non-advancing, field-masked ride-hailing snapshot.
+
+        This method uses established query calls on every simulator version.
+        :meth:`advance_and_snapshot` uses the fused optimized endpoint when it
+        is available and delegates here only for its legacy fallback.
+        """
+        fields = self._field_mask_set(field_mask, include_details=include_details)
+        if taxi_ids is None:
+            fleet = self.query_taxi()
+            taxi_ids = fleet.get("id_list", []) or []
+        elif not isinstance(taxi_ids, list):
+            taxi_ids = [taxi_ids]
+        else:
+            taxi_ids = list(taxi_ids)
+
+        if taxi_ids:
+            taxi_response = self.query_taxi(taxi_ids)
+            raw_records = taxi_response.get("DATA", [])
+        else:
+            raw_records = []
+        taxis = [
+            self._masked_taxi_snapshot_record(
+                raw_records[index] if index < len(raw_records) else None,
+                fields,
+                taxi_id=taxi_id,
+            )
+            for index, taxi_id in enumerate(taxi_ids)
+        ]
+
+        partial_warnings = []
+        available_summary = {}
+        try:
+            available = self.query_available_taxis()
+            for record in available.get("DATA", []):
+                if not isinstance(record, dict):
+                    continue
+                zone_id = record.get("zoneID")
+                if zone_id is not None:
+                    key = str(zone_id)
+                    available_summary[key] = available_summary.get(key, 0) + 1
+        except AssertionError:
+            partial_warnings.append(
+                "availableTaxiSummary is unavailable on this legacy simulator"
+            )
+
+        future_supply = []
+        thresholds = [] if future_supply_thresholds is None else _as_list(
+            future_supply_thresholds
+        )
+        if thresholds:
+            try:
+                zone_index = self.query_zone()
+                zone_ids = zone_index.get("id_list", []) or []
+                zone_response = self.query_zone(id=zone_ids) if zone_ids else {"DATA": []}
+                zone_records = [
+                    record
+                    for record in zone_response.get("DATA", [])
+                    if isinstance(record, dict)
+                ]
+                for threshold in thresholds:
+                    threshold_value = int(threshold)
+                    selected = [
+                        record.get("ID")
+                        for record in zone_records
+                        if record.get("ID") is not None
+                        and record.get("futureSupply") is not None
+                        and int(record["futureSupply"]) <= threshold_value
+                    ]
+                    selected.sort()
+                    future_supply.append({
+                        "threshold": threshold_value,
+                        "count": len(selected),
+                        "zoneIDsAtOrBelow": selected,
+                    })
+            except AssertionError:
+                future_supply = []
+                partial_warnings.append(
+                    "futureSupply is unavailable on this legacy simulator"
+                )
+
+        response = {
+            "TYPE": "ANS_rideHailingSnapshot",
+            "CODE": "OK",
+            "TICK": self.current_tick,
+            "taxis": taxis,
+            "availableTaxiSummary": available_summary,
+            "futureSupply": future_supply,
+            "events": [],
+            "nextEventCursor": max(0, int(event_cursor)),
+            "legacyFallback": True,
+        }
+        if partial_warnings:
+            response["partial"] = True
+            response["warnings"] = partial_warnings
+        return response
+
+    ride_hailing_snapshot = query_ride_hailing_snapshot
+
+    def advance_and_snapshot(
+            self,
+            number_of_ticks=1,
+            taxi_ids=None,
+            field_mask=None,
+            include_details=False,
+            future_supply_thresholds=None,
+            event_cursor=0,
+            command_id=None,
+            starting_tick=None,
+            timeout_ms=None,
+            legacy_fallback=True):
+        """Atomically advance and return a compact ride-hailing snapshot.
+
+        The command ID is stable across retries, making the optimized control
+        idempotent. Older simulators automatically use ``tick`` followed by
+        the established query methods, with a small client-side replay cache.
+        """
+        number_of_ticks = int(number_of_ticks)
+        if number_of_ticks < 1:
+            raise ValueError("number_of_ticks must be a positive integer")
+        if self.current_tick is None:
+            raise RuntimeError("Cannot advance before the simulator reports its tick")
+        if starting_tick is None:
+            starting_tick = int(self.current_tick)
+        else:
+            starting_tick = int(starting_tick)
+        command_id = str(command_id or uuid.uuid4().hex)
+        taxi_ids = [] if taxi_ids is None else _as_list(taxi_ids)
+        fields = self._field_mask_set(field_mask, include_details=include_details)
+        thresholds = (
+            [] if future_supply_thresholds is None
+            else _as_list(future_supply_thresholds)
+        )
+        if timeout_ms is None:
+            timeout_ms = max(120000, number_of_ticks * 10000)
+        timeout_ms = max(1000, int(timeout_ms))
+
+        if self._supports_feature("advanceAndSnapshot"):
+            data = {
+                "commandID": command_id,
+                "startingTick": starting_tick,
+                "numberOfTicks": number_of_ticks,
+                "taxiIDs": taxi_ids,
+                "eventCursor": max(0, int(event_cursor)),
+                "timeoutMs": timeout_ms,
+            }
+            if fields:
+                data["fieldMask"] = sorted(fields)
+            if include_details:
+                data["includeDetails"] = True
+            if thresholds:
+                data["futureSupplyThresholds"] = thresholds
+            started_at = time.perf_counter()
+
+            def matching_command(response):
+                if (
+                        not isinstance(response, dict)
+                        or response.get("TYPE") != "CTRL_advanceAndSnapshot"):
+                    return True
+                response_id = response.get("commandID")
+                return response_id is None or str(response_id) == command_id
+
+            response = self.send_receive_msg(
+                {"TYPE": "CTRL_advanceAndSnapshot", "DATA": data},
+                ignore_heartbeats=True,
+                max_attempts=5,
+                timeout=max(float(self.timeout), timeout_ms / 1000.0 + 5.0),
+                return_errors=True,
+                command_id=command_id,
+                response_matcher=matching_command,
+            )
+            if not self._is_unsupported_response(response):
+                if response.get("TYPE") != "CTRL_advanceAndSnapshot":
+                    raise RuntimeError(
+                        "Expected CTRL_advanceAndSnapshot, received "
+                        f"{response.get('TYPE')}"
+                    )
+                response_command_id = response.get("commandID")
+                if response_command_id is None or str(response_command_id) != command_id:
+                    raise RuntimeError(
+                        "METS-R SIM advanceAndSnapshot response commandID "
+                        f"{response_command_id!r} does not match {command_id!r}"
+                    )
+                if str(response.get("CODE", "OK")).upper() != "OK":
+                    raise RuntimeError(
+                        f"METS-R SIM rejected CTRL_advanceAndSnapshot: {response}"
+                    )
+                self._update_current_tick_from_message(response)
+                if not self._routing_truthy(response.get("replayed", False)):
+                    self._record_server_tick_time(started_at, starting_tick)
+                return response
+            self._feature_support["advanceAndSnapshot"] = False
+
+        if not legacy_fallback:
+            raise RuntimeError("Connected METS-R SIM does not support advanceAndSnapshot")
+        fingerprint = json.dumps({
+            "startingTick": starting_tick,
+            "numberOfTicks": number_of_ticks,
+            "taxiIDs": taxi_ids,
+            "fieldMask": sorted(fields),
+            "thresholds": thresholds,
+            "eventCursor": max(0, int(event_cursor)),
+        }, sort_keys=True, separators=(",", ":"))
+        cached = self._legacy_command_results.get(command_id)
+        if cached is not None:
+            if cached["fingerprint"] != fingerprint:
+                raise ValueError("command_id was already used with a different payload")
+            replay = dict(cached["response"])
+            replay["replayed"] = True
+            return replay
+        if int(self.current_tick) != starting_tick:
+            raise RuntimeError(
+                f"starting_tick {starting_tick} does not match current tick "
+                f"{self.current_tick}"
+            )
+
+        self.tick(step_num=number_of_ticks)
+        snapshot = self.query_ride_hailing_snapshot(
+            taxi_ids=taxi_ids,
+            field_mask=fields,
+            include_details=include_details,
+            future_supply_thresholds=thresholds,
+            event_cursor=event_cursor,
+        )
+        response = {
+            "TYPE": "CTRL_advanceAndSnapshot",
+            "CODE": "OK",
+            "commandID": command_id,
+            "startingTick": starting_tick,
+            "finalTick": int(self.current_tick),
+            "advancedTicks": int(self.current_tick) - starting_tick,
+            "replayed": False,
+            "legacyFallback": True,
+            "taxis": snapshot["taxis"],
+            "availableTaxiSummary": snapshot["availableTaxiSummary"],
+            "futureSupply": snapshot["futureSupply"],
+            "events": snapshot["events"],
+            "nextEventCursor": snapshot["nextEventCursor"],
+        }
+        self._legacy_command_results[command_id] = {
+            "fingerprint": fingerprint,
+            "response": dict(response),
+        }
+        while len(self._legacy_command_results) > 128:
+            self._legacy_command_results.pop(next(iter(self._legacy_command_results)))
+        return response
+
     # Match available taxi(s) to existing pending request(s).
-    def dispatch_taxi(self, vehID, reqID):
+    def dispatch_taxi(
+            self,
+            vehID,
+            reqID,
+            origin_zone_id=None,
+            include_state=False,
+            command_id=None):
         """Dispatch taxi(s) to serve already-pending request(s).
 
         The METS-R SIM Control API separates request creation from dispatching.
@@ -2789,22 +4297,65 @@ class METSRClient:
         queue the request after an unfinished passenger-free trip, and return
         fields such as ``remainingCapacity``, ``requestPassengers``, and
         ``parkingReservationReleased`` in each response record.
+
+        ``origin_zone_id`` activates the indexed request lookup in optimized
+        simulators. ``include_state`` requests only the taxi ``state`` field;
+        older simulators are queried once after dispatch to fill it in. A
+        ``command_id`` is sent as stable retry metadata, but SIM f1818b2 does
+        not deduplicate dispatch commands; exactly-once behavior is guaranteed
+        only by :meth:`advance_and_snapshot`.
         """
-        msg = {
-                "TYPE": "CTRL_dispatchTaxi",
-                "DATA": []
-                }
+        msg = {"TYPE": "CTRL_dispatchTaxi", "DATA": []}
         if not isinstance(vehID, list):
             vehID = [vehID]
         if not isinstance(reqID, list):
             reqID = [reqID] * len(vehID)
-        assert len(vehID) == len(reqID), "vehID and reqID must have the same length"
+        if origin_zone_id is None:
+            origin_zone_id = [None] * len(vehID)
+        elif not isinstance(origin_zone_id, list):
+            origin_zone_id = [origin_zone_id] * len(vehID)
+        assert len(vehID) == len(reqID) == len(origin_zone_id), \
+            "vehID, reqID, and origin_zone_id must have the same length"
 
-        for vehID, reqID in zip(vehID, reqID):
-            msg["DATA"].append({"vehID": vehID, "reqID": reqID})
-        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        for veh_id, req_id, zone_id in zip(vehID, reqID, origin_zone_id):
+            record = {"vehID": veh_id, "reqID": req_id}
+            if zone_id is not None:
+                record["originZoneID"] = zone_id
+            msg["DATA"].append(record)
+        if include_state:
+            msg["fieldMask"] = ["state"]
+        res = self.send_receive_msg(
+            msg,
+            ignore_heartbeats=True,
+            command_id=command_id,
+        )
         assert res["TYPE"] == "CTRL_dispatchTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+
+        if include_state:
+            response_records = [
+                record for record in res.get("DATA", []) if isinstance(record, dict)
+            ]
+            for index, record in enumerate(response_records):
+                if record.get("ID") is None and index < len(vehID):
+                    record["ID"] = vehID[index]
+            missing_ids = [
+                record.get("ID")
+                for record in response_records
+                if record.get("ID") is not None and "state" not in record
+            ]
+            if missing_ids:
+                taxi_response = self.query_taxi(missing_ids)
+                state_by_id = {
+                    record.get("ID"): record.get("state")
+                    for record in taxi_response.get("DATA", [])
+                    if isinstance(record, dict) and "state" in record
+                }
+                for record in response_records:
+                    taxi_id = record.get("ID")
+                    if "state" not in record and taxi_id in state_by_id:
+                        record["state"] = state_by_id[taxi_id]
+                res["legacyFallback"] = True
         return res
 
     def cancel_requests(self, reqID, zoneID=None):
@@ -3587,6 +5138,15 @@ class METSRClient:
             )
         if config is not None:
             self.config = config
+            try:
+                self._client_config_values = dict(vars(config))
+            except TypeError:
+                self._client_config_values = {}
+        elif self.config_signature:
+            try:
+                self._client_config_values = json.loads(self.config_signature)
+            except (TypeError, ValueError):
+                self._client_config_values = {}
 
     def _read_reset_config(self, config_json):
         config_json_path = _normalize_config_json_path(config_json)
@@ -3612,6 +5172,8 @@ class METSRClient:
 
         assert res["TYPE"] == "CTRL_reset", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        self._legacy_command_results.clear()
+        self._capabilities_cache = None
 
         with self.viz_stream_lock:
             self._attack_vehicle_keys.clear()
@@ -3702,6 +5264,7 @@ class METSRClient:
         self._terminate_simulation_only()
         self._wait_for_sim_port_release(old_host, old_port)
         run_simulation_in_docker(config)
+        self._legacy_command_results.clear()
 
         self.host = target_host
         self.port = int(target_port)
@@ -3762,6 +5325,8 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_load", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
+        self._legacy_command_results.clear()
+        self._capabilities_cache = None
         if "TICK" in res or "tick" in res:
             self.current_tick = int(res.get("TICK", res.get("tick")))
         else:

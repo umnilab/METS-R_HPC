@@ -42,6 +42,9 @@ from utils.util import (
     METS_R_VIS_PURDUE_MAP_ID,
     METS_R_VIS_VEHICLE_TYPE_BY_GROUP,
     build_metsr_vis_url,
+    kafka_bootstrap_servers,
+    run_docker_compose,
+    wait_for_kafka,
 )
 
 
@@ -73,50 +76,6 @@ def _deps():
     cached = locals()
     setattr(_deps, "_cached", cached)
     return cached
-
-def kafka_bootstrap_servers(config):
-    return getattr(
-        config,
-        "kafka_bootstrap_servers",
-        getattr(config, "kafka_bootstrap_server", "localhost:29092"),
-    )
-
-
-def docker_compose_command():
-    if shutil.which("docker-compose"):
-        return ["docker-compose"]
-    if shutil.which("docker"):
-        return ["docker", "compose"]
-    raise RuntimeError(
-        "Docker Compose was not found. Install Docker Desktop or start Kafka manually on localhost:29092."
-    )
-
-
-def run_docker_compose(*args):
-    subprocess.run(docker_compose_command() + list(args), cwd="docker", check=True)
-
-
-def wait_for_kafka(bootstrap_servers="localhost:29092", timeout_s=90):
-    from kafka import KafkaAdminClient
-
-    deadline = time.time() + timeout_s
-    last_error = None
-    while time.time() < deadline:
-        try:
-            admin = KafkaAdminClient(
-                bootstrap_servers=bootstrap_servers,
-                request_timeout_ms=3000,
-                api_version_auto_timeout_ms=3000,
-            )
-            admin.close()
-            return
-        except Exception as exc:
-            last_error = exc
-            time.sleep(2)
-    raise RuntimeError(
-        f"Kafka broker at {bootstrap_servers!r} did not become ready within {timeout_s} seconds."
-    ) from last_error
-
 
 def probe_viz_stream(stream_url, timeout_s=1.0):
     """Return a short WebSocket reachability probe for the METS-R Vis stream."""

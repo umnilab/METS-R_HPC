@@ -10,7 +10,7 @@ import time
 import shutil
 from os import path
 import platform
-from contextlib import closing
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 import sys
 import zipfile
@@ -19,6 +19,81 @@ import weakref
 from threading import Event
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
+
+
+DEFAULT_KAFKA_BOOTSTRAP_SERVERS = "localhost:29092"
+_DEFAULT_DOCKER_COMPOSE_DIR = path.abspath(
+    path.join(path.dirname(__file__), os.pardir, "docker")
+)
+
+
+def kafka_bootstrap_servers(config=None):
+    """Resolve Kafka bootstrap servers from a dict or config namespace."""
+    if config is None:
+        return DEFAULT_KAFKA_BOOTSTRAP_SERVERS
+    if isinstance(config, dict):
+        return config.get(
+            "kafka_bootstrap_servers",
+            config.get("kafka_bootstrap_server", DEFAULT_KAFKA_BOOTSTRAP_SERVERS),
+        )
+    return getattr(
+        config,
+        "kafka_bootstrap_servers",
+        getattr(config, "kafka_bootstrap_server", DEFAULT_KAFKA_BOOTSTRAP_SERVERS),
+    )
+
+
+def docker_compose_command():
+    """Return an argv prefix for either Compose v1 or the Docker Compose plugin."""
+    if shutil.which("docker-compose"):
+        return ["docker-compose"]
+    if shutil.which("docker"):
+        return ["docker", "compose"]
+    raise RuntimeError(
+        "Docker Compose was not found. Install Docker Desktop or start Kafka "
+        f"manually on {DEFAULT_KAFKA_BOOTSTRAP_SERVERS}."
+    )
+
+
+def run_docker_compose(*args, compose_dir=None):
+    """Run the repository Docker Compose stack and fail on launch errors."""
+    return subprocess.run(
+        docker_compose_command() + list(args),
+        cwd=compose_dir or _DEFAULT_DOCKER_COMPOSE_DIR,
+        check=True,
+    )
+
+
+def wait_for_kafka(bootstrap_servers=DEFAULT_KAFKA_BOOTSTRAP_SERVERS, timeout_s=90):
+    """Wait until a Kafka broker responds, raising a useful timeout on failure."""
+    from kafka import KafkaAdminClient
+
+    deadline = time.monotonic() + timeout_s
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            admin = KafkaAdminClient(
+                bootstrap_servers=bootstrap_servers,
+                request_timeout_ms=3000,
+                api_version_auto_timeout_ms=3000,
+            )
+            admin.close()
+            return bootstrap_servers
+        except Exception as exc:
+            last_error = exc
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+    raise RuntimeError(
+        f"Kafka broker at {bootstrap_servers!r} did not become ready within {timeout_s} seconds."
+    ) from last_error
+
+
+def start_kafka(config=None, timeout_s=90, compose_dir=None):
+    """Start the tutorial Kafka services and wait until the broker is ready."""
+    bootstrap_servers = kafka_bootstrap_servers(config)
+    run_docker_compose(
+        "up", "-d", "zookeeper", "kafka", "init-kafka", compose_dir=compose_dir
+    )
+    return wait_for_kafka(bootstrap_servers, timeout_s=timeout_s)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +395,8 @@ _PROPERTY_OPTION_ALIASES = {
     "ENABLE_JSON_WRITE": ("json_output",),
     "NUM_OF_EV": ("num_etaxi",),
     "NUM_OF_BUS": ("num_ebus",),
+    "N_THREADS": ("sim_threads", "simulation_threads", "threads"),
+    "N_PARTITION": ("sim_partitions", "simulation_partitions", "partitions"),
     "RH_SHARE_PERCENTAGE": ("rh_share_file",),
     "RH_WAITING_TIME": ("rh_wait_file",),
     "BT_STD_FILE": ("bt_event_std_file",),
@@ -446,14 +523,28 @@ def _property_override_value(key, options, port, instance):
             return True, True
         return False, None
 
-    return _first_option_value(options, _config_names_for_property(key))
+    found, value = _first_option_value(
+        options,
+        _config_names_for_property(key),
+    )
+    if found and key in {"N_THREADS", "N_PARTITION"}:
+        value = _instance_value(value, instance)
+    return found, value
 
 
 # ---------------------------------------------------------------------------
 # Simulation file preparation
 # ---------------------------------------------------------------------------
 
-def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, template):
+def modify_property_file(
+    options,
+    src_data_dir,
+    dest_data_dir,
+    port,
+    instance,
+    template,
+    data_path_prefix=None,
+):
     fname = src_data_dir + "/Data.properties." + template
     if not path.exists(fname):
         print("ERROR, cannot find the property template file at ", fname)
@@ -471,7 +562,7 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
             found, value = _property_override_value(key, options, port, instance)
             if found:
                 l = _property_line(key, value, newline)
-        l = _rewrite_data_path(l, src_data_dir)
+        l = _rewrite_data_path(l, data_path_prefix or src_data_dir)
         
         f_new.write(l)
     f_new.close()
@@ -488,9 +579,73 @@ def force_copytree(src, dst):
     # Copy the source directory to the destination
     shutil.copytree(src, dst)
 
+_THIN_MUTABLE_DATA_ENTRIES = {
+    ".metsr_hpc_inputs.json",
+    "Data.properties",
+}
+
+
+def _prepare_thin_data_dir(dest_data_dir):
+    """Create or safely reuse the mutable data overlay for a thin run."""
+    if path.lexists(dest_data_dir):
+        if path.islink(dest_data_dir) or not path.isdir(dest_data_dir):
+            raise FileExistsError(
+                f"Refusing to reuse thin-run data directory {dest_data_dir}: "
+                "the path is not a real directory"
+            )
+    else:
+        os.makedirs(dest_data_dir)
+
+    entries = set(os.listdir(dest_data_dir))
+    unexpected = sorted(entries - _THIN_MUTABLE_DATA_ENTRIES)
+    if unexpected:
+        raise FileExistsError(
+            f"Refusing to reuse thin-run data directory {dest_data_dir}: "
+            f"unexpected existing entries {unexpected}"
+        )
+
+    for entry in entries:
+        entry_path = path.join(dest_data_dir, entry)
+        if path.islink(entry_path) or not path.isfile(entry_path):
+            raise FileExistsError(
+                f"Refusing to reuse thin-run data directory {dest_data_dir}: "
+                f"{entry} is not a regular file"
+            )
+
+
 # Copy necessary files for running the simulation
 def prepare_sim_dirs(options):
+    preparation_started = time.perf_counter()
+    preparation_started_at = time.time()
     src_data_dir = "data"
+    thin_run_value = getattr(options, "thin_run", None)
+    if thin_run_value is None:
+        thin_run_value = os.environ.get("METSR_THIN_RUN")
+    thin_run = _coerce_bool(thin_run_value, default=False)
+    thin_data_source = os.path.abspath(
+        getattr(options, "thin_run_data_source", None) or src_data_dir
+    )
+    thin_data_target = str(
+        (
+            getattr(options, "thin_run_data_target", None)
+            or os.environ.get("METSR_THIN_RUN_DATA_TARGET")
+            or "/opt/metsr-inputs"
+        )
+    )
+    thin_data_target = thin_data_target.replace("\\", "/")
+    if thin_data_target != "/":
+        thin_data_target = thin_data_target.rstrip("/")
+    if thin_run:
+        if not os.path.isdir(thin_data_source):
+            raise FileNotFoundError(
+                f"Thin-run data source does not exist: {thin_data_source}"
+            )
+        if not str(thin_data_target).startswith("/"):
+            raise ValueError("thin_run_data_target must be an absolute container path")
+        options.thin_run_data_source = thin_data_source
+        options.thin_run_data_target = thin_data_target
+        # The selected immutable tree owns both the template and static inputs.
+        src_data_dir = thin_data_source
     # check if metsr_port in the NameSpace options
     if hasattr(options, 'metsr_port'):
         # check if metsr_port number is equal to the number of simulations
@@ -508,25 +663,70 @@ def prepare_sim_dirs(options):
 
 
     dest_data_dirs = []
+    preparation_timings = []
     options.sim_dirs = []
     for i in range(options.num_simulations):
+        instance_started = time.perf_counter()
+        instance_started_at = time.time()
         # make a directory to run the simulator
         dir_name = get_sim_dir(options, i)
         if not path.exists(dir_name):
             os.makedirs(dir_name)
+        dest_data_dir = dir_name + "/" + "data"
+        if thin_run:
+            _prepare_thin_data_dir(dest_data_dir)
         options.sim_dirs.append(dir_name)
+        os.makedirs(path.join(dir_name, "logs"), exist_ok=True)
         shutil.copy(src_data_dir+"/log4j.properties", dir_name + "/log4j.properties")
         # copy the simulation config files
-        dest_data_dir = dir_name + "/" + "data"
 
-        if not path.exists(dest_data_dir):
-            os.mkdir(dest_data_dir)
-            # copy the entire data directory
+        if thin_run:
+            manifest_path = path.join(
+                dest_data_dir,
+                ".metsr_hpc_inputs.json",
+            )
+            with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "host_data_source": thin_data_source,
+                        "container_data_target": thin_data_target,
+                    },
+                    manifest_file,
+                    indent=2,
+                    sort_keys=True,
+                )
+                manifest_file.write("\n")
+        elif (
+            not path.exists(dest_data_dir)
+            or not path.exists(path.join(dest_data_dir, "Data.properties.Template"))
+        ):
+            # A normal run owns a complete input copy. The second condition also
+            # repairs a same-second directory collision with a prior thin run.
             force_copytree(src_data_dir, dest_data_dir)
 
-        modify_property_file(options, src_data_dir, dest_data_dir, options.ports[i], i, options.template)
+        modify_property_file(
+            options,
+            src_data_dir,
+            dest_data_dir,
+            options.ports[i],
+            i,
+            options.template,
+            data_path_prefix=thin_data_target if thin_run else None,
+        )
         dest_data_dirs.append(dest_data_dir[:-5]) # -5 to remove the "/data" part
+        preparation_timings.append(
+            {
+                "index": i,
+                "started_at": instance_started_at,
+                "preparation": time.perf_counter() - instance_started,
+                "thin_run": thin_run,
+            }
+        )
 
+    options.preparation_timings = preparation_timings
+    options.preparation_time = time.perf_counter() - preparation_started
+    options.preparation_started_at = preparation_started_at
     return dest_data_dirs
 
 # Function for getting the file name list of demand scenarios
@@ -647,10 +847,552 @@ def _shell_args(value):
     if value in (None, ""):
         return []
     if isinstance(value, str):
+        if platform.system() == "Windows":
+            lexer = shlex.shlex(value, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            lexer.escape = ""
+            return list(lexer)
         return shlex.split(value)
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if str(item)]
     return [str(value)]
+
+
+DEFAULT_METSR_SIM_IMAGE = "ennuilei/mets-r_sim:latest"
+DEFAULT_METSR_SIM_APPCONTAINER_IMAGE = f"docker://{DEFAULT_METSR_SIM_IMAGE}"
+
+_LAUNCH_TIMING_KEYS = (
+    "preparation",
+    "launch",
+    "connection",
+    "network_load",
+    "fleet_spawn",
+)
+_LOG_RELATIVE_TIME_RE = re.compile(r"^\s*(\d+)\s+")
+_LOG_PHASE_MARKERS = {
+    "connection": ("Connection object created.", "Connected to "),
+    "network_load": ("Building subcontexts", "VehicleContext creation"),
+    "fleet_spawn": ("VehicleContext creation", "Total EV buses generated"),
+}
+
+
+def _coerce_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", ""}:
+        return False
+    return bool(value)
+
+
+def _launcher_value(options, names, env_name=None, default=None):
+    for name in names:
+        value = _get_option(options, name)
+        if value is not _MISSING and value is not None and value != "":
+            return value
+    if env_name:
+        value = os.environ.get(env_name)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _set_launcher_value(options, name, value):
+    if isinstance(options, dict):
+        options[name] = value
+    else:
+        setattr(options, name, value)
+
+
+def _instance_value(value, index):
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        if index >= len(value):
+            raise ValueError(
+                f"Launcher option has {len(value)} values for simulation index {index}"
+            )
+        return value[index]
+    return value
+
+
+def _java_executable(options):
+    explicit = _launcher_value(options, ("java_executable",))
+    if explicit:
+        return str(explicit)
+    java_path = str(_launcher_value(options, ("java_path",), default="") or "")
+    if not java_path:
+        return "java"
+    return java_path.rstrip("/\\") + "/java"
+
+
+def _run_scoped_filename(filename, sim_dir, option_name):
+    """Return a POSIX relative path that cannot escape the mounted run directory."""
+    run_root = path.realpath(path.abspath(sim_dir))
+    raw_filename = os.fspath(filename)
+    if path.isabs(raw_filename):
+        host_filename = path.realpath(path.abspath(raw_filename))
+    else:
+        host_relative = raw_filename.replace("\\", os.sep).replace("/", os.sep)
+        host_filename = path.realpath(path.abspath(path.join(run_root, host_relative)))
+    try:
+        common_root = path.commonpath((run_root, host_filename))
+    except ValueError as exc:
+        raise ValueError(
+            f"{option_name} must resolve inside simulation run directory "
+            f"{run_root}: {raw_filename}"
+        ) from exc
+    if path.normcase(common_root) != path.normcase(run_root):
+        raise ValueError(
+            f"{option_name} must resolve inside simulation run directory "
+            f"{run_root}: {raw_filename}"
+        )
+    relative_filename = path.relpath(host_filename, run_root)
+    if relative_filename in ("", "."):
+        raise ValueError(f"{option_name} must name a file inside {run_root}")
+    host_parent = path.dirname(host_filename)
+    if host_parent:
+        os.makedirs(host_parent, exist_ok=True)
+    return relative_filename.replace("\\", "/")
+
+
+def _validate_jfr_option_overrides(raw_options):
+    message = (
+        "jfr_options must not set filename or provide "
+        "-XX:StartFlightRecording; use jfr_filename plus recording-option "
+        "fragments instead"
+    )
+    if isinstance(raw_options, dict):
+        values = [
+            f"{key}={_format_property_value(value)}"
+            for key, value in raw_options.items()
+            if value is not None
+        ]
+    elif isinstance(raw_options, (list, tuple)):
+        values = [str(item) for item in raw_options if str(item)]
+    else:
+        values = [str(raw_options or "")]
+    for value in values:
+        if (
+            "-xx:startflightrecording" in value.lower()
+            or re.search(
+                r"(?<![A-Za-z0-9_])filename\s*=",
+                value,
+                flags=re.IGNORECASE,
+            )
+        ):
+            raise ValueError(message)
+
+def _jfr_arguments(options, index, sim_dir):
+    raw_options = _launcher_value(
+        options, ("jfr_options",), env_name="METSR_JFR_OPTIONS"
+    )
+    enabled = _coerce_bool(
+        _launcher_value(
+            options,
+            ("enable_jfr", "jfr"),
+            env_name="METSR_ENABLE_JFR",
+            default=raw_options is not None,
+        )
+    )
+    if not enabled:
+        return [], {"enabled": False, "filename": None}
+
+    _validate_jfr_option_overrides(raw_options)
+    if isinstance(raw_options, (list, tuple)):
+        explicit_args = [str(item) for item in raw_options if str(item)]
+        option_fragment = ",".join(explicit_args)
+    elif isinstance(raw_options, dict):
+        option_fragment = ",".join(
+            f"{key}={_format_property_value(value)}"
+            for key, value in raw_options.items()
+            if value is not None
+        )
+    else:
+        option_fragment = str(raw_options or "").strip().strip(",")
+
+    filename = str(
+        _launcher_value(
+            options,
+            ("jfr_filename",),
+            env_name="METSR_JFR_FILENAME",
+            default=f"profiles/metsr_{index}.jfr",
+        )
+    ).format(index=index)
+    filename = _run_scoped_filename(filename, sim_dir, "jfr_filename")
+
+    recording_options = [f"filename={filename}", "dumponexit=true"]
+    for option_name, jfr_name in (
+        ("jfr_settings", "settings"),
+        ("jfr_duration", "duration"),
+        ("jfr_max_age", "maxage"),
+        ("jfr_max_size", "maxsize"),
+    ):
+        value = _launcher_value(options, (option_name,))
+        if value not in (None, ""):
+            recording_options.append(f"{jfr_name}={value}")
+    if option_fragment:
+        recording_options.append(option_fragment)
+
+    args = []
+    if _coerce_bool(_launcher_value(options, ("jfr_unlock_commercial_features",))):
+        args.append("-XX:+UnlockCommercialFeatures")
+    args.append("-XX:StartFlightRecording=" + ",".join(recording_options))
+    return args, {"enabled": True, "filename": filename}
+
+
+def _build_batch_java_command(options, index, sim_dir, classpath_separator=":"):
+    jvm_options = _launcher_value(
+        options,
+        ("jvm_options", "java_options"),
+        env_name="METSR_JVM_OPTIONS",
+        default="",
+    )
+    extra_options = _launcher_value(
+        options, ("jvm_extra_options", "java_extra_options"), default=""
+    )
+    jfr_args, jfr = _jfr_arguments(options, index, sim_dir)
+    scenario_dir = str(options.sim_dir).rstrip("/\\") + "/mets_r.rs"
+    command = [
+        _java_executable(options),
+        *_shell_args(jvm_options),
+        *_shell_args(extra_options),
+        *jfr_args,
+        "-cp",
+        get_classpath2(options, False, separator=classpath_separator),
+        "repast.simphony.batch.BatchMain",
+        "-params",
+        scenario_dir + "/batch_params.xml",
+        "-interactive",
+        scenario_dir,
+    ]
+    return command, jfr
+
+
+def _launcher_resources(options, backend, index):
+    prefix = "docker" if backend == "docker" else "appcontainer"
+    resources = {
+        "cpus": _launcher_value(
+            options,
+            (f"{prefix}_cpus", "container_cpus", "cpu_limit", "cpus"),
+            env_name=f"METSR_{prefix.upper()}_CPUS",
+        ),
+        "memory": _launcher_value(
+            options,
+            (f"{prefix}_memory", "container_memory", "memory_limit"),
+            env_name=f"METSR_{prefix.upper()}_MEMORY",
+        ),
+        "cpuset_cpus": _launcher_value(
+            options, (f"{prefix}_cpuset_cpus", "container_cpuset_cpus")
+        ),
+        "threads": _launcher_value(
+            options, ("n_threads", "sim_threads", "simulation_threads", "threads")
+        ),
+        "partitions": _launcher_value(
+            options,
+            ("n_partition", "sim_partitions", "simulation_partitions", "partitions"),
+        ),
+    }
+    return {
+        key: _instance_value(value, index)
+        for key, value in resources.items()
+    }
+
+
+def _append_resource_arguments(command, resources):
+    if resources.get("cpus") not in (None, ""):
+        command.extend(["--cpus", str(resources["cpus"])])
+    if resources.get("memory") not in (None, ""):
+        command.extend(["--memory", str(resources["memory"])])
+    if resources.get("cpuset_cpus") not in (None, ""):
+        command.extend(["--cpuset-cpus", str(resources["cpuset_cpus"])])
+
+
+def _thin_run_binding(options):
+    enabled = _coerce_bool(
+        _launcher_value(
+            options, ("thin_run",), env_name="METSR_THIN_RUN", default=False
+        )
+    )
+    if not enabled:
+        return None
+    source = os.path.abspath(
+        _launcher_value(
+            options, ("thin_run_data_source",), default=path.abspath("data")
+        )
+    )
+    target = str(
+        _launcher_value(
+            options,
+            ("thin_run_data_target",),
+            env_name="METSR_THIN_RUN_DATA_TARGET",
+            default="/opt/metsr-inputs",
+        )
+    ).rstrip("/")
+    if not path.isdir(source):
+        raise FileNotFoundError(f"Thin-run data source does not exist: {source}")
+    if not target.startswith("/"):
+        raise ValueError("thin_run_data_target must be an absolute container path")
+    return source, target
+
+
+def _preparation_duration(options, index):
+    timings = _launcher_value(options, ("preparation_timings",), default=[])
+    if isinstance(timings, (list, tuple)) and index < len(timings):
+        record = timings[index]
+        if isinstance(record, dict):
+            return record.get("preparation")
+        if isinstance(record, (int, float)):
+            return float(record)
+    return None
+
+
+class SimulationLaunchHandle:
+    """A scoped handle for one launched simulator."""
+
+    def __init__(
+        self,
+        backend,
+        command,
+        sim_dir,
+        *,
+        container_id=None,
+        process=None,
+        launch_result=None,
+        docker_executable="docker",
+        log_path=None,
+        image=None,
+        resources=None,
+        timings=None,
+        launched_at=None,
+    ):
+        self.backend = backend
+        self.command = list(command)
+        self.sim_dir = path.abspath(sim_dir)
+        self.container_id = container_id
+        self.process = process
+        self.launch_result = launch_result
+        self.docker_executable = docker_executable
+        self.log_path = log_path
+        self.image = image
+        self.resources = dict(resources or {})
+        self.launched_at = launched_at or time.time()
+        self.cleaned_up = False
+        self.cleanup_result = None
+        self._phase_starts = {}
+        self._log_signature = None
+        self._timings = {key: None for key in _LAUNCH_TIMING_KEYS}
+        for key, value in (timings or {}).items():
+            self.record_timing(key, value)
+
+    @property
+    def identifier(self):
+        if self.container_id:
+            return self.container_id
+        return getattr(self.process, "pid", None)
+
+    @property
+    def pid(self):
+        return getattr(self.process, "pid", None)
+
+    @property
+    def timings(self):
+        self.refresh_timings()
+        return self._timings
+
+    def record_timing(self, phase, seconds):
+        key = str(phase).strip().lower().replace("-", "_")
+        if seconds is not None:
+            self._timings[key] = max(0.0, float(seconds))
+        elif key not in self._timings:
+            self._timings[key] = None
+        return self._timings.get(key)
+
+    def start_phase(self, phase):
+        key = str(phase).strip().lower().replace("-", "_")
+        self._phase_starts[key] = time.perf_counter()
+        return self._phase_starts[key]
+
+    def finish_phase(self, phase):
+        key = str(phase).strip().lower().replace("-", "_")
+        started = self._phase_starts.pop(key, None)
+        if started is None:
+            raise RuntimeError(f"Timing phase {phase!r} was not started")
+        return self.record_timing(key, time.perf_counter() - started)
+
+    @contextmanager
+    def measure_phase(self, phase):
+        self.start_phase(phase)
+        try:
+            yield self
+        finally:
+            self.finish_phase(phase)
+
+    def refresh_timings(self):
+        if not self.log_path:
+            return self._timings
+        try:
+            stat = os.stat(self.log_path)
+            signature = (stat.st_size, stat.st_mtime_ns)
+            if signature == self._log_signature:
+                return self._timings
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as log:
+                lines = log.readlines()
+            self._log_signature = signature
+        except OSError:
+            return self._timings
+
+        positions = {
+            phase: {"start": None, "end": None}
+            for phase in _LOG_PHASE_MARKERS
+        }
+        for line in lines:
+            match = _LOG_RELATIVE_TIME_RE.match(line)
+            if match is None:
+                continue
+            relative_ms = int(match.group(1))
+            for phase, (start_marker, end_marker) in _LOG_PHASE_MARKERS.items():
+                phase_positions = positions[phase]
+                if phase_positions["start"] is None and start_marker in line:
+                    phase_positions["start"] = relative_ms
+                elif (
+                    phase_positions["start"] is not None
+                    and phase_positions["end"] is None
+                    and end_marker in line
+                ):
+                    phase_positions["end"] = relative_ms
+
+        for phase, phase_positions in positions.items():
+            if (
+                self._timings.get(phase) is None
+                and phase_positions["start"] is not None
+                and phase_positions["end"] is not None
+            ):
+                self.record_timing(
+                    phase,
+                    (phase_positions["end"] - phase_positions["start"]) / 1000.0,
+                )
+        return self._timings
+
+    def cleanup(self, timeout=10):
+        """Stop only this container/process; safe to call more than once."""
+        if self.cleaned_up:
+            return self.cleanup_result
+        self.refresh_timings()
+        if self.backend == "docker" and self.container_id:
+            self.cleanup_result = subprocess.run(
+                [
+                    self.docker_executable,
+                    "stop",
+                    "--time",
+                    str(max(0, int(timeout))),
+                    self.container_id,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if self.cleanup_result.returncode != 0:
+                error = (
+                    self.cleanup_result.stderr
+                    or self.cleanup_result.stdout
+                    or str(self.cleanup_result.returncode)
+                ).strip()
+                raise RuntimeError(
+                    f"Failed to stop METS-R Docker container "
+                    f"{self.container_id}: {error}"
+                )
+        elif self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.cleanup_result = self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.cleanup_result = self.process.wait(timeout=timeout)
+        self.cleaned_up = True
+        return self.cleanup_result
+
+    terminate = cleanup
+    close = cleanup
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
+        return False
+
+
+class SimulationLaunchGroup(list):
+    """Sequence of launch handles with group-scoped cleanup."""
+
+    @property
+    def container_ids(self):
+        return [handle.container_id for handle in self if handle.container_id]
+
+    @property
+    def processes(self):
+        return [handle.process for handle in self if handle.process is not None]
+
+    @property
+    def timings(self):
+        return [handle.timings for handle in self]
+
+    def refresh_timings(self):
+        for handle in self:
+            handle.refresh_timings()
+        return self.timings
+
+    def cleanup(self, timeout=10):
+        results = []
+        failures = []
+        for handle in reversed(self):
+            try:
+                results.append(handle.cleanup(timeout=timeout))
+            except Exception as exc:
+                results.append(None)
+                failures.append((handle, exc))
+        if failures:
+            details = "; ".join(
+                f"{getattr(handle, 'identifier', repr(handle))}: {exc}"
+                for handle, exc in failures
+            )
+            error = RuntimeError(
+                f"Failed to clean up {len(failures)} METS-R launch "
+                f"resource(s): {details}"
+            )
+            error.failures = failures
+            raise error from failures[0][1]
+        return results
+
+    terminate = cleanup
+    close = cleanup
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
+        return False
+
+
+LaunchHandle = SimulationLaunchHandle
+LaunchGroup = SimulationLaunchGroup
+
+
+def _attach_launch_group(options, handles):
+    _set_launcher_value(options, "launch_handles", handles)
+    # Keep references to the live dictionaries so log parsing and client-side
+    # phase measurements are reflected without replacing the config field.
+    _set_launcher_value(options, "launch_timings", [h._timings for h in handles])
+    return handles
 
 
 def _default_appcontainer_executable():
@@ -697,74 +1439,223 @@ def run_simulations(options):
         os.chdir(cwd)
 
 def run_simulations_in_background(options):
-    for i in range(0, options.num_simulations):
-        cwd = str(os.getcwd())
-        if platform.system() == "Windows":
-             # go to sim directory
-            os.chdir(options.sim_dirs[i])
-            # run the simulation on a new terminal
-            sim_command = '"' +  options.java_path + 'java"'+ " -Xmx16G "  + \
-                    "-cp " + \
-                    '"' + get_classpath2(options, False, separator = ";") + '" ' + \
-                    "repast.simphony.batch.BatchMain " + \
-                    "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
-                    "-interactive " + options.sim_dir + "mets_r.rs "
-            # print(sim_command)
-            if options.verbose: # print the sim output to the console
-                subprocess.Popen(sim_command)
-            else:
-                subprocess.Popen(sim_command + " > sim_{}.log 2>&1 &".format(i), shell=True)
-        else:
-            # go to sim directory
-            os.chdir(options.sim_dirs[i])
-            # run simulator on new terminal 
-            sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
-                    "-cp " + \
-                    get_classpath2(options, False) + ' ' + \
-                    "repast.simphony.batch.BatchMain " + \
-                    "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
-                    "-interactive " + options.sim_dir + "mets_r.rs "
-            if options.verbose:
-                os.system(sim_command)
-            else:
-                os.system(sim_command + " > sim_{}.log 2>&1 &".format(i))
-        # go back to test directory
-        os.chdir(cwd)
+    """Launch local Java processes and return scoped process handles."""
+    if _thin_run_binding(options) is not None:
+        raise RuntimeError(
+            "thin_run uses container-only input mounts; use Docker/AppContainer "
+            "or disable thin_run for a local Java launch"
+        )
+    handles = SimulationLaunchGroup()
+    separator = ";" if platform.system() == "Windows" else ":"
+    try:
+        for i in range(0, options.num_simulations):
+            sim_dir = path.abspath(options.sim_dirs[i])
+            command, jfr = _build_batch_java_command(
+                options, i, sim_dir, classpath_separator=separator
+            )
+            log_path = path.join(sim_dir, f"sim_{i}.log")
+            log_file = None
+            launch_started = time.perf_counter()
+            launched_at = time.time()
+            try:
+                popen_kwargs = {"cwd": sim_dir}
+                if not getattr(options, "verbose", False):
+                    log_file = open(log_path, "a", encoding="utf-8")
+                    popen_kwargs.update(
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                process = subprocess.Popen(command, **popen_kwargs)
+            finally:
+                if log_file is not None:
+                    log_file.close()
+            resources = _launcher_resources(options, "appcontainer", i)
+            resources["jfr"] = jfr
+            handles.append(
+                SimulationLaunchHandle(
+                    "process",
+                    command,
+                    sim_dir,
+                    process=process,
+                    log_path=path.join(sim_dir, "logs", "mets_r.log"),
+                    resources=resources,
+                    timings={
+                        "preparation": _preparation_duration(options, i),
+                        "launch": time.perf_counter() - launch_started,
+                    },
+                    launched_at=launched_at,
+                )
+            )
+            if getattr(options, "verbose", False):
+                print("METS-R process ID:", process.pid)
+    except Exception:
+        handles.cleanup()
+        raise
+    return _attach_launch_group(options, handles)
+
 
 def run_simulation_in_docker(options):
-    for i in range(0, options.num_simulations):
-        cwd = str(os.getcwd())
-        os.chdir(options.sim_dirs[i])
+    """Launch METS-R SIM containers and return scoped container handles.
 
-        sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
-            "-cp " + \
-            get_classpath2(options, False) + ' ' + \
-            "repast.simphony.batch.BatchMain " + \
-            "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
-            "-interactive " + options.sim_dir + "mets_r.rs"
-        
-        docker_command = f'docker run -d --rm --mount src="{os.getcwd()}",target=/home/test,type=bind --net=host ennuilei/mets-r_sim  /bin/bash -c "cd /home/test && ' + sim_command + '"'
-        result = subprocess.run(docker_command, shell=True, text=True, capture_output=True)
-        if options.verbose:
-            print("Container ID:", result.stdout)
-            # print("Error msg:", result.stderr)
-        # container_id = result.stdout.strip()
-        os.chdir(cwd)
+    Supported overrides include ``docker_image``, ``docker_cpus``,
+    ``docker_memory``, ``docker_cpuset_cpus``, ``jvm_options``, and the JFR
+    options accepted by :func:`_jfr_arguments`. All commands are argv lists and
+    are executed without a host or in-container shell.
+    """
+    docker_executable = str(
+        _launcher_value(
+            options,
+            ("docker_executable",),
+            env_name="METSR_DOCKER_EXECUTABLE",
+            default="docker",
+        )
+    )
+    image = str(
+        _launcher_value(
+            options,
+            ("docker_image",),
+            env_name="METSR_DOCKER_IMAGE",
+            default=DEFAULT_METSR_SIM_IMAGE,
+        )
+    )
+    cli_args = _shell_args(
+        _launcher_value(
+            options, ("docker_cli_args",), env_name="METSR_DOCKER_CLI_ARGS"
+        )
+    )
+    runtime_args = _shell_args(
+        _launcher_value(options, ("docker_args",), env_name="METSR_DOCKER_ARGS")
+    )
+    if any(
+        argument == "--pull" or argument.startswith("--pull=")
+        for argument in runtime_args
+    ):
+        raise ValueError(
+            "docker_args must not override the launcher-managed --pull=always policy"
+        )
+    bind_target = str(
+        _launcher_value(
+            options,
+            ("docker_bind_target", "container_bind_target"),
+            env_name="METSR_DOCKER_BIND_TARGET",
+            default="/home/test",
+        )
+    )
+    network = _launcher_value(
+        options,
+        ("docker_network",),
+        env_name="METSR_DOCKER_NETWORK",
+        default="host",
+    )
+    thin_binding = _thin_run_binding(options)
+    handles = SimulationLaunchGroup()
+
+    try:
+        for i in range(0, options.num_simulations):
+            sim_dir = path.abspath(options.sim_dirs[i])
+            property_file = path.join(sim_dir, "data", "Data.properties")
+            if thin_binding is not None and not path.isfile(property_file):
+                raise FileNotFoundError(
+                    "Thin-run Data.properties is missing; call prepare_sim_dirs() "
+                    f"before launching ({property_file})"
+                )
+            java_command, jfr = _build_batch_java_command(options, i, sim_dir)
+            resources = _launcher_resources(options, "docker", i)
+            resources["jfr"] = jfr
+            command = [
+                docker_executable,
+                *cli_args,
+                "run",
+                "--pull=always",
+                "-d",
+                "--rm",
+                "--label",
+                "mets-r.hpc=true",
+            ]
+            if network not in (None, "", False):
+                command.extend(["--network", str(network)])
+            _append_resource_arguments(command, resources)
+            command.extend(runtime_args)
+            command.extend(
+                [
+                    "--mount",
+                    f"type=bind,source={sim_dir},target={bind_target}",
+                ]
+            )
+            if thin_binding is not None:
+                thin_source, thin_target = thin_binding
+                command.extend(
+                    [
+                        "--mount",
+                        (
+                            f"type=bind,source={thin_source},target={thin_target},"
+                            "readonly"
+                        ),
+                    ]
+                )
+            command.extend(
+                [
+                    "--workdir",
+                    bind_target,
+                    image,
+                    *java_command,
+                ]
+            )
+
+            launch_started = time.perf_counter()
+            launched_at = time.time()
+            try:
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"Docker executable {docker_executable!r} was not found. "
+                    "Set options.docker_executable or METSR_DOCKER_EXECUTABLE."
+                ) from exc
+            launch_duration = time.perf_counter() - launch_started
+            if result.returncode != 0:
+                error = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    f"Failed to launch METS-R Docker container: {error or result.returncode}"
+                )
+            container_id = (result.stdout or "").strip().splitlines()
+            container_id = container_id[-1].strip() if container_id else ""
+            if not container_id:
+                raise RuntimeError("Docker did not return a METS-R container ID")
+            handle = SimulationLaunchHandle(
+                "docker",
+                command,
+                sim_dir,
+                container_id=container_id,
+                launch_result=result,
+                docker_executable=docker_executable,
+                log_path=path.join(sim_dir, "logs", "mets_r.log"),
+                image=image,
+                resources=resources,
+                timings={
+                    "preparation": _preparation_duration(options, i),
+                    "launch": launch_duration,
+                },
+                launched_at=launched_at,
+            )
+            handles.append(handle)
+            if getattr(options, "verbose", False):
+                print("Container ID:", container_id)
+    except Exception:
+        handles.cleanup()
+        raise
+    return _attach_launch_group(options, handles)
 
 
 def run_simulation_in_appcontainer(options):
-    """Launch METS-R SIM with an AppContainer/Apptainer-style runtime.
+    """Launch METS-R SIM with Apptainer/Singularity and return process handles.
 
-    This mode starts only the METS-R Java simulator. Kafka/docker-compose
-    services are not available here, so Kafka-backed V2X examples should still
-    use Docker mode or an externally managed Kafka service.
-
-    Optional config/environment overrides:
-      - appcontainer_executable / METSR_APPCONTAINER_EXECUTABLE
-      - appcontainer_image / METSR_APPCONTAINER_IMAGE
-      - appcontainer_args / METSR_APPCONTAINER_ARGS
-      - appcontainer_bind_target / METSR_APPCONTAINER_BIND_TARGET
-      - appcontainer_command / METSR_APPCONTAINER_COMMAND
+    Kafka/docker-compose services are not started by this mode. CPU and memory
+    limits use the runtime's Docker-compatible cgroup flags when configured.
     """
     note = (
         "NOTE: AppContainer mode starts only METS-R SIM; Kafka/docker-compose "
@@ -777,75 +1668,137 @@ def run_simulation_in_appcontainer(options):
     ):
         print(note)
 
-    executable = (
-        getattr(options, "appcontainer_executable", None)
-        or os.environ.get("METSR_APPCONTAINER_EXECUTABLE")
-        or _default_appcontainer_executable()
+    executable = str(
+        _launcher_value(
+            options,
+            ("appcontainer_executable",),
+            env_name="METSR_APPCONTAINER_EXECUTABLE",
+            default=_default_appcontainer_executable(),
+        )
     )
-    image = (
-        getattr(options, "appcontainer_image", None)
-        or os.environ.get("METSR_APPCONTAINER_IMAGE")
-        or "docker://ennuilei/mets-r_sim"
+    app_image = _launcher_value(
+        options,
+        ("appcontainer_image",),
+        env_name="METSR_APPCONTAINER_IMAGE",
     )
+    if app_image is None:
+        docker_image = str(
+            _launcher_value(
+                options,
+                ("docker_image",),
+                env_name="METSR_DOCKER_IMAGE",
+                default=DEFAULT_METSR_SIM_IMAGE,
+            )
+        )
+        app_image = (
+            docker_image
+            if "://" in docker_image
+            else "docker://" + docker_image
+        )
+    image = str(app_image)
     runtime_args = _shell_args(
-        getattr(options, "appcontainer_args", None)
-        or os.environ.get("METSR_APPCONTAINER_ARGS")
+        _launcher_value(
+            options,
+            ("appcontainer_args",),
+            env_name="METSR_APPCONTAINER_ARGS",
+        )
     )
-    bind_target = (
-        getattr(options, "appcontainer_bind_target", None)
-        or os.environ.get("METSR_APPCONTAINER_BIND_TARGET")
-        or "/home/test"
+    bind_target = str(
+        _launcher_value(
+            options,
+            ("appcontainer_bind_target", "container_bind_target"),
+            env_name="METSR_APPCONTAINER_BIND_TARGET",
+            default="/home/test",
+        )
     )
-    command_name = (
-        getattr(options, "appcontainer_command", None)
-        or os.environ.get("METSR_APPCONTAINER_COMMAND")
-        or "exec"
+    command_name = str(
+        _launcher_value(
+            options,
+            ("appcontainer_command",),
+            env_name="METSR_APPCONTAINER_COMMAND",
+            default="exec",
+        )
     )
+    workdir_arg = _launcher_value(
+        options,
+        ("appcontainer_workdir_arg",),
+        env_name="METSR_APPCONTAINER_WORKDIR_ARG",
+        default="--pwd",
+    )
+    thin_binding = _thin_run_binding(options)
+    handles = SimulationLaunchGroup()
 
-    for i in range(0, options.num_simulations):
-        cwd = str(os.getcwd())
-        log_file = None
-        try:
-            os.chdir(options.sim_dirs[i])
-
-            sim_command = '' +  options.java_path + 'java'+ " -Xmx16G "  + \
-                "-cp " + \
-                get_classpath2(options, False) + ' ' + \
-                "repast.simphony.batch.BatchMain " + \
-                "-params " + options.sim_dir + "mets_r.rs/batch_params.xml " +\
-                "-interactive " + options.sim_dir + "mets_r.rs"
-
-            appcontainer_command = [
+    try:
+        for i in range(0, options.num_simulations):
+            sim_dir = path.abspath(options.sim_dirs[i])
+            property_file = path.join(sim_dir, "data", "Data.properties")
+            if thin_binding is not None and not path.isfile(property_file):
+                raise FileNotFoundError(
+                    "Thin-run Data.properties is missing; call prepare_sim_dirs() "
+                    f"before launching ({property_file})"
+                )
+            java_command, jfr = _build_batch_java_command(options, i, sim_dir)
+            resources = _launcher_resources(options, "appcontainer", i)
+            resources["jfr"] = jfr
+            command = [
                 executable,
                 command_name,
                 *runtime_args,
-                "--bind",
-                f"{os.getcwd()}:{bind_target}",
-                image,
-                "/bin/bash",
-                "-lc",
-                f"cd {shlex.quote(bind_target)} && {sim_command}",
             ]
+            _append_resource_arguments(command, resources)
+            command.extend(["--bind", f"{sim_dir}:{bind_target}"])
+            if thin_binding is not None:
+                thin_source, thin_target = thin_binding
+                command.extend(["--bind", f"{thin_source}:{thin_target}:ro"])
+            if workdir_arg not in (None, "", False):
+                command.extend([str(workdir_arg), bind_target])
+            command.extend([image, *java_command])
 
-            if getattr(options, "verbose", False):
-                process = subprocess.Popen(appcontainer_command)
-                print("AppContainer METS-R process ID:", process.pid)
-            else:
-                log_file = open("sim_{}.log".format(i), "a")
-                process = subprocess.Popen(
-                    appcontainer_command,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
+            log_path = path.join(sim_dir, f"sim_{i}.log")
+            log_file = None
+            launch_started = time.perf_counter()
+            launched_at = time.time()
+            try:
+                popen_kwargs = {"cwd": sim_dir}
+                if not getattr(options, "verbose", False):
+                    log_file = open(log_path, "a", encoding="utf-8")
+                    popen_kwargs.update(
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                process = subprocess.Popen(command, **popen_kwargs)
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"AppContainer executable {executable!r} was not found. "
+                    "Set options.appcontainer_executable or "
+                    "METSR_APPCONTAINER_EXECUTABLE."
+                ) from exc
+            finally:
+                if log_file is not None:
+                    log_file.close()
+
+            handles.append(
+                SimulationLaunchHandle(
+                    "appcontainer",
+                    command,
+                    sim_dir,
+                    process=process,
+                    log_path=path.join(sim_dir, "logs", "mets_r.log"),
+                    image=image,
+                    resources=resources,
+                    timings={
+                        "preparation": _preparation_duration(options, i),
+                        "launch": time.perf_counter() - launch_started,
+                    },
+                    launched_at=launched_at,
                 )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"AppContainer executable {executable!r} was not found. "
-                "Set options.appcontainer_executable or METSR_APPCONTAINER_EXECUTABLE."
-            ) from exc
-        finally:
-            if log_file is not None:
-                log_file.close()
-            os.chdir(cwd)
+            )
+            if getattr(options, "verbose", False):
+                print("AppContainer METS-R process ID:", process.pid)
+    except Exception:
+        handles.cleanup()
+        raise
+    return _attach_launch_group(options, handles)
 
 def clear_all(patterns=None, docker_executable="docker", verbose=True, stop_servers=True):
     """Stop process-local METS-R helper servers and running METS-R Docker containers.
