@@ -3763,7 +3763,7 @@ class METSRClient:
             self,
             vehID,
             roadID,
-            laneID,
+            laneID = -1,
             dist = None,
             private_veh = False,
             x = None,
@@ -3775,7 +3775,8 @@ class METSRClient:
         versions also accept ``x``/``y`` coordinates, which are projected onto
         the target lane by the simulator. Set ``transform_coords=True`` when
         those coordinates are projected/local SUMO, XODR, or CARLA-meter
-        coordinates; leave it ``False`` for SIM/internal coordinates.
+        coordinates; leave it ``False`` for SIM/internal coordinates. 
+        When laneID = -1, the vehicle will be teleported to the closest lane (Note: x/y is required in this case)
         """
         msg = {
                 "TYPE": "CTRL_teleportTraceReplayVeh",

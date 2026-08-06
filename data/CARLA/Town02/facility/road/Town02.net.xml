@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-06-09 09:56:55 by Eclipse SUMO netconvert Version 1.18.0
+<!-- generated on 2026-08-06 08:26:37 by Eclipse SUMO netconvert Version 1.18.0
 <configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/netconvertConfiguration.xsd">
 
     <input>
@@ -23,6 +23,7 @@
     <formats>
         <opendrive.import-all-lanes value="true"/>
         <opendrive.curve-resolution value="1"/>
+        <opendrive.min-width value="0"/>
     </formats>
 
 </configuration>
