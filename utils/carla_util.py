@@ -53,6 +53,7 @@ class CarlaCosimState:
       dest_roads: dict = field(default_factory=dict)
       entered: dict = field(default_factory=dict)
       waiting_vehicles: set = field(default_factory=set)
+      transition_failures: dict = field(default_factory=dict)
 
 
 def set_overlook_camera(world, x=0.0, y=0.0, z=300.0, yaw=-90.0, pitch=-90.0):
@@ -109,6 +110,86 @@ def get_metsr_rotation(carla_yaw):
 def _road_id_matches(road_id, road_ids):
       road_values = set(road_ids or [])
       return road_id in road_values or str(road_id) in road_values
+
+
+def _pending_observed_road_id(world, actor, cosim_vehicle):
+      """Resolve the directly observed successor of a pending SIM connector.
+
+      METS-R advances the pending target to ``route[0]`` before the external
+      connector commits.  Only ``route[1]`` can therefore be used to recover
+      from a sparse CARLA update that skipped the short target road.  The
+      numeric/sign check mirrors the OpenDRIVE ``road_id``/``lane_id`` mapping
+      produced by netconvert while preserving exact IDs such as ``-0`` and
+      ``-12261#1``.
+      """
+      if not isinstance(cosim_vehicle, dict):
+            return None
+      if cosim_vehicle.get("transitionPending") is not True:
+            return None
+
+      route = [
+            str(road_id)
+            for road_id in (cosim_vehicle.get("route") or [])
+      ]
+      target_road = cosim_vehicle.get("transitionTargetRoadID")
+      if target_road in (None, "") or len(route) < 2:
+            return None
+      if route[0] != str(target_road):
+            return None
+
+      candidate = route[1]
+      candidate_base = candidate.split("#", 1)[0]
+      is_negative = candidate_base.startswith("-")
+      numeric_base = candidate_base[1:] if is_negative else candidate_base
+      if not numeric_base.isdigit():
+            return None
+
+      try:
+            waypoint = world.get_map().get_waypoint(
+                  actor.get_location(),
+                  project_to_road=False,
+                  lane_type=carla.LaneType.Driving,
+            )
+            if waypoint is None or waypoint.is_junction:
+                  return None
+            waypoint_road = int(waypoint.road_id)
+            waypoint_lane = int(waypoint.lane_id)
+      except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None
+
+      if waypoint_lane == 0 or int(numeric_base) != waypoint_road:
+            return None
+      if is_negative != (waypoint_lane < 0):
+            return None
+      return candidate
+
+
+def _first_response_record(response):
+      if not isinstance(response, dict):
+            return {}
+      records = response.get("DATA", [])
+      if not isinstance(records, list) or not records:
+            return {}
+      return records[0] if isinstance(records[0], dict) else {}
+
+
+def _transition_result(veh_id, status, record=None):
+      result = {"vehID": veh_id, "STATUS": status}
+      if isinstance(record, dict):
+            for key in (
+                  "REASON",
+                  "RETRYABLE",
+                  "WARN",
+                  "transitionAccepted",
+                  "transitionPending",
+                  "transitionCommitted",
+                  "roadID",
+                  "laneID",
+                  "internalLaneID",
+            ):
+                  if key in record:
+                        result[key] = record[key]
+      return result
 
 
 def is_location_on_carla_roads(world, x, y, road_ids, lane_type=None):
@@ -206,6 +287,7 @@ def destroy_tracked_carla_vehicle(state, veh_id):
       state.dest_roads.pop(veh_id, None)
       state.entered.pop(veh_id, None)
       state.waiting_vehicles.discard(veh_id)
+      state.transition_failures.pop(veh_id, None)
       return destroyed
 
 
@@ -218,18 +300,33 @@ def update_carla_vehicle_from_metsr(world, actor, vehicle_state):
       return True
 
 
-def teleport_metsr_vehicle_from_carla(metsr, veh_id, private_veh, actor, transform_coords=True, speed=0.0):
+def teleport_metsr_vehicle_from_carla(
+      metsr,
+      veh_id,
+      private_veh,
+      actor,
+      transform_coords=True,
+      speed=0.0,
+      observed_road_id=None,
+):
       loc = actor.get_location()
       bearing = carla_yaw_to_metsr_bearing(actor.get_transform().rotation.yaw)
+      request = {
+            "vehID": veh_id,
+            "x": loc.x,
+            "y": -loc.y,
+            "z": loc.z,
+            "bearing": bearing,
+            "speed": speed,
+            "private_veh": private_veh,
+            "transform_coords": transform_coords,
+      }
+      # Keep adapters implementing the older Python call signature working
+      # when no sparse-transition hint is available.
+      if observed_road_id is not None:
+            request["observed_road_id"] = observed_road_id
       return metsr.teleport_cosim_vehicle(
-            vehID=veh_id,
-            x=loc.x,
-            y=-loc.y,
-            z=loc.z,
-            bearing=bearing,
-            speed=speed,
-            private_veh=private_veh,
-            transform_coords=transform_coords,
+            **request,
       )
 
 
@@ -272,6 +369,20 @@ def stop_carla_vehicle(actor):
       actor.set_target_velocity(carla.Vector3D(x=0.0, y=0.0, z=0.0))
       actor.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
       actor.enable_constant_velocity(carla.Vector3D(x=0.0, y=0.0, z=0.0))
+
+
+def resume_carla_vehicle(actor):
+      if actor is None:
+            return
+      try:
+            actor.disable_constant_velocity()
+      except (AttributeError, RuntimeError):
+            pass
+      try:
+            actor.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0))
+      except (AttributeError, RuntimeError):
+            pass
+      actor.set_autopilot(True)
 
 
 def configure_metsr_cosim_roads(metsr, metsr_roads):
@@ -355,12 +466,22 @@ def _sync_active_carla_vehicle(
       waypoint_tolerance=3.0,
       min_waypoint_speed=0.1,
       verbose=False,
+      cosim_vehicle=None,
+      retry_transition=True,
 ):
       try:
             actor = state.active_vehicles[veh_id]
             loc = actor.get_location()
       except RuntimeError:
             print(f"Vehicle {veh_id} removed by CARLA, re-adding it.")
+            cached_state = {
+                  "coord_map": state.coord_maps.get(veh_id),
+                  "route": state.routes.get(veh_id),
+                  "dest_road": state.dest_roads.get(veh_id),
+                  "entered": state.entered.get(veh_id, False),
+                  "waiting": veh_id in state.waiting_vehicles,
+                  "failure": state.transition_failures.get(veh_id),
+            }
             destroy_tracked_carla_vehicle(state, veh_id)
             actor = spawn_carla_vehicle(
                   world,
@@ -373,17 +494,147 @@ def _sync_active_carla_vehicle(
             )
             if actor is None:
                   return {"vehID": veh_id, "STATUS": "SPAWN_FAILED"}
+            if cached_state["coord_map"] is not None:
+                  state.coord_maps[veh_id] = cached_state["coord_map"]
+            if cached_state["route"] is not None:
+                  state.routes[veh_id] = cached_state["route"]
+            if cached_state["dest_road"] is not None:
+                  state.dest_roads[veh_id] = cached_state["dest_road"]
+            state.entered[veh_id] = cached_state["entered"]
+            if cached_state["waiting"]:
+                  state.waiting_vehicles.add(veh_id)
+            if cached_state["failure"] is not None:
+                  state.transition_failures[veh_id] = cached_state["failure"]
             loc = actor.get_location()
 
-      teleport_metsr_vehicle_from_carla(
+      observed_road_id = _pending_observed_road_id(
+            world, actor, cosim_vehicle
+      )
+      teleport_response = teleport_metsr_vehicle_from_carla(
             metsr,
             veh_id,
             private_veh,
             actor,
             transform_coords=transform_coords,
+            observed_road_id=observed_road_id,
+      )
+      teleport_record = _first_response_record(teleport_response)
+      on_carla_road = is_location_on_carla_roads(
+            world, loc.x, loc.y, carla_roads
       )
 
-      if is_location_on_carla_roads(world, loc.x, loc.y, carla_roads):
+      # QUERY_coSimVehicle is authoritative for whether this pose update was
+      # expected to commit a connector. Ordinary teleports also return
+      # transitionPending=False, so that field alone must never remove an
+      # actor.
+      transition_was_pending = (
+            isinstance(cosim_vehicle, dict)
+            and cosim_vehicle.get("transitionPending") is True
+      )
+      if transition_was_pending:
+            state.transition_failures.pop(veh_id, None)
+            if veh_id in state.waiting_vehicles:
+                  state.waiting_vehicles.discard(veh_id)
+                  resume_carla_vehicle(actor)
+
+            if teleport_record.get("STATUS") != "OK":
+                  result = _transition_result(
+                        veh_id, "TRANSITION_PENDING", teleport_record
+                  )
+                  result["TELEPORT_STATUS"] = teleport_record.get(
+                        "STATUS", "INVALID_RESPONSE"
+                  )
+                  return result
+
+            still_pending = teleport_record.get("transitionPending")
+            transition_committed = (
+                  teleport_record.get("transitionCommitted") is True
+            )
+            if not transition_committed and still_pending is not False:
+                  if on_carla_road:
+                        state.entered[veh_id] = True
+                  elif not state.entered.get(veh_id, False):
+                        drive_actor_toward_metsr_waypoints(
+                              world,
+                              actor,
+                              state.coord_maps.get(veh_id, []),
+                              vehicle_state,
+                              waypoint_tolerance=waypoint_tolerance,
+                              min_speed=min_waypoint_speed,
+                        )
+                  return _transition_result(
+                        veh_id, "TRANSITION_PENDING", teleport_record
+                  )
+
+            target_road = cosim_vehicle.get("transitionTargetRoadID")
+            target_is_cosim = None
+            if metsr_roads and target_road not in (None, ""):
+                  target_is_cosim = _road_id_matches(
+                        target_road, metsr_roads
+                  )
+
+            if target_is_cosim is False:
+                  print(f"Vehicle {veh_id} exited co-sim area.")
+                  result = _transition_result(
+                        veh_id, "EXITED_CARLA_ROAD", teleport_record
+                  )
+                  destroy_tracked_carla_vehicle(state, veh_id)
+                  return result
+
+            if target_is_cosim is True:
+                  if on_carla_road:
+                        state.entered[veh_id] = True
+                  elif not state.entered.get(veh_id, False):
+                        drive_actor_toward_metsr_waypoints(
+                              world,
+                              actor,
+                              state.coord_maps.get(veh_id, []),
+                              vehicle_state,
+                              waypoint_tolerance=waypoint_tolerance,
+                              min_speed=min_waypoint_speed,
+                        )
+                  return _transition_result(
+                        veh_id, "TRANSITION_COMMITTED", teleport_record
+                  )
+
+            if on_carla_road:
+                  state.entered[veh_id] = True
+                  return _transition_result(
+                        veh_id, "TRANSITION_COMMITTED", teleport_record
+                  )
+            if state.entered.get(veh_id, False):
+                  print(f"Vehicle {veh_id} exited co-sim area.")
+                  result = _transition_result(
+                        veh_id, "EXITED_CARLA_ROAD", teleport_record
+                  )
+                  destroy_tracked_carla_vehicle(state, veh_id)
+                  return result
+
+            if drive_actor_toward_metsr_waypoints(
+                  world,
+                  actor,
+                  state.coord_maps.get(veh_id, []),
+                  vehicle_state,
+                  waypoint_tolerance=waypoint_tolerance,
+                  min_speed=min_waypoint_speed,
+            ):
+                  return _transition_result(
+                        veh_id, "APPROACHING_CARLA_ROAD", teleport_record
+                  )
+            return _transition_result(
+                  veh_id, "TRANSITION_COMMITTED", teleport_record
+            )
+
+      terminal_failure = state.transition_failures.get(veh_id)
+      if terminal_failure is not None:
+            return _transition_result(
+                  veh_id, "METS_R_TRANSITION_FAILED", terminal_failure
+            )
+
+      if veh_id in state.waiting_vehicles and not retry_transition:
+            return {"vehID": veh_id, "STATUS": "WAITING_FOR_METS_R_ROAD"}
+
+      if on_carla_road:
             if not state.entered.get(veh_id, False):
                   state.entered[veh_id] = True
             return {"vehID": veh_id, "STATUS": "ACTIVE"}
@@ -414,15 +665,46 @@ def _sync_active_carla_vehicle(
             destroy_tracked_carla_vehicle(state, veh_id)
             return {"vehID": veh_id, "STATUS": "REACHED_DEST"}
 
-      success = metsr.enter_next_road(vehID=veh_id, private_veh=private_veh)["DATA"][0]["STATUS"]
-      if success == "OK":
+      transition_response = metsr.enter_next_road(
+            vehID=veh_id, private_veh=private_veh
+      )
+      transition_record = _first_response_record(transition_response)
+      if transition_record.get("STATUS") == "OK":
+            was_waiting = veh_id in state.waiting_vehicles
+            state.transition_failures.pop(veh_id, None)
+            if transition_record.get("transitionPending") is True:
+                  state.waiting_vehicles.discard(veh_id)
+                  if was_waiting:
+                        resume_carla_vehicle(actor)
+                  return _transition_result(
+                        veh_id, "TRANSITION_PENDING", transition_record
+                  )
+
             print(f"Vehicle {veh_id} exited co-sim area.")
+            result = _transition_result(
+                  veh_id, "EXITED_CARLA_ROAD", transition_record
+            )
             destroy_tracked_carla_vehicle(state, veh_id)
-            return {"vehID": veh_id, "STATUS": "EXITED_CARLA_ROAD"}
+            return result
 
       stop_carla_vehicle(actor)
+      retryable = transition_record.get("RETRYABLE") is True
+      legacy_failure = "REASON" not in transition_record
+      if retryable or legacy_failure:
+            state.transition_failures.pop(veh_id, None)
+            state.waiting_vehicles.add(veh_id)
+            return _transition_result(
+                  veh_id, "WAITING_FOR_METS_R_ROAD", transition_record
+            )
+
+      # Keep the actor marked as stopped so an externally accepted pending
+      # transition can release its constant-velocity brake. The accompanying
+      # failure record prevents automatic enterNextRoad retries.
       state.waiting_vehicles.add(veh_id)
-      return {"vehID": veh_id, "STATUS": "WAITING_FOR_METS_R_ROAD"}
+      state.transition_failures[veh_id] = dict(transition_record)
+      return _transition_result(
+            veh_id, "METS_R_TRANSITION_FAILED", transition_record
+      )
 
 
 def step_carla_metsr_cosim(
@@ -482,33 +764,34 @@ def step_carla_metsr_cosim(
             vehicle_states,
       ):
             if cosim_id in state.active_vehicles:
-                  if cosim_id not in state.waiting_vehicles:
-                        results.append(_sync_active_carla_vehicle(
-                              metsr,
-                              world,
-                              traffic_manager,
-                              state,
-                              cosim_id,
-                              private_flag,
-                              vehicle_state,
-                              carla_roads or [],
-                              metsr_roads or [],
-                              transform_coords=transform_coords,
-                              waypoint_tolerance=waypoint_tolerance,
-                              min_waypoint_speed=min_waypoint_speed,
-                              verbose=verbose,
-                        ))
-                  else:
-                        current_tick = getattr(metsr, "current_tick", 0) or 0
-                        if waiting_retry_interval and current_tick % waiting_retry_interval == 0:
-                              success = metsr.enter_next_road(
-                                    vehID=cosim_id,
-                                    private_veh=private_flag,
-                              )["DATA"][0]["STATUS"]
-                              if success == "OK":
-                                    print(f"Vehicle {cosim_id} exited co-sim area.")
-                                    destroy_tracked_carla_vehicle(state, cosim_id)
-                                    results.append({"vehID": cosim_id, "STATUS": "EXITED_CARLA_ROAD"})
+                  route = cosim_vehicle.get("route")
+                  if route is not None:
+                        state.routes[cosim_id] = route
+
+                  current_tick = getattr(metsr, "current_tick", 0) or 0
+                  retry_transition = cosim_id not in state.waiting_vehicles
+                  if not retry_transition and waiting_retry_interval:
+                        retry_transition = (
+                              current_tick % waiting_retry_interval == 0
+                        )
+
+                  results.append(_sync_active_carla_vehicle(
+                        metsr,
+                        world,
+                        traffic_manager,
+                        state,
+                        cosim_id,
+                        private_flag,
+                        vehicle_state,
+                        carla_roads or [],
+                        metsr_roads or [],
+                        transform_coords=transform_coords,
+                        waypoint_tolerance=waypoint_tolerance,
+                        min_waypoint_speed=min_waypoint_speed,
+                        verbose=verbose,
+                        cosim_vehicle=cosim_vehicle,
+                        retry_transition=retry_transition,
+                  ))
                   continue
 
             if vehicle_state.get("state", 0) > 0:

@@ -400,6 +400,7 @@ _PROPERTY_OPTION_ALIASES = {
     "RH_SHARE_PERCENTAGE": ("rh_share_file",),
     "RH_WAITING_TIME": ("rh_wait_file",),
     "BT_STD_FILE": ("bt_event_std_file",),
+    "BT_START_HOUR": ("bt_start_hour",),
     "EV_DEMAND_FILE": ("private_ev_demand_file",),
     "GV_DEMAND_FILE": ("private_gv_demand_file",),
     "EV_CHARGING_PREFERENCE": ("private_ev_charging_preference",),
@@ -527,8 +528,11 @@ def _property_override_value(key, options, port, instance):
         options,
         _config_names_for_property(key),
     )
-    if found and key in {"N_THREADS", "N_PARTITION"}:
+    if found and key in {"BT_START_HOUR", "N_THREADS", "N_PARTITION"}:
         value = _instance_value(value, instance)
+    if found and key == "BT_START_HOUR":
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("bt_start_hour must be a non-negative integer")
     return found, value
 
 

@@ -94,6 +94,16 @@ def _sim_folder_from_config(config, sim_dirs=None, sim_index=0, default=None):
     return default
 
 
+def _batch_field_values(value, count, name):
+    """Broadcast a scalar batch field or validate an explicit sequence."""
+    if _is_sequence(value):
+        values = list(value)
+        if len(values) != count:
+            raise ValueError(f"{name} must have the same length as vehID")
+        return values
+    return [value] * count
+
+
 _VIZ_STREAM_MAGIC = b"MRTB"
 _VIZ_STREAM_VERSION = 8
 _VIZ_STREAM_DEFAULT_COORD_SCALE = 100000
@@ -1716,7 +1726,8 @@ class METSRClient:
         With ``id`` each matched vehicle produces::
 
             {
-              'ID':      <int>   internal vehicle ID,
+              'ID':      <int>   bridge-visible private ID for EV/GV;
+                                  internal vehicle ID for taxi/bus,
               'v_type':  <int>   vehicle class:
                                    0 = GV  (private gasoline vehicle)
                                    1 = ETAXI
@@ -1752,8 +1763,14 @@ class METSRClient:
               'lane':    <int>   lane index on that road (present when on a lane),
               'dist':    <float> distance to the next downstream junction (m)
                                  (present when on a lane),
-              'currentParkingRoad': <int> internal road ID where the vehicle is
-                                     parked or has reserved parking, when set
+              'currentParkingRoadID': <str | None> original road ID where the
+                                      vehicle is parked or has reserved parking,
+              'transitionPending': <bool> whether the vehicle is externally
+                                   traversing a co-simulation connector,
+              'transitionTargetRoadID': <str> target road orig-ID while a
+                                          transition is pending,
+              'transitionTargetLaneID': <int> target lane index while pending,
+              'transitionTargetInternalLaneID': <int> internal target lane ID
             }
 
         Parameters
@@ -1829,8 +1846,12 @@ class METSRClient:
               'pass_num': <int>   number of passengers currently on board,
               'remainingDistance': <float> remaining active-trip distance in meters,
               'remainingDistanceMiles': <float> remaining active-trip distance in miles,
-              'currentParkingRoad': <int> internal road ID where the taxi is
-                                     parked or has reserved parking, when set
+              'currentParkingRoadID': <str | None> original road ID where the
+                                      taxi is parked or has reserved parking,
+              'transitionPending': <bool>,
+              'transitionTargetRoadID': <str>,       # present while pending
+              'transitionTargetLaneID': <int>,       # present while pending
+              'transitionTargetInternalLaneID': <int> # present while pending
             }
 
         Parameters
@@ -1908,7 +1929,11 @@ class METSRClient:
               'current_stop':  <int>   index of the last completed stop
                                        in the route's stop list (0-based),
               'pass_num':      <int>   number of passengers currently on board,
-              'battery_state': <float> remaining battery energy (kWh)
+              'battery_state': <float> remaining battery energy (kWh),
+              'transitionPending': <bool>,
+              'transitionTargetRoadID': <str>,       # present while pending
+              'transitionTargetLaneID': <int>,       # present while pending
+              'transitionTargetInternalLaneID': <int> # present while pending
             }
 
         Notes
@@ -2311,9 +2336,10 @@ class METSRClient:
     def query_coSimVehicle(self):
         """Query vehicles currently on co-simulation (CARLA-managed) roads.
 
-        Returns all vehicles that are located on roads previously registered
-        with :meth:`set_cosim_road`.  Each entry in ``DATA`` represents one
-        vehicle::
+        Returns vehicles on roads previously registered with
+        :meth:`set_cosim_road`, plus externally controlled vehicles whose
+        co-simulation boundary transition is still pending. Each entry in
+        ``DATA`` represents one vehicle::
 
             {
               'ID':        <int>   vehicle ID
@@ -2326,7 +2352,11 @@ class METSRClient:
               'coord_map': <list>  recent coordinate history (up to 6 entries),
                                    each entry is [x, y, z, bearing, speed],
               'route':     <list>  list of upcoming road orig-IDs in the vehicle's
-                                   current planned route
+                                   current planned route,
+              'transitionPending': <bool>,
+              'transitionTargetRoadID': <str>,       # present while pending
+              'transitionTargetLaneID': <int>,       # present while pending
+              'transitionTargetInternalLaneID': <int> # present while pending
             }
 
         Returns
@@ -2419,7 +2449,7 @@ class METSRClient:
             msg["DATA"].append({"origX": orig_x, "origY": orig_y, "destX": dest_x, "destY": dest_y, "transformCoord": transform_coord, "K": k})
         
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "ANS_kRoutes", res["TYPE"]
+        assert res["TYPE"] in ("ANS_multiRoutesBwCoords", "ANS_kRoutes"), res["TYPE"]
         return res
     
     def query_route_between_roads(self, orig_road, dest_road):
@@ -3651,6 +3681,14 @@ class METSRClient:
     
     # release the road for co-simulation
     def release_cosim_road(self, roadID):
+        """Return one or more roads to native METS-R SIM control.
+
+        Recent simulator versions can defer a release that cannot yet place
+        its vehicles safely. In that case the top-level ``CODE`` remains
+        ``OK``, while the affected ``DATA`` record has ``STATUS='KO'``,
+        ``REASON='RELEASE_BLOCKED'``, and ``RETRYABLE=True``. Callers should
+        inspect the per-road records and retry after advancing the simulation.
+        """
         msg = {
                 "TYPE": "CTRL_releaseCosimRoad",
                 "DATA": [] 
@@ -3693,6 +3731,14 @@ class METSRClient:
         requests : dict | list[dict] | None
             Fully formed simulator request record(s). When provided, other
             parameters are ignored.
+
+        Notes
+        -----
+        A temporarily reserved or occupied entry lane is reported per record
+        as ``STATUS='KO'`` with ``RETRYABLE=True`` and a ``REASON`` such as
+        ``TARGET_LANE_RESERVED`` or ``ENTRY_BLOCKED``. A vehicle that enters
+        through an external connector may instead return ``STATUS='OK'`` with
+        ``transitionPending=True``.
         """
         msg = {"TYPE": "CTRL_enterRoadFromQueue", "DATA": []}
         if requests is not None:
@@ -3728,31 +3774,82 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
         
-    # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
-    def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, z = 0.0, private_veh = False, transform_coords = False):
+    # teleport vehicle to a target location specified by road and coordinates, only work when the road is a cosim road
+    def teleport_cosim_vehicle(
+            self,
+            vehID,
+            x,
+            y,
+            bearing,
+            speed = 0,
+            z = 0.0,
+            private_veh = False,
+            transform_coords = False,
+            observed_road_id = None,
+            observedRoadID = None):
+        """Update externally controlled vehicle poses on co-simulation roads.
+
+        ``observed_road_id`` is an optional current road orig-ID from the
+        external simulator. METS-R SIM uses it as a safeguard when a sparse
+        pose update skips a short pending connector target. The payload-style
+        spelling ``observedRoadID`` is accepted as an alias.
+
+        Recent servers return connector state on each successful record. When
+        a transition was pending, ``transitionCommitted`` says whether this
+        pose update committed it; ``transitionPending`` reports the state that
+        remains after the update. Older servers ignore the optional request
+        field and omit these response fields.
+        """
+        if observedRoadID is not None:
+            if observed_road_id is not None:
+                raise ValueError(
+                    "Use either observed_road_id or observedRoadID, not both"
+                )
+            observed_road_id = observedRoadID
+
         msg = {
                 "TYPE": "CTRL_teleportCoSimVeh",
                 "DATA": []
                 }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-            x = [x]
-            y = [y]
-            z = [z]
-            speed = [speed]
-            bearing = [bearing]
-        if not isinstance(z, list):
-            z = [z] * len(vehID)
-        if not isinstance(bearing, list):
-            bearing = [bearing] * len(vehID)
-        if not isinstance(speed, list):
-            speed = [speed] * len(vehID)
-        if not isinstance(private_veh, list):
-            private_veh = [private_veh] * len(vehID)
-        if not isinstance(transform_coords, list):
-            transform_coords = [transform_coords] * len(vehID)
-        for vehID, x, y, z, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, z, bearing, speed, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "z": z, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
+        veh_ids = _as_list(vehID)
+        count = len(veh_ids)
+        xs = _batch_field_values(x, count, "x")
+        ys = _batch_field_values(y, count, "y")
+        zs = _batch_field_values(z, count, "z")
+        bearings = _batch_field_values(bearing, count, "bearing")
+        speeds = _batch_field_values(speed, count, "speed")
+        private_flags = _batch_field_values(private_veh, count, "private_veh")
+        transform_flags = _batch_field_values(
+            transform_coords, count, "transform_coords"
+        )
+        observed_road_ids = _batch_field_values(
+            observed_road_id, count, "observed_road_id"
+        )
+
+        for (veh_id, x_value, y_value, z_value, bearing_value, speed_value,
+             private_flag, transform_flag, observed_road) in zip(
+                veh_ids,
+                xs,
+                ys,
+                zs,
+                bearings,
+                speeds,
+                private_flags,
+                transform_flags,
+                observed_road_ids):
+            record = {
+                "vehID": veh_id,
+                "x": x_value,
+                "y": y_value,
+                "z": z_value,
+                "bearing": bearing_value,
+                "speed": speed_value,
+                "vehType": private_flag,
+                "transformCoord": transform_flag,
+            }
+            if observed_road is not None:
+                record["observedRoadID"] = observed_road
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -3771,12 +3868,20 @@ class METSRClient:
             transform_coords = False):
         """Teleport trace-replay vehicles by lane distance or by coordinates.
 
-        ``dist`` is the distance to the downstream junction. Recent METS-R SIM
-        versions also accept ``x``/``y`` coordinates, which are projected onto
-        the target lane by the simulator. Set ``transform_coords=True`` when
-        those coordinates are projected/local SUMO, XODR, or CARLA-meter
-        coordinates; leave it ``False`` for SIM/internal coordinates. 
-        When laneID = -1, the vehicle will be teleported to the closest lane (Note: x/y is required in this case)
+        ``dist`` is the distance to the downstream junction. ``x``/``y``
+        coordinates are projected onto the target lane by the simulator. Set
+        ``transform_coords=True`` when those coordinates are projected/local
+        SUMO, XODR, or CARLA-meter coordinates; leave it ``False`` for
+        SIM/internal coordinates.
+
+        ``laneID=-1`` requires ``x``/``y`` and lets the simulator consider all
+        lanes on the road. Current servers choose the closest collision-free
+        placement at or behind the requested position. Per-record results
+        include ``LANE``, ``REQUESTED_DIST``, ``DIST``, ``BACKWARD_SHIFT``,
+        ``ADJUSTED``, and ``FORCED``. ``FORCED=True`` means the road was
+        saturated and only a best-effort overlapping placement was available.
+        Invalid records have ``STATUS='KO'`` and an ``ERROR`` message while the
+        top-level response can still have ``CODE='OK'``.
         """
         msg = {
                 "TYPE": "CTRL_teleportTraceReplayVeh",
@@ -3785,20 +3890,15 @@ class METSRClient:
         veh_ids = _as_list(vehID)
         count = len(veh_ids)
 
-        def _field_values(value, name):
-            if _is_sequence(value):
-                values = list(value)
-                assert len(values) == count, f"{name} must have the same length as vehID"
-                return values
-            return [value] * count
-
-        road_ids = _field_values(roadID, "roadID")
-        lane_ids = _field_values(laneID, "laneID")
-        dists = _field_values(dist, "dist")
-        private_flags = _field_values(private_veh, "private_veh")
-        xs = _field_values(x, "x")
-        ys = _field_values(y, "y")
-        transform_flags = _field_values(transform_coords, "transform_coords")
+        road_ids = _batch_field_values(roadID, count, "roadID")
+        lane_ids = _batch_field_values(laneID, count, "laneID")
+        dists = _batch_field_values(dist, count, "dist")
+        private_flags = _batch_field_values(private_veh, count, "private_veh")
+        xs = _batch_field_values(x, count, "x")
+        ys = _batch_field_values(y, count, "y")
+        transform_flags = _batch_field_values(
+            transform_coords, count, "transform_coords"
+        )
 
         for veh_id, road_id, lane_id, dist_value, private_flag, x_value, y_value, transform_flag in zip(
                 veh_ids, road_ids, lane_ids, dists, private_flags, xs, ys, transform_flags):
@@ -3815,6 +3915,10 @@ class METSRClient:
                 record["y"] = y_value
                 record["transformCoord"] = transform_flag
             elif dist_value is not None:
+                if lane_id == -1:
+                    raise ValueError(
+                        "laneID=-1 requires x and y for trace replay teleport"
+                    )
                 record["dist"] = dist_value
             else:
                 raise ValueError("teleport_trace_replay_vehicle requires dist or x/y")
@@ -3826,19 +3930,39 @@ class METSRClient:
     
     # enter the next road
     def enter_next_road(self, vehID, roadID="", private_veh = False):
+        """Ask METS-R SIM to begin the vehicle's planned road transition.
+
+        ``roadID`` is optional. On current servers it is a safety assertion and
+        must match the vehicle's already-planned next road; it no longer forces
+        a transition to an arbitrary road.
+
+        An ``OK`` record means the transition was accepted, not necessarily
+        committed immediately. Check ``transitionPending`` and complete the
+        external connector with :meth:`teleport_cosim_vehicle`; supplying that
+        method's ``observed_road_id`` hint also handles sparse observations that
+        skipped a short target road. Failed records include ``REASON`` and can
+        include ``RETRYABLE=True`` for temporary lane reservation or entry-gap
+        conflicts.
+        """
         msg = {
                 "TYPE": "CTRL_enterNextRoad", 
                 "DATA": []
                 }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(private_veh, list):
-            private_veh = [private_veh] * len(vehID)
-        if not isinstance(roadID, list):
-            roadID = [roadID] * len(vehID)
-        
-        for vehID, private_veh, roadID in zip(vehID, private_veh, roadID):
-            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "roadID": roadID})
+        veh_ids = _as_list(vehID)
+        count = len(veh_ids)
+        private_flags = _batch_field_values(private_veh, count, "private_veh")
+        road_ids = _batch_field_values(roadID, count, "roadID")
+
+        for veh_id, private_flag, road_id in zip(
+                veh_ids, private_flags, road_ids):
+            record = {
+                "vehID": veh_id,
+                "vehType": private_flag,
+                # Legacy servers require the field and use an empty string to
+                # mean "follow the planned route"; current servers accept it.
+                "roadID": "" if road_id is None else road_id,
+            }
+            msg["DATA"].append(record)
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]

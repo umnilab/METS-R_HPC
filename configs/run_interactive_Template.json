@@ -33,6 +33,7 @@
       "private_ev_charging_preference":null,
       "bt_event_file":null,
       "bt_event_std_file":null,
+      "bt_start_hour":0,
       "json_output": false,
       "enable_trajectory_binary_write": true
 }
