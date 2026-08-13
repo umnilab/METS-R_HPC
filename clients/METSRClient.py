@@ -94,12 +94,12 @@ def _sim_folder_from_config(config, sim_dirs=None, sim_index=0, default=None):
     return default
 
 
-def _batch_field_values(value, count, name):
+def _batch_field_values(value, count, name, batch_name="vehID"):
     """Broadcast a scalar batch field or validate an explicit sequence."""
     if _is_sequence(value):
         values = list(value)
         if len(values) != count:
-            raise ValueError(f"{name} must have the same length as vehID")
+            raise ValueError(f"{name} must have the same length as {batch_name}")
         return values
     return [value] * count
 
@@ -1760,7 +1760,8 @@ class METSRClient:
               'totalEnergyConsumed': <float> EV cumulative energy use (kWh),
               'roadID':  <str>   SUMO road ID of the road the vehicle is on
                                  (only present when vehicle is on a road),
-              'lane':    <int>   lane index on that road (present when on a lane),
+              'lane':    <int>   compact 0-based lane index on that road
+                                 (present when on a lane),
               'dist':    <float> distance to the next downstream junction (m)
                                  (present when on a lane),
               'currentParkingRoadID': <str | None> original road ID where the
@@ -1976,6 +1977,9 @@ class METSRClient:
               'num_veh':          <int>   current number of vehicles on the road,
               'speed_limit':      <float> posted speed limit (m/s),
               'avg_travel_time':  <float> recent mean travel time (s),
+              'weight':           <float> current routing-graph cost; this can
+                                           differ from avg_travel_time after
+                                           :meth:`update_road_weights`,
               'length':           <float> road length (m),
               'energy_consumed':  <float> cumulative energy consumed on this road (kWh),
               'down_stream_road': <list>  list of downstream road orig-IDs,
@@ -2536,7 +2540,7 @@ class METSRClient:
               'weight':          <float> current edge weight in seconds used
                                          by the router (typically travel time,
                                          may be overridden via
-                                         :meth:`update_edge_weight`)
+                                         :meth:`update_road_weights`)
             }
 
         Parameters
@@ -3666,13 +3670,21 @@ class METSRClient:
 
     # set the road for co-simulation
     def set_cosim_road(self, roadID):
+        """Hand one or more roads from native simulation to co-simulation.
+
+        The latest simulator validates every vehicle on a road before freezing
+        native control. The top-level ``CODE`` can remain ``OK`` while an
+        individual road has ``STATUS='KO'`` and ``REASON='FREEZE_BLOCKED'``.
+        ``RETRYABLE=True`` identifies transient release/takeover overlap; the
+        record can also identify the blocking vehicle and its road/lane state.
+        Callers should inspect every returned ``DATA`` record before treating a
+        road as externally controlled.
+        """
         msg = {
                 "TYPE": "CTRL_setCoSimRoad",
                 "DATA": [] 
               }
-        if not isinstance(roadID, list):
-            roadID = [roadID]
-        for i in roadID:
+        for i in _as_list(roadID):
             msg['DATA'].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_setCoSimRoad", res["TYPE"]
@@ -3786,7 +3798,9 @@ class METSRClient:
             private_veh = False,
             transform_coords = False,
             observed_road_id = None,
-            observedRoadID = None):
+            observedRoadID = None,
+            observed_lane_id = None,
+            observedLaneID = None):
         """Update externally controlled vehicle poses on co-simulation roads.
 
         ``observed_road_id`` is an optional current road orig-ID from the
@@ -3794,11 +3808,22 @@ class METSRClient:
         pose update skips a short pending connector target. The payload-style
         spelling ``observedRoadID`` is accepted as an alias.
 
+        ``observed_lane_id`` is an optional compact 0-based lane index from the
+        external simulator. It requires a non-blank observed road ID. On the
+        latest server the road/lane pair authoritatively synchronizes current
+        lane membership and downstream distance for a non-pending vehicle. The
+        payload-style spelling ``observedLaneID`` is accepted as an alias.
+
         Recent servers return connector state on each successful record. When
         a transition was pending, ``transitionCommitted`` says whether this
         pose update committed it; ``transitionPending`` reports the state that
-        remains after the update. Older servers ignore the optional request
-        field and omit these response fields.
+        remains after the update. A successful lane synchronization also
+        reports ``laneSynchronized``, ``laneChanged``,
+        ``reattachedFromJunction``, ``roadID``, ``laneID``, and ``dist``.
+        Record-level failures use ``STATUS='KO'`` with a structured ``REASON``
+        and optional ``WARN`` while the top-level response can remain ``OK``.
+        Servers older than ``ec647e3`` ignore the optional observation fields
+        and omit these response fields.
         """
         if observedRoadID is not None:
             if observed_road_id is not None:
@@ -3806,6 +3831,12 @@ class METSRClient:
                     "Use either observed_road_id or observedRoadID, not both"
                 )
             observed_road_id = observedRoadID
+        if observedLaneID is not None:
+            if observed_lane_id is not None:
+                raise ValueError(
+                    "Use either observed_lane_id or observedLaneID, not both"
+                )
+            observed_lane_id = observedLaneID
 
         msg = {
                 "TYPE": "CTRL_teleportCoSimVeh",
@@ -3825,9 +3856,12 @@ class METSRClient:
         observed_road_ids = _batch_field_values(
             observed_road_id, count, "observed_road_id"
         )
+        observed_lane_ids = _batch_field_values(
+            observed_lane_id, count, "observed_lane_id"
+        )
 
         for (veh_id, x_value, y_value, z_value, bearing_value, speed_value,
-             private_flag, transform_flag, observed_road) in zip(
+             private_flag, transform_flag, observed_road, observed_lane) in zip(
                 veh_ids,
                 xs,
                 ys,
@@ -3836,7 +3870,8 @@ class METSRClient:
                 speeds,
                 private_flags,
                 transform_flags,
-                observed_road_ids):
+                observed_road_ids,
+                observed_lane_ids):
             record = {
                 "vehID": veh_id,
                 "x": x_value,
@@ -3849,6 +3884,12 @@ class METSRClient:
             }
             if observed_road is not None:
                 record["observedRoadID"] = observed_road
+            if observed_lane is not None:
+                if observed_road is None or not str(observed_road).strip():
+                    raise ValueError(
+                        "observed_lane_id requires a non-blank observed_road_id"
+                    )
+                record["observedLaneID"] = observed_lane
             msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
@@ -3929,21 +3970,39 @@ class METSRClient:
         return res
     
     # enter the next road
-    def enter_next_road(self, vehID, roadID="", private_veh = False):
+    def enter_next_road(
+            self,
+            vehID,
+            roadID="",
+            private_veh = False,
+            laneID = None,
+            lane_id = None):
         """Ask METS-R SIM to begin the vehicle's planned road transition.
 
         ``roadID`` is optional. On current servers it is a safety assertion and
         must match the vehicle's already-planned next road; it no longer forces
         a transition to an arbitrary road.
 
+        ``laneID`` optionally asserts the exact compact 0-based lane on that
+        planned target road. It must be a direct successor of the vehicle's
+        current lane and never changes the route. ``lane_id`` is accepted as a
+        Python-style alias. The argument follows ``private_veh`` to preserve
+        positional compatibility with older callers.
+
         An ``OK`` record means the transition was accepted, not necessarily
         committed immediately. Check ``transitionPending`` and complete the
         external connector with :meth:`teleport_cosim_vehicle`; supplying that
         method's ``observed_road_id`` hint also handles sparse observations that
-        skipped a short target road. Failed records include ``REASON`` and can
-        include ``RETRYABLE=True`` for temporary lane reservation or entry-gap
-        conflicts.
+        skipped a short target road. Current responses can include
+        ``requestedLaneID``, ``laneAsserted``, ``laneAdjusted``, and old/new
+        lane metadata. Failed records include ``REASON`` and can include
+        ``RETRYABLE=True`` for temporary lane reservation or entry-gap conflicts.
         """
+        if lane_id is not None:
+            if laneID is not None:
+                raise ValueError("Use either laneID or lane_id, not both")
+            laneID = lane_id
+
         msg = {
                 "TYPE": "CTRL_enterNextRoad", 
                 "DATA": []
@@ -3952,9 +4011,10 @@ class METSRClient:
         count = len(veh_ids)
         private_flags = _batch_field_values(private_veh, count, "private_veh")
         road_ids = _batch_field_values(roadID, count, "roadID")
+        lane_ids = _batch_field_values(laneID, count, "laneID")
 
-        for veh_id, private_flag, road_id in zip(
-                veh_ids, private_flags, road_ids):
+        for veh_id, private_flag, road_id, lane_id_value in zip(
+                veh_ids, private_flags, road_ids, lane_ids):
             record = {
                 "vehID": veh_id,
                 "vehType": private_flag,
@@ -3962,6 +4022,8 @@ class METSRClient:
                 # mean "follow the planned route"; current servers accept it.
                 "roadID": "" if road_id is None else road_id,
             }
+            if lane_id_value is not None:
+                record["laneID"] = lane_id_value
             msg["DATA"].append(record)
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
@@ -4841,16 +4903,79 @@ class METSRClient:
 
     # update road weights in the routing map
     def update_road_weights(self, roadID, weight):
+        """Override routing-only costs for one or more roads.
+
+        This control does not change physical lane speeds, road speed limits,
+        or measured travel times. Use :meth:`update_target_speed` when vehicle
+        behavior and the corresponding free-flow routing cost should both
+        change. The latest server accepts original or internal road IDs,
+        rejects non-finite weights, clamps finite values below ``1e-3``, and
+        reports the applied ``weight`` or a per-record ``WARN``.
+        """
         msg = {"TYPE": "CTRL_updateEdgeWeight", "DATA": []}
-        if not isinstance(roadID, list):
-            roadID = [roadID]
-            weight = [weight]
-        if not isinstance(weight, list):
-            weight = [weight] * len(roadID)
-        for roadID, weight in zip(roadID, weight):
-            msg["DATA"].append({"roadID": roadID, "weight": weight})
+        road_ids = _as_list(roadID)
+        weights = _batch_field_values(
+            weight, len(road_ids), "weight", batch_name="roadID"
+        )
+        for road_id, weight_value in zip(road_ids, weights):
+            msg["DATA"].append({"roadID": road_id, "weight": weight_value})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_updateEdgeWeight", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    def update_target_speed(
+            self,
+            roadID,
+            target_speed = None,
+            targetSpeed = None,
+            speed = None):
+        """Set physical target speeds for one or more roads, in m/s.
+
+        Unlike :meth:`update_road_weights`, this updates lane/vehicle behavior,
+        the reported road speed limit, and the road's free-flow routing cost.
+        ``target_speed`` is the preferred Python argument; ``targetSpeed`` and
+        ``speed`` mirror aliases accepted by METS-R SIM. Scalars are broadcast
+        across a batched ``roadID`` argument.
+
+        The simulator requires each speed to be finite and positive. It returns
+        one result per road with ``STATUS`` and, on success, ``target_speed``,
+        ``speed_unit``, ``speed_limit``, ``avg_travel_time``, and ``weight``.
+        Callers should inspect each record because the top-level ``CODE`` can be
+        ``OK`` when an individual road is rejected.
+        """
+        supplied_speeds = [
+            (name, value)
+            for name, value in (
+                ("target_speed", target_speed),
+                ("targetSpeed", targetSpeed),
+                ("speed", speed),
+            )
+            if value is not None
+        ]
+        if not supplied_speeds:
+            raise ValueError("target_speed is required")
+        if len(supplied_speeds) > 1:
+            names = ", ".join(name for name, _ in supplied_speeds)
+            raise ValueError(f"Use only one target-speed argument, received: {names}")
+        target_speed = supplied_speeds[0][1]
+
+        road_ids = _as_list(roadID)
+        target_speeds = _batch_field_values(
+            target_speed,
+            len(road_ids),
+            "target_speed",
+            batch_name="roadID",
+        )
+        msg = {"TYPE": "CTRL_updateTargetSpeed", "DATA": []}
+        for road_id, speed_value in zip(road_ids, target_speeds):
+            msg["DATA"].append({
+                "roadID": road_id,
+                "target_speed": speed_value,
+            })
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_updateTargetSpeed", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
 
