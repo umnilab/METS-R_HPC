@@ -115,8 +115,8 @@ def _road_id_matches(road_id, road_ids):
 def _pending_observed_road_id(world, actor, cosim_vehicle):
       """Resolve the directly observed successor of a pending SIM connector.
 
-      METS-R advances the pending target to ``route[0]`` before the external
-      connector commits.  Only ``route[1]`` can therefore be used to recover
+      METS-R advances the pending target to ``routeRoadIds[0]`` before the
+      external connector commits. Only ``routeRoadIds[1]`` can therefore recover
       from a sparse CARLA update that skipped the short target road.  The
       numeric/sign check mirrors the OpenDRIVE ``road_id``/``lane_id`` mapping
       produced by netconvert while preserving exact IDs such as ``-0`` and
@@ -129,9 +129,9 @@ def _pending_observed_road_id(world, actor, cosim_vehicle):
 
       route = [
             str(road_id)
-            for road_id in (cosim_vehicle.get("route") or [])
+            for road_id in (cosim_vehicle.get("routeRoadIds") or [])
       ]
-      target_road = cosim_vehicle.get("transitionTargetRoadID")
+      target_road = cosim_vehicle.get("transitionTargetRoadId")
       if target_road in (None, "") or len(route) < 2:
             return None
       if route[0] != str(target_road):
@@ -167,7 +167,7 @@ def _pending_observed_road_id(world, actor, cosim_vehicle):
 def _first_response_record(response):
       if not isinstance(response, dict):
             return {}
-      records = response.get("DATA", [])
+      records = response.get("data", [])
       if not isinstance(records, list) or not records:
             return {}
       return records[0] if isinstance(records[0], dict) else {}
@@ -177,15 +177,16 @@ def _transition_result(veh_id, status, record=None):
       result = {"vehID": veh_id, "STATUS": status}
       if isinstance(record, dict):
             for key in (
-                  "REASON",
-                  "RETRYABLE",
-                  "WARN",
+                  "errorCode",
+                  "retryable",
+                  "message",
                   "transitionAccepted",
                   "transitionPending",
                   "transitionCommitted",
-                  "roadID",
-                  "laneID",
-                  "internalLaneID",
+                  "segmentId",
+                  "roadId",
+                  "laneIndex",
+                  "internalLaneId",
             ):
                   if key in record:
                         result[key] = record[key]
@@ -391,39 +392,31 @@ def configure_metsr_cosim_roads(metsr, metsr_roads):
 
 
 def _queued_vehicle_id(entry):
-      for key in ("ID", "vehID", "vehicleID", "visibleID"):
-            if key in entry:
-                  return entry[key]
-      return None
+      return entry.get("vehicleId")
 
 
 def _queued_vehicle_private_flag(entry):
-      for key in ("v_type", "vehType", "private_veh", "privateVeh"):
-            if key in entry:
-                  return entry[key]
-      return None
+      return entry.get("isPrivate")
 
 
 def _queued_vehicle_internal_id(entry):
-      for key in ("internalID", "internalVehicleID", "vehicleID"):
-            if key in entry:
-                  return entry[key]
-      return None
+      return entry.get("internalVehicleId")
 
 
 def _queued_vehicle_ready(entry):
-      return entry.get("ready", entry.get("isReady", True))
+      return entry.get("ready", True)
 
 
 def release_ready_cosim_vehicles_from_queue(metsr, verbose=False):
       if not hasattr(metsr, "query_cosim_entering_vehicle_queue"):
             return []
 
-      queues = metsr.query_cosim_entering_vehicle_queue().get("DATA", [])
+      response = metsr.query_cosim_entering_vehicle_queue()
+      queues = response.get("data", [])
       requests = []
       for road_queue in queues:
-            road_id = road_queue.get("ID", road_queue.get("roadID"))
-            entries = road_queue.get("queue", road_queue.get("vehicles", []))
+            road_id = road_queue.get("segmentId")
+            entries = road_queue.get("queue", [])
             for entry in entries:
                   if not _queued_vehicle_ready(entry):
                         continue
@@ -433,13 +426,13 @@ def release_ready_cosim_vehicles_from_queue(metsr, verbose=False):
                   private_veh = _queued_vehicle_private_flag(entry)
 
                   if veh_id is not None:
-                        request["vehID"] = veh_id
+                        request["vehicleId"] = veh_id
                   if internal_id is not None:
-                        request["internalVehicleID"] = internal_id
+                        request["internalVehicleId"] = internal_id
                   if private_veh is not None:
-                        request["vehType"] = private_veh
+                        request["isPrivate"] = private_veh
                   if road_id is not None:
-                        request["roadID"] = road_id
+                        request["roadId"] = road_id
                   if request:
                         requests.append(request)
 
@@ -449,7 +442,7 @@ def release_ready_cosim_vehicles_from_queue(metsr, verbose=False):
       response = metsr.enter_road_from_queue(requests=requests)
       if verbose:
             print(f"Released {len(requests)} ready vehicle(s) from co-sim entering queues.")
-      return response.get("DATA", requests)
+      return response.get("data", requests)
 
 
 def _sync_active_carla_vehicle(
@@ -523,7 +516,7 @@ def _sync_active_carla_vehicle(
             world, loc.x, loc.y, carla_roads
       )
 
-      # QUERY_coSimVehicle is authoritative for whether this pose update was
+      # The coSimVehicle query is authoritative for whether this pose update was
       # expected to commit a connector. Ordinary teleports also return
       # transitionPending=False, so that field alone must never remove an
       # actor.
@@ -537,13 +530,12 @@ def _sync_active_carla_vehicle(
                   state.waiting_vehicles.discard(veh_id)
                   resume_carla_vehicle(actor)
 
-            if teleport_record.get("STATUS") != "OK":
+            teleport_status = teleport_record.get("status")
+            if str(teleport_status).lower() not in {"ok", "partial"}:
                   result = _transition_result(
                         veh_id, "TRANSITION_PENDING", teleport_record
                   )
-                  result["TELEPORT_STATUS"] = teleport_record.get(
-                        "STATUS", "INVALID_RESPONSE"
-                  )
+                  result["TELEPORT_STATUS"] = teleport_record.get("status", "INVALID_RESPONSE")
                   return result
 
             still_pending = teleport_record.get("transitionPending")
@@ -566,7 +558,7 @@ def _sync_active_carla_vehicle(
                         veh_id, "TRANSITION_PENDING", teleport_record
                   )
 
-            target_road = cosim_vehicle.get("transitionTargetRoadID")
+            target_road = cosim_vehicle.get("transitionTargetRoadId")
             target_is_cosim = None
             if metsr_roads and target_road not in (None, ""):
                   target_is_cosim = _road_id_matches(
@@ -651,25 +643,33 @@ def _sync_active_carla_vehicle(
             ):
                   return {"vehID": veh_id, "STATUS": "APPROACHING_CARLA_ROAD"}
 
-            success = metsr.reach_dest(vehID=veh_id, private_veh=private_veh)["DATA"][0]["STATUS"]
+            response = metsr.reach_dest(vehID=veh_id, private_veh=private_veh)
+            record = response.get("data", [])[0]
+            success = record.get("status")
             print(f"Vehicle {veh_id} failed to enter co-sim area; remove it.")
-            assert success == "OK", f"Vehicle {veh_id} failed to reach destination."
+            assert str(success).lower() == "ok", (
+                  f"Vehicle {veh_id} failed to reach destination."
+            )
             destroy_tracked_carla_vehicle(state, veh_id)
             return {"vehID": veh_id, "STATUS": "FAILED_TO_ENTER"}
 
       print(f"Vehicle {veh_id} has left the co-sim area.")
       if _road_id_matches(state.dest_roads.get(veh_id), metsr_roads):
-            success = metsr.reach_dest(vehID=veh_id, private_veh=private_veh)["DATA"][0]["STATUS"]
-            assert success == "OK", f"Vehicle {veh_id} failed to reach destination."
+            response = metsr.reach_dest(vehID=veh_id, private_veh=private_veh)
+            record = response.get("data", [])[0]
+            success = record.get("status")
+            assert str(success).lower() == "ok", (
+                  f"Vehicle {veh_id} failed to reach destination."
+            )
             print(f"Vehicle {veh_id} reached destination.")
             destroy_tracked_carla_vehicle(state, veh_id)
             return {"vehID": veh_id, "STATUS": "REACHED_DEST"}
 
-      transition_response = metsr.enter_next_road(
-            vehID=veh_id, private_veh=private_veh
-      )
-      transition_record = _first_response_record(transition_response)
-      if transition_record.get("STATUS") == "OK":
+      # Connector entry and completion are inferred from this authoritative
+      # teleport; the latest SIM has no separate enterNextRoad control.
+      transition_record = teleport_record
+      transition_status = transition_record.get("status")
+      if str(transition_status).lower() == "ok":
             was_waiting = veh_id in state.waiting_vehicles
             state.transition_failures.pop(veh_id, None)
             if transition_record.get("transitionPending") is True:
@@ -688,9 +688,8 @@ def _sync_active_carla_vehicle(
             return result
 
       stop_carla_vehicle(actor)
-      retryable = transition_record.get("RETRYABLE") is True
-      legacy_failure = "REASON" not in transition_record
-      if retryable or legacy_failure:
+      retryable = transition_record.get("retryable") is True
+      if retryable:
             state.transition_failures.pop(veh_id, None)
             state.waiting_vehicles.add(veh_id)
             return _transition_result(
@@ -699,7 +698,7 @@ def _sync_active_carla_vehicle(
 
       # Keep the actor marked as stopped so an externally accepted pending
       # transition can release its constant-velocity brake. The accompanying
-      # failure record prevents automatic enterNextRoad retries.
+      # failure record prevents repeated transition teleports.
       state.waiting_vehicles.add(veh_id)
       state.transition_failures[veh_id] = dict(transition_record)
       return _transition_result(
@@ -744,18 +743,26 @@ def step_carla_metsr_cosim(
       if release_ready_queue:
             release_ready_cosim_vehicles_from_queue(metsr, verbose=verbose)
 
-      cosim_vehicles = metsr.query_coSimVehicle().get("DATA", [])
+      cosim_response = metsr.query_cosim_vehicle()
+      cosim_vehicles = cosim_response.get("data", [])
       if verbose and not cosim_vehicles:
-            print("No vehicles reported by QUERY_coSimVehicle after this tick.")
-      cosim_ids = [vehicle["ID"] for vehicle in cosim_vehicles]
-      private_flags = [vehicle["v_type"] for vehicle in cosim_vehicles]
+            print("No vehicles reported by coSimVehicle after this tick.")
+      cosim_ids = [
+            vehicle.get("vehicleId")
+            for vehicle in cosim_vehicles
+      ]
+      private_flags = [
+            vehicle.get("isPrivate")
+            for vehicle in cosim_vehicles
+      ]
       vehicle_states = []
       if cosim_ids:
-            vehicle_states = metsr.query_vehicle(
+            vehicle_response = metsr.query_vehicle(
                   id=cosim_ids,
                   private_veh=private_flags,
                   transform_coords=transform_coords,
-            ).get("DATA", [])
+            )
+            vehicle_states = vehicle_response.get("data", [])
 
       for cosim_id, cosim_vehicle, private_flag, vehicle_state in zip(
             cosim_ids,
@@ -764,7 +771,9 @@ def step_carla_metsr_cosim(
             vehicle_states,
       ):
             if cosim_id in state.active_vehicles:
-                  route = cosim_vehicle.get("route")
+                  route = cosim_vehicle.get(
+                        "routeRoadIds"
+                  )
                   if route is not None:
                         state.routes[cosim_id] = route
 
@@ -807,23 +816,31 @@ def step_carla_metsr_cosim(
                         verbose=verbose,
                   )
                   if actor is not None:
-                        route = cosim_vehicle.get("route", [])
-                        state.coord_maps[cosim_id] = cosim_vehicle.get("coord_map", [])
+                        route = cosim_vehicle.get(
+                              "routeRoadIds", []
+                        )
+                        state.coord_maps[cosim_id] = cosim_vehicle.get(
+                              "coordinateTrail", []
+                        )
                         state.routes[cosim_id] = route
                         state.dest_roads[cosim_id] = route[-1] if route else None
                         state.entered[cosim_id] = False
                         results.append({"vehID": cosim_id, "STATUS": "SPAWNED"})
 
       if display_all:
-            private_agents = metsr.query_vehicle().get("private_vids", [])
+            fleet = metsr.query_vehicle()
+            private_agents = fleet.get(
+                  "privateVehicleIds", []
+            )
             batch_size = max(1, int(display_batch_size))
             for idx in range(0, len(private_agents), batch_size):
                   batch_ids = private_agents[idx:idx + batch_size]
-                  batch_states = metsr.query_vehicle(
+                  batch_response = metsr.query_vehicle(
                         id=batch_ids,
                         private_veh=True,
                         transform_coords=transform_coords,
-                  ).get("DATA", [])
+                  )
+                  batch_states = batch_response.get("data", [])
 
                   for veh_id, vehicle_state in zip(batch_ids, batch_states):
                         if veh_id not in state.active_vehicles and veh_id not in state.display_vehicles:

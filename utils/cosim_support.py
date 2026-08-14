@@ -1486,7 +1486,10 @@ def _runtime_ego_vehicle_id(runtime, step_result=None, target_vehicle_id=None):
 
 
 def _bsm_road_id(record):
-    return first_present(record, "roadID", "road_id", "road", "link_id", "edge_id")
+    return first_present(
+        record, "segmentId", "roadID", "road_id", "road",
+        "link_id", "edge_id"
+    )
 
 
 def _runtime_vehicle_record_and_private_flag(runtime, vehicle_id):
@@ -1506,7 +1509,7 @@ def _runtime_vehicle_record(runtime, vehicle_id):
 def _metsr_vis_vehicle_group_key(record, private_flag=None):
     if not isinstance(record, Mapping):
         return None
-    vehicle_class = _safe_int(first_present(record, "vehicleClass", "v_type", "vehicle_class"))
+    vehicle_class = _safe_int(first_present(record, "vehicleClass", "vehicle_class"))
     state = _safe_int(first_present(record, "state", "vehicleState", "tripState"))
     if private_flag is None:
         private_flag = first_present(record, "_viz_private_veh")
@@ -1942,18 +1945,22 @@ def bsm_table_html(records, limit=50, source_label="Kafka", ego_vehicle_id=None,
 def _tracr_bridge_vehicle_id(record):
     if not isinstance(record, dict):
         return None
-    return first_present(record, "ID", "vehicle_id", "vid", "sender_id", "origin_vehicle_id")
+    return first_present(
+        record, "vehicleId", "vehicle_id", "vid",
+        "sender_id", "origin_vehicle_id"
+    )
 
 
 def _tracr_bridge_vehicle_record(vehicle_id, private_flag, vehicle_state):
     record = dict(vehicle_state or {})
-    record.setdefault("ID", vehicle_id)
     record.setdefault("vehicle_id", vehicle_id)
     record.setdefault("vid", vehicle_id)
     record["private_veh"] = bool(private_flag)
     record.setdefault("sensor_type", "cv2x")
     if record.get("road") is None:
-        record["road"] = record.get("roadID", record.get("road_id"))
+        record["road"] = first_present(
+            record, "segmentId", "road_id"
+        )
     if record.get("heading_deg") is None and record.get("bearing") is not None:
         record["heading_deg"] = record.get("bearing")
     if record.get("speed_mps") is None and record.get("speed") is not None:
@@ -3510,21 +3517,41 @@ def _as_road_ids(value):
 def _road_id_from_vehicle_record(record):
     if not isinstance(record, dict):
         return None
-    for key in ("roadID", "road_id", "road"):
-        value = record.get(key)
-        if value is not None:
-            return str(value)
-    return None
+    value = record.get("segmentId")
+    return None if value is None else str(value)
 
 
 def _road_id_from_road_record(record):
     if not isinstance(record, dict):
         return None
-    for key in ("ID", "roadID", "road_id", "road", "origID", "orig_id", "originID"):
+    value = record.get("segmentId")
+    return None if value is None else str(value)
+
+
+def _tracr_record_road_id(record, *keys):
+    if not isinstance(record, dict):
+        return None
+    for key in keys:
         value = record.get(key)
-        if value is not None:
+        if value is not None and str(value).strip():
             return str(value)
     return None
+
+
+def _tracr_connector_endpoints(record):
+    return (
+        _tracr_record_road_id(record, "sourceRoadId"),
+        _tracr_record_road_id(record, "targetRoadId"),
+    )
+
+
+def _tracr_is_connector_record(record):
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("segmentType", "")).lower() == "connector":
+        return True
+    source_road, target_road = _tracr_connector_endpoints(record)
+    return source_road is not None and target_road is not None
 
 
 def _vehicle_is_live(vehicle_state):
@@ -3541,28 +3568,75 @@ def _query_tracr_road_graph(runtime, batch_size=500):
     if cached is not None:
         return cached
 
-    graph = {"downstream": {}, "upstream": {}, "error": ""}
+    graph = {
+        "downstream": {},
+        "upstream": {},
+        "connector_ids": set(),
+        "records": {},
+        "error": "",
+    }
     try:
         index = runtime.metsr.query_road()
-        road_ids = index.get("orig_id") or index.get("id_list") or []
+        road_ids = (index.get("roadIds") or []) + (index.get("connectorIds") or [])
         road_ids = [str(road_id) for road_id in road_ids if road_id is not None]
         batch_size = max(1, int(batch_size or 1))
+        raw_downstream = {}
         for start in range(0, len(road_ids), batch_size):
             batch = road_ids[start:start + batch_size]
             response = runtime.metsr.query_road(id=batch)
-            for record in response.get("DATA", []) or []:
+            records = response.get("data", [])
+            for record in records or []:
                 road_id = _road_id_from_road_record(record)
                 if road_id is None:
                     continue
-                downstream = _unique_ordered(_as_road_ids(
-                    record.get("down_stream_road")
-                    or record.get("downstream_road")
-                    or record.get("downstreamRoad")
-                    or record.get("downstreamRoads")
+                graph["records"][road_id] = record
+                raw_downstream[road_id] = _unique_ordered(_as_road_ids(
+                    record.get("downstreamIds")
                 ))
-                graph["downstream"][road_id] = downstream
-                for downstream_road in downstream:
-                    graph["upstream"].setdefault(str(downstream_road), []).append(road_id)
+                if _tracr_is_connector_record(record):
+                    graph["connector_ids"].add(road_id)
+
+        connector_ids_by_source = {}
+        connector_ids_by_pair = {}
+        for connector_id in graph["connector_ids"]:
+            record = graph["records"].get(connector_id, {})
+            source_road, target_road = _tracr_connector_endpoints(record)
+            if source_road is not None:
+                connector_ids_by_source.setdefault(source_road, []).append(connector_id)
+            if source_road is not None and target_road is not None:
+                connector_ids_by_pair.setdefault(
+                    (source_road, target_road), []
+                ).append(connector_id)
+            connector_downstream = list(raw_downstream.get(connector_id, []))
+            if target_road is not None:
+                connector_downstream.insert(0, target_road)
+            graph["downstream"][connector_id] = _unique_ordered(
+                connector_downstream
+            )
+
+        for road_id, downstream_roads in raw_downstream.items():
+            if road_id in graph["connector_ids"]:
+                continue
+            explicit_downstream = list(connector_ids_by_source.get(road_id, []))
+            for downstream_road in downstream_roads:
+                downstream_road = str(downstream_road)
+                if downstream_road in graph["connector_ids"]:
+                    explicit_downstream.append(downstream_road)
+                    continue
+                connectors = connector_ids_by_pair.get(
+                    (road_id, downstream_road), []
+                )
+                if connectors:
+                    explicit_downstream.extend(connectors)
+                else:
+                    explicit_downstream.append(downstream_road)
+            graph["downstream"][road_id] = _unique_ordered(explicit_downstream)
+
+        for road_id, downstream_roads in graph["downstream"].items():
+            for downstream_road in downstream_roads:
+                graph["upstream"].setdefault(str(downstream_road), []).append(
+                    road_id
+                )
         graph["upstream"] = {
             road_id: _unique_ordered(upstream_roads)
             for road_id, upstream_roads in graph["upstream"].items()
@@ -3593,23 +3667,32 @@ def _expand_tracr_road_context(runtime, focus_road, upstream_depth=3, downstream
         roads.append(road_key)
 
     add(focus_road)
-    frontier = [focus_road]
-    for _ in range(max(0, int(downstream_depth))):
+    connector_ids = set(graph.get("connector_ids", set()))
+
+    def expand_one_road_hop(frontier, adjacency):
         next_frontier = []
         for road_id in frontier:
-            for downstream_road in graph.get("downstream", {}).get(str(road_id), []) or []:
-                add(downstream_road)
-                next_frontier.append(str(downstream_road))
-        frontier = next_frontier
+            for adjacent_road in adjacency.get(str(road_id), []) or []:
+                adjacent_road = str(adjacent_road)
+                add(adjacent_road)
+                if adjacent_road not in connector_ids:
+                    next_frontier.append(adjacent_road)
+                    continue
+                # A source -> connector -> target traversal is one physical
+                # road hop, but the connector remains part of the query set.
+                for far_road in adjacency.get(adjacent_road, []) or []:
+                    far_road = str(far_road)
+                    add(far_road)
+                    next_frontier.append(far_road)
+        return _unique_ordered(next_frontier)
+
+    frontier = [focus_road]
+    for _ in range(max(0, int(downstream_depth))):
+        frontier = expand_one_road_hop(frontier, graph.get("downstream", {}))
 
     frontier = [focus_road]
     for _ in range(max(0, int(upstream_depth))):
-        next_frontier = []
-        for road_id in frontier:
-            for upstream_road in graph.get("upstream", {}).get(str(road_id), []) or []:
-                add(upstream_road)
-                next_frontier.append(str(upstream_road))
-        frontier = next_frontier
+        frontier = expand_one_road_hop(frontier, graph.get("upstream", {}))
 
     return roads, graph.get("error", "")
 
@@ -3639,7 +3722,8 @@ def _query_tracr_focus_vehicle(runtime):
         return None, None, str(exc).splitlines()[0]
 
     first_live = None
-    for vehicle_id, record in zip(candidates, response.get("DATA", []) or []):
+    response_data = response.get("data", [])
+    for vehicle_id, record in zip(candidates, response_data or []):
         if not _vehicle_is_live(record):
             continue
         road_id = _road_id_from_vehicle_record(record)
@@ -3665,16 +3749,32 @@ def _query_tracr_road_vehicle_ids(runtime, road_ids):
     except Exception as exc:
         return private_ids, public_ids, str(exc).splitlines()[0]
 
-    if not isinstance(fleet, dict) or fleet.get("CODE") == "KO":
+    if not isinstance(fleet, dict):
         return private_ids, public_ids, ""
-    if fleet.get("DATA"):
-        for road_record in fleet.get("DATA", []) or []:
-            if isinstance(road_record, dict) and road_record.get("STATUS") != "KO":
-                private_ids.extend(road_record.get("private_vids") or [])
-                public_ids.extend(road_record.get("public_vids") or [])
+    fleet_status = fleet.get("status")
+    if str(fleet_status).lower() == "error":
+        return private_ids, public_ids, ""
+    fleet_data = fleet.get("data", [])
+    if fleet_data:
+        for road_record in fleet_data or []:
+            record_status = road_record.get("status")
+            if (
+                isinstance(road_record, dict)
+                and str(record_status).lower() != "error"
+            ):
+                private_ids.extend(
+                    road_record.get("privateVehicleIds") or []
+                )
+                public_ids.extend(
+                    road_record.get("publicVehicleIds") or []
+                )
     else:
-        private_ids.extend(fleet.get("private_vids") or [])
-        public_ids.extend(fleet.get("public_vids") or [])
+        private_ids.extend(
+            fleet.get("privateVehicleIds") or []
+        )
+        public_ids.extend(
+            fleet.get("publicVehicleIds") or []
+        )
     return _unique_ordered(private_ids), _unique_ordered(public_ids), ""
 
 
@@ -3694,7 +3794,8 @@ def _query_tracr_vehicle_records(runtime, vehicle_ids, private_flag, batch_size=
             )
         except Exception as exc:
             return records, str(exc).splitlines()[0]
-        for vehicle_id, record in zip(batch, response.get("DATA", []) or []):
+        response_data = response.get("data", [])
+        for vehicle_id, record in zip(batch, response_data or []):
             if isinstance(record, dict):
                 records.append((vehicle_id, bool(private_flag), record))
     return records, ""

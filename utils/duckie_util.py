@@ -568,17 +568,24 @@ def sync_duckietown_to_metsr(metsr, states, vehicle_map=None, robot_id=None):
 
 
 def sync_metsr_to_duckietown(metsr, transform_coords=True):
-      cosim = metsr.query_coSimVehicle()
-      vehicles = cosim.get("DATA", [])
+      cosim = metsr.query_cosim_vehicle()
+      vehicles = cosim.get("data", [])
       if not vehicles:
             return []
-      ids = [vehicle["ID"] for vehicle in vehicles]
-      private_flags = [vehicle["v_type"] for vehicle in vehicles]
-      states = metsr.query_vehicle(
+      ids = [
+            vehicle.get("vehicleId")
+            for vehicle in vehicles
+      ]
+      private_flags = [
+            vehicle.get("isPrivate")
+            for vehicle in vehicles
+      ]
+      response = metsr.query_vehicle(
             id=ids,
             private_veh=private_flags,
             transform_coords=transform_coords,
-      ).get("DATA", [])
+      )
+      states = response.get("data", [])
       return [
             {"metsr": metsr_vehicle, "state": state}
             for metsr_vehicle, state in zip(vehicles, states)

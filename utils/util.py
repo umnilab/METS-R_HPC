@@ -313,42 +313,17 @@ def build_metsr_vis_url(
     query = urllib.parse.urlencode(query_items)
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
-REQUEST_ID_FIELDS = ("reqID", "requestID", "requestId", "ID", "id")
-REQUEST_ZONE_FIELDS = (
-    "zoneID",
-    "zoneId",
-    "zone",
-    "originZone",
-    "origZone",
-    "origin",
-    "orig",
-)
-
-
 def _request_id_from_record(record):
     if not isinstance(record, dict):
         return record
-    for key in REQUEST_ID_FIELDS:
-        value = record.get(key)
-        if value is not None:
-            return value
-    return None
+    return record.get("requestId")
 
 
 def _request_zone_from_record(record):
     if not isinstance(record, dict):
         return None
-    for key in REQUEST_ZONE_FIELDS:
-        value = record.get(key)
-        if value is None:
-            continue
-        if isinstance(value, dict):
-            nested_value = _request_zone_from_record(value)
-            if nested_value is not None:
-                return nested_value
-            continue
-        return value
-    return None
+    zone_id = record.get("zoneId")
+    return record.get("originZoneId") if zone_id is None else zone_id
 
 
 def _normalize_sensor_type(sensor_type):
@@ -372,15 +347,6 @@ def _looks_like_centerline(value):
     if not _is_sequence(first_point) or len(first_point) < 2:
         return False
     return not _is_sequence(first_point[0])
-
-
-def _set_road_reference(record, field_prefix, value):
-    if value is None:
-        return
-    if _is_sequence(value) and not isinstance(value, str):
-        record[field_prefix + "Roads"] = list(value)
-    else:
-        record[field_prefix + "Road"] = value
 
 
 # ---------------------------------------------------------------------------

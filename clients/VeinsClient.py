@@ -65,25 +65,23 @@ def build_mobility_records(vehicle_records, private_veh=False, sensor_type=None)
         if not isinstance(vehicle, Mapping):
             continue
         private_flag = private_flags[index] if index < len(private_flags) else False
-        vehicle_id = vehicle.get("vehicle_id", vehicle.get("vid", vehicle.get("ID")))
+        vehicle_id = vehicle.get("vehicleId")
         if vehicle_id is None:
             continue
         records.append(
             _clean_record(
                 {
                     "vehicle_id": vehicle_id,
-                    "private_veh": bool(vehicle.get("private_veh", private_flag)),
-                    "vehicle_type": vehicle.get("v_type", vehicle.get("vehicle_type")),
+                    "private_veh": bool(vehicle.get("isPrivate", private_flag)),
+                    "vehicle_type": vehicle.get("vehicleClass"),
                     "x": vehicle.get("x"),
                     "y": vehicle.get("y"),
                     "z": vehicle.get("z", 0.0),
-                    "speed_mps": vehicle.get("speed", vehicle.get("speed_mps")),
-                    "heading_deg": vehicle.get("bearing", vehicle.get("heading_deg")),
-                    "acceleration_mps2": vehicle.get(
-                        "acc", vehicle.get("acceleration_mps2")
-                    ),
-                    "road_id": vehicle.get("road", vehicle.get("road_id")),
-                    "lane_id": vehicle.get("lane", vehicle.get("lane_id")),
+                    "speed_mps": vehicle.get("speed"),
+                    "heading_deg": vehicle.get("bearing"),
+                    "acceleration_mps2": vehicle.get("acceleration"),
+                    "road_id": vehicle.get("segmentId"),
+                    "lane_id": vehicle.get("laneIndex"),
                     "sensor_type": vehicle.get("sensor_type", sensor_type),
                     "state": vehicle.get("state"),
                 }
