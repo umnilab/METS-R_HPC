@@ -104,6 +104,32 @@ def _batch_field_values(value, count, name, batch_name="vehID"):
     return [value] * count
 
 
+def _optional_vehicle_lengths(value, count, batch_name):
+    """Broadcast and validate optional vehicle lengths in meters."""
+    values = _batch_field_values(value, count, "length", batch_name=batch_name)
+    normalized = []
+    for index, item in enumerate(values):
+        if item is None:
+            normalized.append(None)
+            continue
+        if isinstance(item, bool):
+            raise ValueError(
+                f"length[{index}] must be a finite positive value in meters"
+            )
+        try:
+            item = float(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"length[{index}] must be a finite positive value in meters"
+            ) from exc
+        if not math.isfinite(item) or item <= 0.0:
+            raise ValueError(
+                f"length[{index}] must be a finite positive value in meters"
+            )
+        normalized.append(item)
+    return normalized
+
+
 _VIZ_STREAM_MAGIC = b"MRTB"
 _VIZ_STREAM_VERSION = 8
 _VIZ_STREAM_DEFAULT_COORD_SCALE = 100000
@@ -1758,16 +1784,25 @@ class METSRClient:
               'destRoadID':   <str> original road ID for the trip destination road,
               'battery': <float> EV battery energy (kWh, EV classes only),
               'totalEnergyConsumed': <float> EV cumulative energy use (kWh),
-              'roadID':  <str>   SUMO road ID of the road the vehicle is on
-                                 (only present when vehicle is on a road),
-              'lane':    <int>   compact 0-based lane index on that road
-                                 (present when on a lane),
-              'dist':    <float> distance to the next downstream junction (m)
-                                 (present when on a lane),
+              'onRoad':      <bool> whether the vehicle occupies a road-like facility,
+              'onConnector': <bool> whether that facility is an intersection connector,
+              'roadID':  <str>   physical road ID, or '<source>_<target>' for
+                                 an intersection connector,
+              'lane':    <int>   compact 0-based physical-road lane index;
+                                 -1 on a connector,
+              'laneID':  <int>   alias of lane,
+              'dist':    <float> distance to the next junction on a physical
+                                 lane, or remaining connector distance (m),
+              'sourceRoadID': <str> connector source road when on a connector,
+              'targetRoadID': <str> connector target road when on a connector,
+              'intersectionID': <int> connector intersection ID,
+              'intersectionCollision': <bool> current conflict state,
               'currentParkingRoadID': <str | None> original road ID where the
                                       vehicle is parked or has reserved parking,
               'transitionPending': <bool> whether the vehicle is externally
                                    traversing a co-simulation connector,
+              'transitionSourceRoadID': <str> source road orig-ID while a
+                                           transition is pending,
               'transitionTargetRoadID': <str> target road orig-ID while a
                                           transition is pending,
               'transitionTargetLaneID': <int> target lane index while pending,
@@ -1803,7 +1838,11 @@ class METSRClient:
         return res
  
     def query_on_road_vehicles(self, roadID=None):
-        """Query IDs for vehicles currently on active roads, optionally by road."""
+        """Query IDs for vehicles on active physical or connector roads.
+
+        Connector IDs use ``<sourceRoadID>_<targetRoadID>``. Per-road records
+        identify them with ``isConnector=True`` and ``laneID=-1``.
+        """
         msg = {"TYPE": "QUERY_onRoadVehicles"}
         if roadID is not None:
             msg["DATA"] = roadID
@@ -1812,7 +1851,11 @@ class METSRClient:
         return res
 
     def query_active_roads(self):
-        """Query compact records for roads currently in the active-road index."""
+        """Query active physical roads and occupied intersection connectors.
+
+        Records include ``isConnector``. Connector IDs use
+        ``<sourceRoadID>_<targetRoadID>`` and report ``laneID=-1``.
+        """
         msg = {"TYPE": "QUERY_activeRoads"}
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] in ("ANS_activeRoads", "ANS_activeRoad"), res["TYPE"]
@@ -1845,10 +1888,16 @@ class METSRClient:
               'dest':     <int>   current destination zone ID
                                   (negative â†’ heading to a charging station),
               'pass_num': <int>   number of passengers currently on board,
-              'remainingDistance': <float> remaining active-trip distance in meters,
+              'remainingDistance': <float> connector-inclusive remaining
+                                           active-trip distance in meters,
               'remainingDistanceMiles': <float> remaining active-trip distance in miles,
+              'remainingConnectorDistance': <float> connector-only remainder (m),
+              'remainingConnectorTravelTime': <float> connector-only remainder (s),
               'currentParkingRoadID': <str | None> original road ID where the
                                       taxi is parked or has reserved parking,
+              'roadID':    <str>   physical or connector road ID,
+              'onConnector': <bool>,
+              'laneID':    <int>   compact lane index, or -1 on a connector,
               'transitionPending': <bool>,
               'transitionTargetRoadID': <str>,       # present while pending
               'transitionTargetLaneID': <int>,       # present while pending
@@ -1966,10 +2015,10 @@ class METSRClient:
 
         Without ``id`` returns the full road index::
 
-            {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_road'}
+            {'id_list': [...], 'TYPE': 'ANS_road'}
 
-        With ``id`` (SUMO road IDs, i.e. ``orig_id`` strings) each matched
-        road produces::
+        With ``id`` (SUMO road IDs or connector IDs) each matched facility
+        produces a record. Physical roads include::
 
             {
               'ID':               <str>   SUMO original road ID,
@@ -1984,15 +2033,19 @@ class METSRClient:
               'energy_consumed':  <float> cumulative energy consumed on this road (kWh),
               'down_stream_road': <list>  list of downstream road orig-IDs,
               'parking_capacity': <int>   parking capacity on this road,
-              'parked_num':       <int>   current parked or reserved vehicles,
-              'enteringVehicleQueue': <list[int]> vehicle IDs waiting to enter
-                                         this road, useful for co-sim roads
+              'parked_num':       <int>   current parked or reserved vehicles
             }
+
+        Intersection connectors use ID ``<sourceRoadID>_<targetRoadID>`` and
+        report ``isConnector=True``, ``routingEdge=False``, ``laneID=-1``,
+        source/target road IDs, intersection/conflict metadata, connector
+        distance and travel time. Without ``id``, ``id_list`` contains both
+        physical roads and connectors.
 
         Parameters
         ----------
         id : str | list[str] | None
-            SUMO road ID(s) to query. Pass ``None`` to get the full road index.
+            Physical road or connector ID(s). Pass ``None`` for the full index.
         """
         my_msg = {"TYPE": "QUERY_road"}
         if id is not None:
@@ -2012,7 +2065,9 @@ class METSRClient:
         :meth:`enter_road_from_queue`. Without ``roadID`` the server returns
         the road index. With road IDs, each record includes ``enteringVehicleIDs``
         and detailed queue entries with visible/private IDs, internal IDs,
-        vehicle type, departure tick, and readiness.
+        vehicle type, departure tick, and readiness. The index and lookup also
+        support connector IDs; connector records set ``isConnector=True`` and
+        ``laneID=-1``.
         """
         msg = {"TYPE": "QUERY_enteringVehicleQueue"}
         if roadID is not None:
@@ -2031,17 +2086,22 @@ class METSRClient:
     def query_centerline(self, id, lane_index = -1, transform_coords = False):
         """Query the geometric center-line of a road or a specific lane.
 
-        Each matched road returns::
+        Each matched physical road returns::
 
             {
               'ID':         <str>         SUMO road ID,
               'centerline': [[x, y, z], ...]  ordered coordinate list
             }
 
+        Connector IDs return their representative centerline plus
+        ``centerlines`` for all lane-to-lane movements, with
+        ``isConnector=True`` and ``laneID=-1``. The requested ``lane_index``
+        is ignored for connectors.
+
         Parameters
         ----------
         id : str | list[str]
-            SUMO road ID(s) to query. Required; cannot be ``None``.
+            Physical road or connector ID(s). Required; cannot be ``None``.
         lane_index : int | list[int]
             Index of the lane whose centerline to return.
             Use ``-1`` (default) to get the road's overall start/end points
@@ -2357,7 +2417,11 @@ class METSRClient:
                                    each entry is [x, y, z, bearing, speed],
               'route':     <list>  list of upcoming road orig-IDs in the vehicle's
                                    current planned route,
+              'roadID':    <str>   physical or connector road ID,
+              'onConnector': <bool>,
+              'laneID':    <int>   compact lane index, or -1 on a connector,
               'transitionPending': <bool>,
+              'transitionSourceRoadID': <str>,       # present while pending
               'transitionTargetRoadID': <str>,       # present while pending
               'transitionTargetLaneID': <int>,       # present while pending
               'transitionTargetInternalLaneID': <int> # present while pending
@@ -2376,11 +2440,22 @@ class METSRClient:
     def query_route(self, orig_x, orig_y, dest_x, dest_y, transform_coords = False):
         """Query the shortest path between two coordinate pairs.
 
-        Each query pair returns::
+        Each query pair returns a connector-aware route record::
 
-            {'road_list': [<road_orig_id>, ...]}
+            {
+              'road_list': [<physical_road_id>, ...],
+              'connector_list': [<source>_<target>, ...],
+              'road_list_with_connectors': [<road>, <connector>, ...],
+              'road_distance': <meters>,
+              'connector_distance': <meters>,
+              'distance': <meters>,
+              'road_travel_time': <seconds>,
+              'connector_travel_time': <seconds>,
+              'travel_time': <seconds>
+            }
 
-        or ``'KO'`` if no path was found.
+        ``road_list`` remains physical-road-only for backward compatibility.
+        The server returns ``'KO'`` if no path was found.
 
         Parameters
         ----------
@@ -2417,9 +2492,20 @@ class METSRClient:
     def query_k_routes(self, orig_x, orig_y, dest_x, dest_y, k, transform_coords = False):
         """Query the *k* shortest paths between two coordinate pairs.
 
-        Each query pair returns::
+        Each query pair returns physical-only ``road_lists`` plus parallel
+        connector-aware arrays::
 
-            {'road_lists': [[<road_orig_id>, ...], ...]}  # k routes
+            {
+              'road_lists': [[<physical_road_id>, ...], ...],
+              'connector_lists': [[<connector_id>, ...], ...],
+              'road_lists_with_connectors': [[<road_or_connector>, ...], ...],
+              'road_distances': [<meters>, ...],
+              'connector_distances': [<meters>, ...],
+              'distances': [<meters>, ...],
+              'road_travel_times': [<seconds>, ...],
+              'connector_travel_times': [<seconds>, ...],
+              'travel_times': [<seconds>, ...]
+            }
 
         or ``'KO'`` if no path was found.
 
@@ -2459,11 +2545,18 @@ class METSRClient:
     def query_route_between_roads(self, orig_road, dest_road):
         """Query the shortest path between two roads identified by their SUMO IDs.
 
-        Each query pair returns::
+        Each query pair returns a connector-aware route record::
 
-            {'road_list': [<road_orig_id>, ...]}
+            {
+              'road_list': [<physical_road_id>, ...],
+              'connector_list': [<source>_<target>, ...],
+              'road_list_with_connectors': [<road_or_connector>, ...],
+              'distance': <meters>,
+              'travel_time': <seconds>
+            }
 
-        or ``'KO'`` if no path was found.
+        Separate physical-road and connector distance/travel-time fields are
+        also returned. The server returns ``'KO'`` if no path was found.
 
         Parameters
         ----------
@@ -2491,9 +2584,14 @@ class METSRClient:
     def query_k_routes_between_roads(self, orig_road, dest_road, k):
         """Query the *k* shortest paths between two roads.
 
-        Each query pair returns::
+        Each query pair returns physical-only ``road_lists`` plus connector
+        IDs, interleaved paths, and per-route distance/travel-time arrays::
 
-            {'road_lists': [[<road_orig_id>, ...], ...]}  # k routes
+            {'road_lists': [[<physical_road_id>, ...], ...],
+             'connector_lists': [[<connector_id>, ...], ...],
+             'road_lists_with_connectors': [[<road_or_connector>, ...], ...],
+             'distances': [<meters>, ...],
+             'travel_times': [<seconds>, ...]}
 
         or ``'KO'`` if no path was found.
 
@@ -2524,29 +2622,35 @@ class METSRClient:
         return res
 
     def query_road_weights(self, roadID = None):
-        """Query the routing-graph edge weight in seconds for one or more roads.
+        """Query costs for physical roads or intersection connectors.
 
         Without ``roadID`` returns all road/edge IDs::
 
             {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_edgeWeight'}
 
-        With ``roadID`` each matched road produces::
+        Physical-road records contain routing-edge costs. Connector records
+        instead use their estimated travel time as ``weight`` and include
+        ``connectorTravelTime``, ``connectorDistance``, ``isConnector=True``,
+        ``routingEdge=False``, and ``laneID=-1``.
+
+        With ``roadID`` each matched physical road produces::
 
             {
               'ID':              <str>   SUMO road ID,
-              'r_type':          <int>   road type code,
-              'avg_travel_time': <float> recent mean travel time (s),
               'length':          <float> road length (m),
               'weight':          <float> current edge weight in seconds used
                                          by the router (typically travel time,
                                          may be overridden via
-                                         :meth:`update_road_weights`)
+                                         :meth:`update_road_weights`),
+              'isConnector':     False,
+              'routingEdge':     True
             }
 
         Parameters
         ----------
         roadID : str | list[str] | None
-            SUMO road ID(s). Pass ``None`` to get all edges.
+            Physical road or connector ID(s). Pass ``None`` to get the full
+            queryable facility index.
         """
         msg = {"TYPE": "QUERY_edgeWeight"}
         if roadID is not None:
@@ -3628,18 +3732,35 @@ class METSRClient:
 
     # CONTROL: change the state of the simulator
     # generate a vehicle trip between origin and destination zones
-    def generate_trip(self, vehID, origin = -1, destination = -1):
-        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(origin, list):
-            origin = [origin] * len(vehID)
-        if not isinstance(destination, list):
-            destination = [destination] * len(vehID)
+    def generate_trip(self, vehID, origin = -1, destination = -1, length = None):
+        """Generate private-EV trips between zones.
 
-        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
-        for vehID, origin, destination in zip(vehID, origin, destination):
-            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
+        ``length`` is an optional vehicle length in meters. It may be a scalar
+        or one value per ``vehID`` and must be finite and positive when set.
+        METS-R SIM applies it only when that external vehicle ID is first
+        created; subsequent trips retain the vehicle's original length. Each
+        successful response record reports the effective ``length``.
+        """
+        msg = {"TYPE": "CTRL_generateTrip", "DATA": []}
+        vehicle_ids = _as_list(vehID)
+        origins = _batch_field_values(
+            origin, len(vehicle_ids), "origin", batch_name="vehID"
+        )
+        destinations = _batch_field_values(
+            destination, len(vehicle_ids), "destination", batch_name="vehID"
+        )
+        lengths = _optional_vehicle_lengths(length, len(vehicle_ids), "vehID")
+
+        for vehicle_id, origin_id, destination_id, vehicle_length in zip(
+                vehicle_ids, origins, destinations, lengths):
+            record = {
+                "vehID": vehicle_id,
+                "orig": origin_id,
+                "dest": destination_id,
+            }
+            if vehicle_length is not None:
+                record["length"] = vehicle_length
+            msg["DATA"].append(record)
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
@@ -3648,18 +3769,33 @@ class METSRClient:
         return res
     
     # generate a vehicle trip between origin and destination roads
-    def generate_trip_between_roads(self, vehID, origin, destination):
-        msg = {"TYPE": "CTRL_genTripBwRoads", "DATA": []}
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(origin, list):
-            origin = [origin] * len(vehID)
-        if not isinstance(destination, list):
-            destination = [destination] * len(vehID)
+    def generate_trip_between_roads(
+            self, vehID, origin, destination, length = None):
+        """Generate private-EV trips between original road IDs.
 
-        assert len(vehID) == len(origin) == len(destination), "Length of vehID, origin, and destination must be the same"
-        for vehID, origin, destination in zip(vehID, origin, destination):
-            msg["DATA"].append({"vehID": vehID, "orig": origin, "dest": destination})
+        ``length`` follows :meth:`generate_trip`: it is measured in meters,
+        supports scalar broadcasting, and only affects a newly created vehicle.
+        """
+        msg = {"TYPE": "CTRL_genTripBwRoads", "DATA": []}
+        vehicle_ids = _as_list(vehID)
+        origins = _batch_field_values(
+            origin, len(vehicle_ids), "origin", batch_name="vehID"
+        )
+        destinations = _batch_field_values(
+            destination, len(vehicle_ids), "destination", batch_name="vehID"
+        )
+        lengths = _optional_vehicle_lengths(length, len(vehicle_ids), "vehID")
+
+        for vehicle_id, origin_id, destination_id, vehicle_length in zip(
+                vehicle_ids, origins, destinations, lengths):
+            record = {
+                "vehID": vehicle_id,
+                "orig": origin_id,
+                "dest": destination_id,
+            }
+            if vehicle_length is not None:
+                record["length"] = vehicle_length
+            msg["DATA"].append(record)
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
 
@@ -5320,15 +5456,22 @@ class METSRClient:
     # Spawn e-taxis parked at given zone(s).
     # zoneID: zone ID or list of zone IDs; num: number of taxis to spawn per zone.
     # Returns spawned vehicle IDs grouped by zone.
-    def add_taxi(self, zoneID, num):
+    def add_taxi(self, zoneID, num, length = None):
+        """Spawn parked e-taxis, optionally with a custom length in meters.
+
+        ``length`` may be a scalar or one value per zone. When omitted, the
+        simulator uses ``DEFAULT_VEHICLE_LENGTH``. Each successful record
+        returns the applied ``length`` together with the spawned ``IDs``.
+        """
         msg = {"TYPE": "CTRL_addTaxi", "DATA": []}
-        if not isinstance(zoneID, list):
-            zoneID = [zoneID]
-        if not isinstance(num, list):
-            num = [num] * len(zoneID)
-        assert len(zoneID) == len(num), "zoneID and num must have the same length"
-        for zid, n in zip(zoneID, num):
-            msg["DATA"].append({"zoneID": zid, "num": n})
+        zone_ids = _as_list(zoneID)
+        counts = _batch_field_values(num, len(zone_ids), "num", batch_name="zoneID")
+        lengths = _optional_vehicle_lengths(length, len(zone_ids), "zoneID")
+        for zone_id, count, vehicle_length in zip(zone_ids, counts, lengths):
+            record = {"zoneID": zone_id, "num": count}
+            if vehicle_length is not None:
+                record["length"] = vehicle_length
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addTaxi", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -5337,15 +5480,25 @@ class METSRClient:
     # Spawn e-buses on existing named route(s).
     # routeName: route name or list of route names; num: buses to spawn per route.
     # Returns spawned vehicle IDs grouped by route.
-    def add_bus(self, routeName, num):
+    def add_bus(self, routeName, num, length = None):
+        """Spawn e-buses, optionally with a custom length in meters.
+
+        ``length`` may be a scalar or one value per route. When omitted, the
+        simulator uses ``DEFAULT_VEHICLE_LENGTH``. Each successful record
+        returns the applied ``length`` together with the spawned ``IDs``.
+        """
         msg = {"TYPE": "CTRL_addBus", "DATA": []}
-        if not isinstance(routeName, list):
-            routeName = [routeName]
-        if not isinstance(num, list):
-            num = [num] * len(routeName)
-        assert len(routeName) == len(num), "routeName and num must have the same length"
-        for rname, n in zip(routeName, num):
-            msg["DATA"].append({"routeName": rname, "num": n})
+        route_names = _as_list(routeName)
+        counts = _batch_field_values(
+            num, len(route_names), "num", batch_name="routeName"
+        )
+        lengths = _optional_vehicle_lengths(length, len(route_names), "routeName")
+        for route_name, count, vehicle_length in zip(
+                route_names, counts, lengths):
+            record = {"routeName": route_name, "num": count}
+            if vehicle_length is not None:
+                record["length"] = vehicle_length
+            msg["DATA"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addBus", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
