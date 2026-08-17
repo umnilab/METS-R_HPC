@@ -289,7 +289,10 @@ def active_vehicle(record):
 
 
 def normalize_metsr_vehicle(record, private_flag=False, role=None):
-    vehicle_id = record.get("vehicle_id", record.get("ID", record.get("vid")))
+    vehicle_id = record.get(
+        "vehicleId",
+        record.get("vehicle_id", record.get("ID", record.get("vid"))),
+    )
     return {
         "ID": vehicle_id,
         "role": role or ("private" if private_flag else "public"),
@@ -298,11 +301,19 @@ def normalize_metsr_vehicle(record, private_flag=False, role=None):
         "z": record.get("z", 0.0),
         "speed": record.get("speed", record.get("speed_mps", 0.0)),
         "bearing": record.get("bearing", record.get("heading_deg", 0.0)),
-        "acc": record.get("acc", record.get("acceleration_mps2")),
-        "road": record.get("road", record.get("road_id")),
-        "lane": record.get("lane", record.get("lane_id")),
+        "acc": record.get(
+            "acceleration", record.get("acc", record.get("acceleration_mps2"))
+        ),
+        "road": record.get(
+            "roadId", record.get("road", record.get("road_id"))
+        ),
+        "lane": record.get(
+            "laneIndex", record.get("lane", record.get("lane_id"))
+        ),
         "state": record.get("state"),
-        "v_type": record.get("v_type", record.get("vehicle_type")),
+        "v_type": record.get(
+            "vehicleClass", record.get("v_type", record.get("vehicle_type"))
+        ),
         "private_veh": bool(private_flag),
         "sensor_type": "cv2x",
         "map_name": "Town05",
@@ -324,14 +335,20 @@ def query_selected_metsr_vehicles(metsr, args):
         )
         return [
             normalize_metsr_vehicle(record, private_flag=private_flag, role=f"metsr_{index + 1}")
-            for index, (record, private_flag) in enumerate(zip(response.get("DATA", []), private_flags))
+            for index, (record, private_flag) in enumerate(zip(
+                response.get("data", response.get("DATA", [])),
+                private_flags,
+            ))
             if active_vehicle(record)
         ]
 
     fleet = metsr.query_vehicle()
     candidates = []
-    for private_flag, key in ((False, "public_vids"), (True, "private_vids")):
-        ids = list(fleet.get(key, []))
+    for private_flag, key, legacy_key in (
+        (False, "publicVehicleIds", "public_vids"),
+        (True, "privateVehicleIds", "private_vids"),
+    ):
+        ids = list(fleet.get(key, fleet.get(legacy_key, [])))
         for start in range(0, len(ids), 25):
             batch = ids[start : start + 25]
             if not batch:
@@ -341,7 +358,7 @@ def query_selected_metsr_vehicles(metsr, args):
                 private_veh=[private_flag] * len(batch),
                 transform_coords=args.metsr_transform_coords,
             )
-            for record in response.get("DATA", []):
+            for record in response.get("data", response.get("DATA", [])):
                 if active_vehicle(record):
                     candidates.append(
                         normalize_metsr_vehicle(

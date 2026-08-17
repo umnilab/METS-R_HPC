@@ -85,7 +85,10 @@ def get_arguments(argv):
         "--route_advance_interval",
         type=int,
         default=25,
-        help="ticks between METS-R road-level route advancement calls for CARLA-controlled vehicles",
+        help=(
+            "deprecated compatibility option; current METS-R versions infer "
+            "road transitions from CARLA pose updates"
+        ),
     )
     parser.add_argument(
         "--reroute_route_threshold",
@@ -190,15 +193,21 @@ def query_road_adjacency(metsr, roads, batch_size=25):
     for batch_start in range(0, len(roads), batch_size):
         batch = roads[batch_start:batch_start + batch_size]
         response = metsr.query_road(id=batch)
-        for record in response.get("DATA", []):
+        for record in response.get("data", response.get("DATA", [])):
             if not isinstance(record, dict):
                 continue
-            road_id = record.get("ID")
+            road_id = record.get(
+                "segmentId", record.get("roadId", record.get("ID"))
+            )
             if road_id is None:
                 continue
             adjacency[str(road_id)] = [
                 str(downstream)
-                for downstream in record.get("down_stream_road", []) or []
+                for downstream in (
+                    record.get("downstreamIds")
+                    or record.get("down_stream_road", [])
+                    or []
+                )
             ]
 
     return adjacency
@@ -309,25 +318,26 @@ def seed_vehicle_on_each_cosim_road(metsr, roads, route_graph, vehicles_per_road
 def response_status(response, index=0, default="KO"):
     if not isinstance(response, dict):
         return default
-    data = response.get("DATA", [])
+    data = response.get("data", response.get("DATA", []))
     if index >= len(data):
         return default
     record = data[index]
     if isinstance(record, dict):
-        return record.get("STATUS", default)
+        status = record.get("status", record.get("STATUS", default))
+        return str(status).upper()
     if isinstance(record, str):
         return record
     return default
 
 
 def route_from_response(response):
-    data = response.get("DATA", [])
+    data = response.get("data", response.get("DATA", []))
     if not data:
         return []
     record = data[0]
     if not isinstance(record, dict):
         return []
-    return record.get("road_list", []) or []
+    return record.get("segmentIds", record.get("road_list", [])) or []
 
 
 def reroute_vehicle(metsr, veh_id, private_veh, current_road, roads, route_graph, vehicle_destinations, reroute_counts, min_hops, verbose=False):
@@ -383,19 +393,37 @@ def manage_active_vehicle_routes(
     min_hops,
     verbose=False,
 ):
+    # Kept in the signature for compatibility with older configs. Current
+    # METS-R versions commit road/connector transitions from the authoritative
+    # poses sent by step_carla_metsr_cosim, not from enterNextRoad requests.
+    del tick, route_advance_interval
     cosim_vehicles = step_result.get("cosim_vehicles", [])
     vehicle_states = {
-        state.get("ID"): state
+        state.get("vehicleId", state.get("ID")): state
         for state in step_result.get("vehicle_states", [])
         if isinstance(state, dict)
     }
 
     for vehicle in cosim_vehicles:
-        veh_id = vehicle.get("ID")
-        private_veh = vehicle.get("v_type", True)
-        route = vehicle.get("route", []) or []
+        veh_id = vehicle.get("vehicleId", vehicle.get("ID"))
+        private_veh = vehicle.get("isPrivate", vehicle.get("v_type", True))
+        route = vehicle.get("routeRoadIds", vehicle.get("route", [])) or []
         state = vehicle_states.get(veh_id, {})
-        current_road = state.get("roadID") or (route[0] if route else None)
+        current_road = (
+            state.get("roadId", state.get("roadID"))
+            or (route[0] if route else None)
+        )
+
+        # The route has already advanced to the connector target while the
+        # transition is pending. A reroute or another next-road assertion here
+        # would target route[1] and can produce PENDING_TARGET_MISMATCH.
+        if vehicle.get("transitionPending") is True:
+            if verbose:
+                print(
+                    f"Vehicle {veh_id} is waiting for its pending METS-R "
+                    "road transition to commit."
+                )
+            continue
 
         if len(route) <= route_threshold:
             reroute_vehicle(
@@ -411,18 +439,6 @@ def manage_active_vehicle_routes(
                 verbose=verbose,
             )
             continue
-
-        if route_advance_interval and tick % route_advance_interval == 0 and len(route) > 1:
-            next_road = route[1]
-            response = metsr.enter_next_road(
-                vehID=veh_id,
-                roadID=next_road,
-                private_veh=private_veh,
-            )
-            status = response_status(response)
-            if verbose:
-                print(f"Advanced vehicle {veh_id} to next METS-R road {next_road}: {status}")
-
 
 def wait_for_exit_after_completion(sim_minutes):
     try:
