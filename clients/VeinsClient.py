@@ -44,6 +44,14 @@ def _clean_record(record):
     return {key: value for key, value in record.items() if value is not None}
 
 
+def _first_present(record, *keys, default=None):
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return value
+    return default
+
+
 class VeinsConnectionError(RuntimeError):
     """Raised when the VEINS sidecar process cannot be reached."""
 
@@ -53,7 +61,7 @@ class VeinsProtocolError(RuntimeError):
 
 
 def build_mobility_records(vehicle_records, private_veh=False, sensor_type=None):
-    """Convert METS-R vehicle query records to VEINS bridge mobility records."""
+    """Convert canonical or normalized vehicle states to bridge mobility records."""
     vehicles = _as_list(vehicle_records)
     if _is_sequence(private_veh):
         private_flags = list(private_veh)
@@ -65,24 +73,46 @@ def build_mobility_records(vehicle_records, private_veh=False, sensor_type=None)
         if not isinstance(vehicle, Mapping):
             continue
         private_flag = private_flags[index] if index < len(private_flags) else False
-        vehicle_id = vehicle.get("vehicleId")
+        vehicle_id = _first_present(
+            vehicle, "vehicleId", "vehicle_id", "ID", "id", "vid"
+        )
         if vehicle_id is None:
             continue
         records.append(
             _clean_record(
                 {
                     "vehicle_id": vehicle_id,
-                    "private_veh": bool(vehicle.get("isPrivate", private_flag)),
-                    "vehicle_type": vehicle.get("vehicleClass"),
+                    "private_veh": bool(
+                        _first_present(
+                            vehicle,
+                            "isPrivate",
+                            "private_veh",
+                            "v_type",
+                            default=private_flag,
+                        )
+                    ),
+                    "vehicle_type": _first_present(
+                        vehicle, "vehicleClass", "vehicle_type"
+                    ),
                     "x": vehicle.get("x"),
                     "y": vehicle.get("y"),
                     "z": vehicle.get("z", 0.0),
-                    "speed_mps": vehicle.get("speed"),
-                    "heading_deg": vehicle.get("bearing"),
-                    "acceleration_mps2": vehicle.get("acceleration"),
-                    "road_id": vehicle.get("segmentId"),
-                    "lane_id": vehicle.get("laneIndex"),
-                    "sensor_type": vehicle.get("sensor_type", sensor_type),
+                    "speed_mps": _first_present(vehicle, "speed", "speed_mps"),
+                    "heading_deg": _first_present(
+                        vehicle, "bearing", "heading_deg", "heading"
+                    ),
+                    "acceleration_mps2": _first_present(
+                        vehicle, "acceleration", "acc", "acceleration_mps2"
+                    ),
+                    "road_id": _first_present(
+                        vehicle, "segmentId", "roadId", "road", "road_id", "roadID"
+                    ),
+                    "lane_id": _first_present(
+                        vehicle, "laneIndex", "lane", "lane_id"
+                    ),
+                    "sensor_type": _first_present(
+                        vehicle, "sensor_type", default=sensor_type
+                    ),
                     "state": vehicle.get("state"),
                 }
             )

@@ -38,14 +38,16 @@ Download and build OMNeT++:
 ```bash
 mkdir -p ~/src
 cd ~/src
-wget https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.1/omnetpp-6.1-linux-x86_64.tgz
-tar xzf omnetpp-6.1-linux-x86_64.tgz
+wget https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.1.0/omnetpp-6.1.0-linux-x86_64.tgz
+tar xzf omnetpp-6.1.0-linux-x86_64.tgz
 
 export OMNETPP_HOME=~/src/omnetpp-6.1
 cd "$OMNETPP_HOME"
 python3 -m venv .venv --upgrade-deps --clear --prompt "omnetpp/.venv"
 source .venv/bin/activate
 python3 -m pip install -r python/requirements.txt
+python -m pip install 'setuptools<82'
+python -c 'import pkg_resources; print("pkg_resources OK")'
 source setenv
 ./configure WITH_QTENV=no WITH_OSG=no
 make -j"$(nproc)"
