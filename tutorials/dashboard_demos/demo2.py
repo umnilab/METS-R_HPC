@@ -232,6 +232,17 @@ def normalize_args(args: Args) -> Args:
             )
     if float(args.carla_timeout_s) <= 0:
         raise ValueError("--carla-timeout-s must be greater than zero")
+    timestep = float(args.timestep)
+    metsr_tick_seconds = float(args.metsr_tick_seconds)
+    if timestep <= 0 or metsr_tick_seconds <= 0:
+        raise ValueError("--timestep and --metsr-tick-seconds must be greater than zero")
+    timestep_ratio = metsr_tick_seconds / timestep
+    if timestep > metsr_tick_seconds or not math.isclose(
+        timestep_ratio, round(timestep_ratio), rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise ValueError(
+            "--metsr-tick-seconds must be an integer multiple of --timestep"
+        )
     if args.metsr_sim_dir:
         args.metsr_sim_dir = resolve_metsr_sim_folder(args)
     return args
@@ -1338,6 +1349,7 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
         xml_map=args.sumo_map,
         map_path=args.opendrive_map,
         timestep=float(args.timestep),
+        sim_timestep=float(args.metsr_tick_seconds),
         bubble_size=int(args.bubble_size),
         run_name=str(base_run_name),
         metsr_sim_dir=metsr_output_path,
