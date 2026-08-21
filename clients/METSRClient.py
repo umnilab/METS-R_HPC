@@ -6015,27 +6015,47 @@ class METSRClient:
         public_fleet_keys = None
 
         if not query_groups:
+            private_ids = []
+            public_ids = []
             try:
                 fleet = self.query_on_road_vehicles(roadID=road_ids)
             except Exception:
-                return []
-            if not isinstance(fleet, dict) or fleet.get("status") == "error":
-                return []
-            if fleet.get("data"):
-                private_ids = []
-                public_ids = []
+                fleet = {}
+            if isinstance(fleet, dict) and fleet.get("status") != "error":
+                private_ids.extend(fleet.get("privateVehicleIds") or [])
+                public_ids.extend(fleet.get("publicVehicleIds") or [])
                 for road_record in fleet.get("data", []):
                     if isinstance(road_record, dict) and road_record.get("status") != "error":
                         private_ids.extend(road_record.get("privateVehicleIds") or [])
                         public_ids.extend(road_record.get("publicVehicleIds") or [])
-                fleet = {
-                    "privateVehicleIds": list(dict.fromkeys(private_ids)),
-                    "publicVehicleIds": list(dict.fromkeys(public_ids)),
-                }
+
+            # Vehicles controlled by Scenic can be detached from METS-R's
+            # active-road index while they are inside the co-simulation bubble.
+            # Merge the authoritative co-sim ownership list so those actors are
+            # still represented in live visualization frames.
+            try:
+                cosim_fleet = self.query_cosim_vehicle()
+            except Exception:
+                cosim_fleet = {}
+            if isinstance(cosim_fleet, dict) and cosim_fleet.get("status") != "error":
+                for record in cosim_fleet.get("data", []):
+                    if not isinstance(record, dict) or record.get("status") == "error":
+                        continue
+                    vehicle_id = _viz_vehicle_id(record)
+                    if vehicle_id in (None, -1, ""):
+                        continue
+                    is_private = bool(_viz_first(
+                        record,
+                        "isPrivate", "privateVehicle", "_viz_private_veh",
+                        default=False,
+                    ))
+                    (private_ids if is_private else public_ids).append(vehicle_id)
+
+            private_ids = list(dict.fromkeys(private_ids))
+            public_ids = list(dict.fromkeys(public_ids))
             if include_private:
-                add_query_group(fleet.get("privateVehicleIds") or [], True)
+                add_query_group(private_ids, True)
             if include_public:
-                public_ids = fleet.get("publicVehicleIds") or []
                 add_query_group(public_ids, False)
                 public_fleet_keys = {
                     (False, str(veh_id)) for veh_id in public_ids
