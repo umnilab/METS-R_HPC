@@ -80,6 +80,7 @@ class Args:
     metsr_viz_vehicle_type: int = METS_R_VIS_PRIVATE_VEHICLE_TYPE
     viz_stream_host: str = "0.0.0.0"
     viz_stream_port: int = 8766
+    viz_stream_browser_host: Optional[str] = None
     viz_initial_x: Optional[float] = None
     viz_initial_y: Optional[float] = None
     open_browser: bool = False
@@ -215,6 +216,7 @@ def normalize_args(args: Args) -> Args:
     args.dashboard_dir = str(Path(args.dashboard_dir).expanduser().resolve())
     args.metsr_viz_map = metsr_vis_map_for_town(args.town) if args.metsr_viz_map in (None, "") else int(args.metsr_viz_map)
     args.metsr_viz_vehicle_type = int(args.metsr_viz_vehicle_type)
+    args.viz_stream_browser_host = str(args.viz_stream_browser_host).strip() if args.viz_stream_browser_host else None
     town_road_dir = map_root / args.town / "facility" / "road"
     map_dir = town_road_dir if town_road_dir.is_dir() else map_root
     args.opendrive_map = str(Path(args.opendrive_map).expanduser().resolve()) if args.opendrive_map else str(map_dir / f"{args.town}.xodr")
@@ -246,6 +248,23 @@ def normalize_args(args: Args) -> Args:
     if args.metsr_sim_dir:
         args.metsr_sim_dir = resolve_metsr_sim_folder(args)
     return args
+
+
+def format_exception(exc: BaseException) -> str:
+    detail = str(exc).strip() or repr(exc)
+    return f"{type(exc).__name__}: {detail}"
+
+
+def metsr_viz_browser_stream_url(client: Any, args: Args) -> str:
+    """Return the WebSocket URL which the dashboard browser should open."""
+    port = int(getattr(client, "viz_stream_port", None) or args.viz_stream_port)
+    host = args.viz_stream_browser_host
+    if not host:
+        bound_host = str(getattr(client, "viz_stream_host", None) or args.viz_stream_host or "").strip()
+        host = "localhost" if bound_host.lower() in {"", "0.0.0.0", "::", "127.0.0.1", "::1"} else bound_host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"ws://{host}:{port}"
 
 
 def first_float(*values: Any) -> Optional[float]:
@@ -650,6 +669,37 @@ def install_metsr_client_lock(client: Any, lock: Any) -> None:
     client._tracr_lock_patched = True
 
 
+def install_metsr_render_diagnostics(client: Any, dashboard: ScenicTRACRDashboard) -> None:
+    """Expose render failures which Scenic's co-simulator otherwise suppresses."""
+    if client is None or getattr(client, "_tracr_render_diagnostics_patched", False):
+        return
+    original_render = getattr(client, "render", None)
+    if not callable(original_render):
+        return
+
+    def render_with_diagnostics(*method_args: Any, **method_kwargs: Any) -> Any:
+        try:
+            return original_render(*method_args, **method_kwargs)
+        except Exception as exc:
+            detail = format_exception(exc)
+            client._tracr_last_viz_render_error = detail
+            now = time.monotonic()
+            previous = getattr(client, "_tracr_reported_viz_render_error", None)
+            previous_at = float(getattr(client, "_tracr_reported_viz_render_error_at", 0.0) or 0.0)
+            if detail != previous or now - previous_at >= 10.0:
+                print(f"METS-R Vis render failed: {detail}")
+                client._tracr_reported_viz_render_error = detail
+                client._tracr_reported_viz_render_error_at = now
+            try:
+                dashboard.set_status(f"METS-R Vis render failed: {detail}", run_state="waiting")
+            except Exception:
+                pass
+            raise
+
+    client.render = render_with_diagnostics
+    client._tracr_render_diagnostics_patched = True
+
+
 def patch_cosim_carla_motion_compat(args: Args) -> None:
     if bool(getattr(args, "carla_autopilot_compat", False)):
         print("Using Scenic's native CARLA motion path; TRACR Traffic Manager override is disabled.")
@@ -724,24 +774,46 @@ class VizRenderWorker:
 
         if self.client is None:
             raise RuntimeError("CosimSimulator did not expose a METS-R client for visualization.")
-        with self.client_lock:
-            viz_info = _start_viz_with_port_fallback(self.client, {
-                "server_port": int(self.args.viz_stream_port),
-                "host": self.args.viz_stream_host,
-                "tick_interval": 1,
-                "transform_coords": bool(self.args.viz_transform_coords),
-                "include_public": bool(self.args.viz_include_public),
-                "include_private": bool(self.args.viz_include_private),
-                "include_links": bool(self.args.viz_include_links),
-                "link_snapshot_interval": 1,
-                "initial_x": self.args.viz_initial_x,
-                "initial_y": self.args.viz_initial_y,
-            })
-        stream_url = viz_info.get("browser_url") or viz_info.get("url") or ""
+        stream_is_running = (
+            getattr(self.client, "viz_stream_server", None) is not None
+            and getattr(self.client, "viz_stream_manifest", None) is not None
+        )
+        if stream_is_running:
+            stream_url = metsr_viz_browser_stream_url(self.client, self.args)
+        else:
+            with self.client_lock:
+                viz_info = _start_viz_with_port_fallback(self.client, {
+                    "server_port": int(self.args.viz_stream_port),
+                    "host": self.args.viz_stream_host,
+                    "tick_interval": 1,
+                    "transform_coords": bool(self.args.viz_transform_coords),
+                    "include_public": bool(self.args.viz_include_public),
+                    "include_private": bool(self.args.viz_include_private),
+                    "include_links": bool(self.args.viz_include_links),
+                    "link_snapshot_interval": 1,
+                    "initial_x": self.args.viz_initial_x,
+                    "initial_y": self.args.viz_initial_y,
+                })
+            stream_url = viz_info.get("browser_url") or viz_info.get("url") or ""
         self.viz_started = True
         self.ready_event.set()
-        self.dashboard.set_stream(stream_url, "METS-R Vis stream connected")
-        self.dashboard.set_status("METS-R Vis stream connected")
+        self.dashboard.set_stream(stream_url, "METS-R Vis stream configured")
+        self.dashboard.set_status(f"METS-R Vis stream configured: {stream_url}", run_state="ready")
+
+    def wait_for_browser_client(self, timeout_s: float) -> bool:
+        wait_for_client = getattr(self.client, "_wait_for_viz_stream_client", None)
+        if not callable(wait_for_client):
+            return False
+        try:
+            with self.client_lock:
+                wait_for_client(client_wait_timeout=max(0.0, float(timeout_s)))
+        except Exception as exc:
+            self.last_error = format_exception(exc)
+            self.dashboard.set_status(f"METS-R Vis browser waiting: {self.last_error}", run_state="waiting")
+            return False
+        self.last_error = ""
+        self.dashboard.set_status("METS-R Vis browser connected", run_state="ready")
+        return True
 
     def _stop_viz_stream(self) -> None:
         self.ready_event.clear()
@@ -842,7 +914,7 @@ class VizRenderWorker:
                 render_info = self.client.render(client_wait_timeout=float(self.args.render_client_wait_timeout_s))
             return "", render_info if isinstance(render_info, dict) else None
         except Exception as exc:
-            message = str(exc).splitlines()[0]
+            message = format_exception(exc)
             if "Call start_viz() before render()" in message:
                 self.viz_started = False
                 self.ready_event.clear()
@@ -1353,6 +1425,7 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
         bubble_size=int(args.bubble_size),
         run_name=str(base_run_name),
         metsr_sim_dir=metsr_output_path,
+        metsr_viz_port=int(args.viz_stream_port),
     )
 
 
@@ -1407,6 +1480,7 @@ def run(args: Args) -> int:
         if metsr_client is None:
             raise RuntimeError("CosimSimulator did not expose a METS-R client for visualization.")
         patch_metsr_client_viz_compat(metsr_client)
+        install_metsr_render_diagnostics(metsr_client, dashboard)
         metsr_client_lock = threading.RLock()
         worker = VizRenderWorker(args, dashboard, metsr_client, metsr_client_lock, owns_client=False)
 
@@ -1427,8 +1501,13 @@ def run(args: Args) -> int:
                 if warmup_s > 0:
                     dashboard.set_status(f"METS-R Vis stream ready; warming dashboard for {warmup_s:.1f}s", run_state="ready")
                     time.sleep(warmup_s)
+                browser_connected = worker.wait_for_browser_client(float(args.client_connect_wait_s))
+                if browser_connected:
+                    print(f"METS-R Vis dashboard connected to {stream_url}")
+                elif args.require_viz_client:
+                    raise RuntimeError(worker.last_error or f"No METS-R Vis browser connected to {stream_url}")
             except Exception as exc:
-                worker.last_error = str(exc).splitlines()[0]
+                worker.last_error = format_exception(exc)
                 dashboard.set_status(f"METS-R Vis stream waiting: {worker.last_error}", run_state="waiting")
                 if args.require_viz_client:
                     raise
