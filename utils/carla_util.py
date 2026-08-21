@@ -82,8 +82,8 @@ def metsr_to_carla_location(world, metsr_x, metsr_y, z=0.0, invert_y=True, snap=
       return location
 
 
-def get_carla_location(world, metsr_x, metsr_y):
-      return metsr_to_carla_location(world, metsr_x, metsr_y)
+def get_carla_location(world, metsr_x, metsr_y, z=0.0):
+      return metsr_to_carla_location(world, metsr_x, metsr_y, z=z)
 
 
 def metsr_bearing_to_carla_yaw(bearing):
@@ -237,7 +237,12 @@ def spawn_carla_vehicle(
       verbose=False,
 ):
       rotation, yaw = get_carla_rotation(vehicle_state)
-      location = metsr_to_carla_location(world, vehicle_state["x"], vehicle_state["y"])
+      location = metsr_to_carla_location(
+            world,
+            vehicle_state["x"],
+            vehicle_state["y"],
+            z=vehicle_state.get("z", 0.0),
+      )
       spawn_point = carla.Transform(location, rotation)
       blueprint_id = private_blueprint if private_veh else public_blueprint
       blueprint = world.get_blueprint_library().find(blueprint_id)
@@ -296,7 +301,12 @@ def update_carla_vehicle_from_metsr(world, actor, vehicle_state):
       if actor is None:
             return False
       rotation, _ = get_carla_rotation(vehicle_state)
-      location = metsr_to_carla_location(world, vehicle_state["x"], vehicle_state["y"])
+      location = metsr_to_carla_location(
+            world,
+            vehicle_state["x"],
+            vehicle_state["y"],
+            z=vehicle_state.get("z", 0.0),
+      )
       actor.set_transform(carla.Transform(location, rotation))
       return True
 
@@ -357,7 +367,13 @@ def drive_actor_toward_metsr_waypoints(
       dy = -target[1] - loc.y
       yaw = math.degrees(math.atan2(dy, dx))
       rotation = carla.Rotation(pitch=0.0, yaw=yaw, roll=0.0)
-      actor.set_transform(carla.Transform(metsr_to_carla_location(world, target[0], target[1]), rotation))
+      target_z = target[2] if len(target) > 2 else vehicle_state.get("z", 0.0)
+      actor.set_transform(
+            carla.Transform(
+                  metsr_to_carla_location(world, target[0], target[1], z=target_z),
+                  rotation,
+            )
+      )
       speed = max(float(vehicle_state.get("speed", 0.0)), min_speed)
       actor.set_target_velocity(carla_velocity_vector(speed, yaw))
       return True

@@ -3855,6 +3855,7 @@ def _stabilize_projection_vehicle(runtime, deps, veh_id, actor, vehicle_state):
             world,
             vehicle_state["x"],
             vehicle_state["y"],
+            z=vehicle_state.get("z", 0.0),
             z_offset=getattr(runtime, "projection_z_offset", 0.05),
         )
     except Exception:
