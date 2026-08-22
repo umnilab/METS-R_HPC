@@ -92,7 +92,7 @@ scenario SpawnCar(veh_num):
     if veh_num < globalParameters.num_commuters:
         if not globalParameters.allow_bubble_spawns:
             target = simulation().objects[0]
-            spawn_region = workspace.network.drivableRegion.difference(target.bubble)
+            spawn_region = metsrMappedRoad.difference(target.bubble)
             veh = new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior(), in spawn_region
         else:
             veh = new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior()
@@ -125,6 +125,7 @@ behavior PCLAAgent(agentType=globalParameters.pcla_agent, route=globalParameters
         end_point = Uniform(*simulation().spawn_points).location
         waypoints = location_to_waypoint(simulation().carla_client, start_pos, end_point)
         route = localPath('../helpers/routes/ego_route.xml')
+        os.makedirs(os.path.dirname(route), exist_ok=True)
         route_maker(waypoints, savePath=route)
 
     self.pcla = PCLA(agentType, self.carlaActor, route, simulation().carla_client)

@@ -32,7 +32,7 @@ scenario SpawnCar(veh_num):
     if veh_num < globalParameters.num_commuters:
         if not globalParameters.allow_bubble_spawns:
             target = simulation().objects[0]
-            spawn_region = workspace.network.drivableRegion.difference(target.bubble)
+            spawn_region = metsrMappedRoad.difference(target.bubble)
             new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior(), in spawn_region
         else:
             new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior()
