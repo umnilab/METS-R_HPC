@@ -373,8 +373,8 @@ CHARGING_UTILITY_BETA = -0.324f
 CHARGING_UTILITY_GAMMA = -2.16f
 
 ## For resolving gridlock
-###  unit: seconds, after this amount of time we force the vehicle to move to the next available link
-MAX_STUCK_TIME = 600
+### unit: seconds, after this amount of time we force the vehicle to move to the next available link
+MAX_ROAD_TRAVERSAL_PATIENCE = 600
 
 ## Debugging vehicles stuck at the end of a road during road-to-road transfer
 DEBUG_STUCK_VEHICLE = false

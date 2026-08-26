@@ -374,6 +374,7 @@ _PROPERTY_OPTION_ALIASES = {
         "intersection_swept_collision_check",
         "intersection_collision_avoidance",
     ),
+    "MAX_ROAD_TRAVERSAL_PATIENCE": ("max_stuck_time",),
 }
 
 # Keep generated runs compatible when the local data template predates a new
@@ -381,6 +382,9 @@ _PROPERTY_OPTION_ALIASES = {
 # defaults and are only appended when the key is absent from the template.
 _REQUIRED_SIM_PROPERTY_DEFAULTS = {
     "ENABLE_INTERSECTION_SWEPT_COLLISION_CHECK": False,
+    # Both names are harmless when unused and let custom/older templates run
+    # against either side of the METS-R property rename.
+    "MAX_ROAD_TRAVERSAL_PATIENCE": 600,
 }
 
 
