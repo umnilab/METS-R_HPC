@@ -6,10 +6,8 @@
 #-----------------------------#
 # Simulation setup 
 #-----------------------------#
-## The following two will completely change the data communication behavior of the simulation
-## Synchronized, the simulation will run tick by tick and communicate with an external server
-STANDALONE = true
-SYNCHRONIZED = false
+## Synchronized mode runs the simulation tick by tick and requires ENABLE_NETWORK = true
+SYNCHRONIZED = true
 
 ## V2X = true then the OBU and RSU will send message to the cloud service
 V2X = false
