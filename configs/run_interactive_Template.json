@@ -1,7 +1,7 @@
 {
       "name": "Template", 
       "java_path" : "/usr/lib/jvm/java-1.8.0-openjdk-amd64/bin/",
-      "java_options" : "-Xss256M -Xms1024M -Xmx4G",
+      "java_options" : "-Xss256M -Xms1024M -Xmx16G",
       "sim_dir" : "/home/METS-R_SIM/METS_R/",
       "repast_plugin_dir" : "/home/Eclipse/plugins/",
       "metsr_host": "localhost",
