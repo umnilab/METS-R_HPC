@@ -374,6 +374,7 @@ _PROPERTY_OPTION_ALIASES = {
         "intersection_swept_collision_check",
         "intersection_collision_avoidance",
     ),
+    "NO_LANECHANGING_LENGTH": ("no_lane_changing_length",),
     "MAX_ROAD_TRAVERSAL_PATIENCE": ("max_stuck_time",),
 }
 
@@ -382,6 +383,8 @@ _PROPERTY_OPTION_ALIASES = {
 # defaults and are only appended when the key is absent from the template.
 _REQUIRED_SIM_PROPERTY_DEFAULTS = {
     "ENABLE_INTERSECTION_SWEPT_COLLISION_CHECK": False,
+    "LANE_CHANGE_LATERAL_SPEED": 1.0,
+    "LANE_CHANGE_MIN_DURATION": 1.0,
     # Both names are harmless when unused and let custom/older templates run
     # against either side of the METS-R property rename.
     "MAX_ROAD_TRAVERSAL_PATIENCE": 600,
@@ -862,6 +865,7 @@ def _shell_args(value):
 
 DEFAULT_METSR_SIM_IMAGE = "ennuilei/mets-r_sim:latest"
 DEFAULT_METSR_SIM_APPCONTAINER_IMAGE = f"docker://{DEFAULT_METSR_SIM_IMAGE}"
+_METSR_CONTAINER_ID_FILENAME = "mets_r_container_id"
 
 _LAUNCH_TIMING_KEYS = (
     "preparation",
@@ -876,6 +880,62 @@ _LOG_PHASE_MARKERS = {
     "network_load": ("Building subcontexts", "VehicleContext creation"),
     "fleet_spawn": ("VehicleContext creation", "Total EV buses generated"),
 }
+
+
+def _write_metsr_container_id(sim_dir, container_id):
+    """Persist the scoped container ID for client-side startup diagnostics."""
+    log_dir = path.join(sim_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    with open(
+            path.join(log_dir, _METSR_CONTAINER_ID_FILENAME),
+            "w",
+            encoding="ascii") as container_file:
+        container_file.write(str(container_id).strip() + "\n")
+
+
+def _docker_console_tail_from_sim_folder(sim_folder, line_count=160):
+    """Return bounded Docker console output for a launcher-created run."""
+    if not sim_folder:
+        return ""
+    container_file = path.join(
+        os.fspath(sim_folder), "logs", _METSR_CONTAINER_ID_FILENAME
+    )
+    if not path.isfile(container_file):
+        return ""
+    try:
+        with open(container_file, "r", encoding="ascii") as source:
+            container_id = source.read().strip()
+    except OSError:
+        return ""
+    if not isinstance(container_id, str):
+        return ""
+    if re.fullmatch(r"[0-9a-fA-F]{12,64}", container_id) is None:
+        return ""
+
+    docker_executable = os.environ.get(
+        "METSR_DOCKER_EXECUTABLE", "docker"
+    )
+    try:
+        result = subprocess.run(
+            [
+                docker_executable,
+                "logs",
+                "--tail",
+                str(max(1, int(line_count))),
+                container_id,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return "\n".join(
+        part for part in (result.stdout, result.stderr) if part
+    )
 
 
 def _coerce_bool(value, default=False):
@@ -1306,10 +1366,11 @@ class SimulationLaunchHandle:
                     or self.cleanup_result.stdout
                     or str(self.cleanup_result.returncode)
                 ).strip()
-                raise RuntimeError(
-                    f"Failed to stop METS-R Docker container "
-                    f"{self.container_id}: {error}"
-                )
+                if "No such container" not in error:
+                    raise RuntimeError(
+                        f"Failed to stop METS-R Docker container "
+                        f"{self.container_id}: {error}"
+                    )
         elif self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:
@@ -1644,6 +1705,7 @@ def run_simulation_in_docker(options):
                 launched_at=launched_at,
             )
             handles.append(handle)
+            _write_metsr_container_id(sim_dir, container_id)
             if getattr(options, "verbose", False):
                 print("Container ID:", container_id)
     except Exception:

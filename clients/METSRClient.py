@@ -23,6 +23,7 @@ from utils.util import (
     _as_list,
     _broadcast,
     _configured_trajectory_roots,
+    _docker_console_tail_from_sim_folder,
     _is_sequence,
     _latest_trajectory_directory,
     _load_raw_config,
@@ -926,7 +927,7 @@ class METSRClient:
 
         # Ensure server is initialized by waiting to receive an initial packet
         # (could be the ready response or a step heartbeat)
-        self.receive_msg(ignore_heartbeats=False, return_ready=True)
+        self._await_simulator_ready()
         self.startup_timings["connection_seconds"] = (
             time.perf_counter() - connection_profile_start
         )
@@ -943,6 +944,38 @@ class METSRClient:
                 return value
         value = self._client_config_values.get(name)
         return default if value is None else value
+
+    def _await_simulator_ready(self):
+        """Wait for initialization while surfacing launcher and JVM failures."""
+        ready_timeout = float(
+            self._client_config_value("startup_ready_timeout", self.timeout)
+        )
+        ready_timeout = max(0.1, ready_timeout)
+        try:
+            response = self.receive_msg(
+                ignore_heartbeats=False,
+                waiting_forever=False,
+                return_ready=True,
+                print_timeout=False,
+                timeout=ready_timeout,
+            )
+            if response is None:
+                raise TimeoutError(
+                    f"METS-R SIM accepted the WebSocket connection at {self.uri} "
+                    f"but did not report ready within {ready_timeout:.1f} seconds"
+                )
+            if response.get("messageType") != "ready":
+                raise RuntimeError(
+                    "Expected METS-R SIM ready response, received "
+                    + str(response.get("messageType"))
+                )
+            return response
+        except Exception:
+            self.state = "failed"
+            if getattr(self, "ws", None) is not None:
+                self.ws.close()
+                self.ws = None
+            raise
 
     def _configured_sim_step_size(self):
         configured = self._client_config_value("sim_step_size", None)
@@ -1098,7 +1131,7 @@ class METSRClient:
                 time.sleep(sleep_seconds)
 
         print("Connection established!")
-        self.receive_msg(ignore_heartbeats=False, return_ready=True)
+        self._await_simulator_ready()
         self.startup_timings["connection_seconds"] = (
             time.perf_counter() - connection_profile_start
         )
@@ -1169,20 +1202,44 @@ class METSRClient:
                 log_file.seek(0, os.SEEK_END)
                 size = log_file.tell()
                 log_file.seek(max(0, size - 65536))
-                tail = log_file.read().decode("utf-8", errors="replace")
+                file_tail = log_file.read().decode("utf-8", errors="replace")
         except OSError:
-            return None
+            file_tail = ""
 
-        if "FATAL JVM ERROR" not in tail and "Unresolved compilation problem" not in tail:
+        console_tail = _docker_console_tail_from_sim_folder(self.sim_folder)
+        tail = file_tail
+        if console_tail:
+            tail = tail + "\n" + console_tail
+        fatal_markers = (
+            "FATAL JVM ERROR",
+            "Unresolved compilation problem",
+            'Exception in thread "main"',
+            "ExceptionInInitializerError",
+        )
+        if not any(marker in tail for marker in fatal_markers):
             return None
+        file_has_fatal = any(marker in file_tail for marker in fatal_markers)
+        console_has_fatal = any(
+            marker in console_tail for marker in fatal_markers
+        )
+        if console_has_fatal and not file_has_fatal:
+            fatal_source = (
+                f"Docker console for simulation folder {self.sim_folder}"
+            )
+        elif console_has_fatal:
+            fatal_source = (
+                f"{log_path} and the scoped Docker console"
+            )
+        else:
+            fatal_source = log_path
 
         lines = tail.splitlines()
         marker_index = 0
         for index, line in enumerate(lines):
-            if "FATAL JVM ERROR" in line or "Unresolved compilation problem" in line:
+            if any(marker in line for marker in fatal_markers):
                 marker_index = index
 
-        excerpt = "\n".join(lines[marker_index:marker_index + 8])
+        excerpt = "\n".join(lines[marker_index:marker_index + 14])
         guidance = ""
         if "maxWaitingTime cannot be resolved or is not a field" in tail:
             guidance = (
@@ -1190,8 +1247,18 @@ class METSRClient:
                 "Control API change. Add an Integer maxWaitingTime field to "
                 "MessageClass.ZoneIDOrigDestRouteNameNum and rebuild METS-R_SIM."
             )
+        elif (
+                "validateNetworkConfiguration() is undefined for the type "
+                "GlobalVariables" in tail):
+            guidance = (
+                "\n\nThe current upstream fbce204 Docker image contains "
+                "inconsistent compiled classes. Rebuild METS-R_SIM after "
+                "defining GlobalVariables.validateNetworkConfiguration(), or "
+                "use a corrected upstream image."
+            )
         self._cached_fatal_log_error = (
-            f"METS-R simulator reported a fatal JVM error in {log_path}:\n{excerpt}{guidance}"
+            f"METS-R simulator reported a fatal JVM error in {fatal_source}:\n"
+            f"{excerpt}{guidance}"
         )
         return self._cached_fatal_log_error
 
@@ -1813,6 +1880,38 @@ class METSRClient:
         assert res["messageType"] == "vehicle", res["messageType"]
         return res
 
+    def query_vehicle_route(self, id = None, private_veh = False):
+        """Query the currently assigned remaining route of one or more vehicles.
+
+        This reads the route already assigned by METS-R; it does not calculate
+        or change a route. Without ``id`` the server returns the public and
+        private vehicle ID indexes. With IDs, each record contains physical
+        ``roadIds``, ``connectorIds``, an interleaved ``segmentIds`` path,
+        connector-aware remaining distance, and mean/P90 travel-time metrics.
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Vehicle ID(s) to query, or ``None`` for the fleet ID indexes.
+        private_veh : bool | list[bool]
+            ``True`` for private vehicles (EV/GV), ``False`` for public
+            vehicles (taxi/bus). A scalar is broadcast across a batch.
+        """
+        msg = {"messageType": "vehicleRoute"}
+        if id is not None:
+            vehicle_ids = _as_list(id)
+            private_flags = _batch_field_values(
+                private_veh, len(vehicle_ids), "private_veh", batch_name="id"
+            )
+            msg["data"] = [
+                {"vehicleId": vehicle_id, "isPrivate": private_flag}
+                for vehicle_id, private_flag in zip(vehicle_ids, private_flags)
+            ]
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["messageType"] == "vehicleRoute", res["messageType"]
+        return res
+
     def query_on_road_vehicles(self, roadID=None):
         """Query IDs for vehicles on active physical or connector roads.
 
@@ -2002,6 +2101,15 @@ class METSRClient:
               'vehicleCount':     <int>   current number of vehicles on the road,
               'speedLimit':       <float> posted speed limit (m/s),
               'travelTime':       <float> recent mean travel time (s),
+              'travelTimeP90':    <float> estimated 90th-percentile travel time (s),
+              'travelTimeConfidence': <float> estimator confidence in [0, 1],
+              'travelTimeEffectiveSampleCount': <float> effective sample count,
+              'travelTimeSampleAgeSeconds': <float> age of the latest sample,
+              'travelTimeLiveVehicleCount': <int> live observations,
+              'travelTimeStoppedFraction': <float> stopped live-vehicle fraction,
+              'travelTimeLiveLowerBound': <float> live lower-bound time (s),
+              'travelTimeLiveMeanSpeed': <float> live mean speed (m/s),
+              'travelTimeEstimateSource': <str> estimator evidence source,
               'routingWeight':    <float> current routing-graph cost; this can
                                            differ from travelTime after
                                            :meth:`update_road_weights`,
@@ -2029,6 +2137,41 @@ class METSRClient:
                 my_msg['data'].append(i)
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["messageType"] == "road", res["messageType"]
+        return res
+
+    def query_connector_path(self, connectorID, connectorPathID = None):
+        """Query lane-to-lane paths for one or more intersection connectors.
+
+        Omitting ``connectorPathID`` returns every path on each connector.
+        Supplying a zero-based connector-local path ID returns the exact path,
+        including source/target lane indexes, via-lane IDs, internal edge IDs,
+        declared geometry, traffic-light metadata, and custom parameters.
+
+        Parameters
+        ----------
+        connectorID : str | list[str]
+            Connector ID(s), normally ``<sourceRoadID>_<targetRoadID>``.
+        connectorPathID : int | None | list[int | None]
+            Optional connector-local path ID. A scalar is broadcast across a
+            connector batch.
+        """
+        connector_ids = _as_list(connectorID)
+        path_ids = _batch_field_values(
+            connectorPathID,
+            len(connector_ids),
+            "connectorPathID",
+            batch_name="connectorID",
+        )
+        data = []
+        for connector_id, path_id in zip(connector_ids, path_ids):
+            record = {"connectorId": connector_id}
+            if path_id is not None:
+                record["connectorPathId"] = path_id
+            data.append(record)
+
+        msg = {"messageType": "connectorPath", "data": data}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["messageType"] == "connectorPath", res["messageType"]
         return res
 
     def query_entering_vehicle_queue(self, roadID = None):
@@ -2445,7 +2588,12 @@ class METSRClient:
               'distance': <meters>,
               'roadTravelTime': <seconds>,
               'connectorTravelTime': <seconds>,
-              'travelTime': <seconds>
+              'travelTime': <seconds>,
+              'travelTimeP90': <seconds>,
+              'travelTimeConfidence': <0-to-1>,
+              'minimumSegmentTravelTimeConfidence': <0-to-1>,
+              'liveEvidenceSegmentCount': <int>,
+              'priorOnlySegmentCount': <int>
             }
         The server returns ``'error'`` if no path was found.
 
@@ -2502,7 +2650,12 @@ class METSRClient:
               'distances': [<meters>, ...],
               'roadTravelTimes': [<seconds>, ...],
               'connectorTravelTimes': [<seconds>, ...],
-              'travelTimes': [<seconds>, ...]
+              'travelTimes': [<seconds>, ...],
+              'travelTimeP90s': [<seconds>, ...],
+              'travelTimeConfidences': [<0-to-1>, ...],
+              'minimumSegmentTravelTimeConfidences': [<0-to-1>, ...],
+              'liveEvidenceSegmentCounts': [<int>, ...],
+              'priorOnlySegmentCounts': [<int>, ...]
             }
 
         or ``'error'`` if no path was found.
@@ -2557,7 +2710,12 @@ class METSRClient:
               'connectorIds': [<source>_<target>, ...],
               'segmentIds': [<road_or_connector>, ...],
               'distance': <meters>,
-              'travelTime': <seconds>
+              'travelTime': <seconds>,
+              'travelTimeP90': <seconds>,
+              'travelTimeConfidence': <0-to-1>,
+              'minimumSegmentTravelTimeConfidence': <0-to-1>,
+              'liveEvidenceSegmentCount': <int>,
+              'priorOnlySegmentCount': <int>
             }
 
         Separate physical-road and connector distance/travel-time fields are
@@ -2599,7 +2757,12 @@ class METSRClient:
              'connectorIdLists': [[<connector_id>, ...], ...],
              'segmentIdLists': [[<road_or_connector>, ...], ...],
              'distances': [<meters>, ...],
-             'travelTimes': [<seconds>, ...]}
+             'travelTimes': [<seconds>, ...],
+             'travelTimeP90s': [<seconds>, ...],
+             'travelTimeConfidences': [<0-to-1>, ...],
+             'minimumSegmentTravelTimeConfidences': [<0-to-1>, ...],
+             'liveEvidenceSegmentCounts': [<int>, ...],
+             'priorOnlySegmentCounts': [<int>, ...]}
 
         or ``'error'`` if no path was found.
 
@@ -2653,6 +2816,15 @@ class METSRClient:
                                          by the router (typically travel time,
                                          may be overridden via
                                          :meth:`update_road_weights`),
+              'travelTimeP90':   <float> estimated 90th-percentile time (s),
+              'travelTimeConfidence': <float> estimator confidence in [0, 1],
+              'travelTimeEffectiveSampleCount': <float> effective samples,
+              'travelTimeSampleAgeSeconds': <float> latest-sample age (s),
+              'travelTimeLiveVehicleCount': <int> live observations,
+              'travelTimeStoppedFraction': <float> stopped observation fraction,
+              'travelTimeLiveLowerBound': <float> live lower-bound time (s),
+              'travelTimeLiveMeanSpeed': <float> live mean speed (m/s),
+              'travelTimeEstimateSource': <str> estimator evidence source,
               'segmentType':     'road'
             }
 
@@ -2764,6 +2936,14 @@ class METSRClient:
         return number
 
     @classmethod
+    def _routing_int(cls, record, *names, default=0):
+        value = cls._routing_first(record, *names, default=default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    @classmethod
     def _routing_road_id_from(cls, record):
         road_id = record.get("segmentId")
         return None if road_id is None else str(road_id)
@@ -2816,6 +2996,58 @@ class METSRClient:
             "weight": weight,
             "speed_limit": speed_limit,
         }
+        estimator_float_fields = (
+            ("travelTimeP90", "travel_time_p90", travel_time),
+            ("travelTimeConfidence", "travel_time_confidence", 0.0),
+            (
+                "travelTimeEffectiveSampleCount",
+                "travel_time_effective_sample_count",
+                0.0,
+            ),
+            (
+                "travelTimeSampleAgeSeconds",
+                "travel_time_sample_age_seconds",
+                -1.0,
+            ),
+            (
+                "travelTimeStoppedFraction",
+                "travel_time_stopped_fraction",
+                0.0,
+            ),
+            (
+                "travelTimeLiveLowerBound",
+                "travel_time_live_lower_bound",
+                0.0,
+            ),
+            (
+                "travelTimeLiveMeanSpeed",
+                "travel_time_live_mean_speed",
+                0.0,
+            ),
+        )
+        for response_key, attr_key, default in estimator_float_fields:
+            if response_key in record:
+                attrs[attr_key] = cls._routing_float(
+                    record, response_key, default=default
+                )
+            elif attr_key in previous:
+                attrs[attr_key] = previous[attr_key]
+        if "travelTimeLiveVehicleCount" in record:
+            attrs["travel_time_live_vehicle_count"] = cls._routing_int(
+                record, "travelTimeLiveVehicleCount", default=0
+            )
+        elif "travel_time_live_vehicle_count" in previous:
+            attrs["travel_time_live_vehicle_count"] = previous[
+                "travel_time_live_vehicle_count"
+            ]
+        if record.get("travelTimeEstimateSource") is not None:
+            attrs["travel_time_estimate_source"] = str(
+                record["travelTimeEstimateSource"]
+            )
+        elif "travel_time_estimate_source" in previous:
+            attrs["travel_time_estimate_source"] = previous[
+                "travel_time_estimate_source"
+            ]
         for name in (
                 "segmentId", "segmentType", "visualizationIndex",
                 "vehicleCount", "speed", "flow", "parkingCapacity",
@@ -2838,6 +3070,15 @@ class METSRClient:
             "length",
             "weight",
             "speed_limit",
+            "travel_time_p90",
+            "travel_time_confidence",
+            "travel_time_effective_sample_count",
+            "travel_time_sample_age_seconds",
+            "travel_time_live_vehicle_count",
+            "travel_time_stopped_fraction",
+            "travel_time_live_lower_bound",
+            "travel_time_live_mean_speed",
+            "travel_time_estimate_source",
             "r_type",
         )
         return {key: node_attrs[key] for key in keys if key in node_attrs}
@@ -3548,7 +3789,12 @@ class METSRClient:
         ``topology_only=True`` omits all live metrics and caches only road IDs,
         downstream connections, lengths, and optional centers. Cache keys are
         the network-file SHA-256, client schema version, and simulator
-        topology version.
+        topology version. Full graphs expose the latest estimator fields as
+        travel_time_p90, travel_time_confidence,
+        travel_time_effective_sample_count, travel_time_sample_age_seconds,
+        travel_time_live_vehicle_count, travel_time_stopped_fraction,
+        travel_time_live_lower_bound, travel_time_live_mean_speed, and
+        travel_time_estimate_source on nodes and source-road edges.
         """
         batch_size, _, _ = self._routing_batch_settings(batch_size)
         if topology_only and self._supports_feature("routingTopology"):
