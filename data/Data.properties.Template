@@ -75,10 +75,7 @@ BT_START_HOUR = 0
 ## Travel demand
 ### 1. Ride-hailing (EV taxis) demand
 RH_DEMAND_FILE = data/Empty/demand/request/blank.json
-## The latest SIM validates one waiting threshold per demand interval even when
-## the demand object is empty. This upstream 30-period series matches the
-## default 1,800-minute horizon and is ignored while RH_DEMAND_FILE is blank.
-RH_WAITING_TIME = data/NYC/demand/wait/scenario2/demand_2019-04-25.csv
+RH_WAITING_TIME = data/Empty/demand/wait/empty.csv
 RH_SHARE_PERCENTAGE = data/Empty/demand/share/blank.json
 RH_DEMAND_SHARABLE = false
 RH_DEMAND_FACTOR = 1
