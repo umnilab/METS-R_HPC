@@ -1615,6 +1615,8 @@ class METSRClient:
         ``wait_forever`` keeps tolerating slow steps, but it should not hide a
         dead server or a permanently stalled tick. Progress is therefore based
         on the server tick actually increasing, not just on receiving a reply.
+        Once the tick advances beyond the tick attached to a STEP request, that
+        request is considered active and is never resent.
         """
         assert self.current_tick is not None, "self.current_tick is None. Maybe there is another METS-R SIM instance unclosed."
 
@@ -1630,6 +1632,7 @@ class METSRClient:
             overall_start = time.time()
             last_progress_time = overall_start
             last_send_time = overall_start
+            step_request_tick = None
 
             if retry_interval is None:
                 retry_interval = min(float(self.timeout), 30.0)
@@ -1641,13 +1644,20 @@ class METSRClient:
                 max_stalled_seconds = max(60.0, min(float(self.timeout), 300.0))
 
             def send_step_request():
-                nonlocal last_send_time
+                nonlocal last_send_time, step_request_tick
                 remaining_steps = target_tick - int(self.current_tick)
                 if remaining_steps <= 0:
                     return
                 msg = {"messageType": "step", "tick": int(self.current_tick), "tickCount": remaining_steps}
                 self.send_msg(msg)
+                step_request_tick = int(self.current_tick)
                 last_send_time = time.time()
+
+            def step_request_is_active():
+                return (
+                    step_request_tick is not None
+                    and int(self.current_tick) > step_request_tick
+                )
 
             server_tick_started = time.perf_counter()
             send_step_request()
@@ -1698,17 +1708,20 @@ class METSRClient:
                     if int(self.current_tick) >= target_tick:
                         break
 
+                    # A successful tick query may overtake the heartbeat that
+                    # timed out. Progress past the request tick proves that the
+                    # existing STEP was accepted and is still running toward
+                    # target_tick, so resending here would be a stale duplicate.
+                    if step_request_is_active():
+                        continue
+
                     if not wait_forever:
                         raise TimeoutError(
                             f"Timed out waiting for METS-R SIM to reach tick {target_tick}; "
                             f"last received tick was {self.current_tick}"
                         )
 
-                    should_retry_step = (
-                        retry_interval is None
-                        or int(self.current_tick) > tick_before_query
-                        or now - max(last_send_time, last_progress_time) >= retry_interval
-                    )
+                    should_retry_step = now - last_send_time >= retry_interval
                     if should_retry_step:
                         if self.verbose:
                             print(
@@ -1732,6 +1745,13 @@ class METSRClient:
                         last_progress_time = now
                     if int(self.current_tick) >= target_tick:
                         break
+                    if (
+                            res.get('errorCode') == 'TICK_MISMATCH'
+                            and step_request_is_active()):
+                        # A stale duplicate may already be queued from an older
+                        # client retry. The original STEP is still active; wait
+                        # for it instead of creating another duplicate.
+                        continue
                     if not wait_forever:
                         raise RuntimeError(
                             f"METS-R SIM rejected STEP request for tick {target_tick}; "
