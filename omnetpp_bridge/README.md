@@ -126,7 +126,14 @@ event-scheduled model:
 
 ```bash
 bash ./build.sh
-opp_run -u Cmdenv -n . -l ./metsr_veins_bridge -c AbstractOmnetpp omnetpp.ini
+bash ./run_abstract.sh
+```
+
+For a manual launch, use the isolated generated NED root rather than `-n .`:
+
+```bash
+opp_run -u Cmdenv -n .generated/abstract-ned \
+  -l ./metsr_veins_bridge -c AbstractOmnetpp omnetpp.ini
 ```
 
 To run the real Veins 802.11p PHY/MAC backend:
@@ -136,8 +143,11 @@ bash ./build_veins.sh
 bash ./run_veins_80211p.sh
 ```
 
-The generic build excludes `src/veins`. The Veins build generates
-`MetsrBsmMessage`, enables `METSR_WITH_VEINS`, and links the Veins library.
+The generic build excludes `src/veins`. Veins-dependent NED definitions are
+kept as `.ned.template` files under `veins/`; the abstract runner loads only
+`.generated/abstract-ned`. The Veins build materializes its definitions under
+`.generated/veins-ned`, generates `MetsrBsmMessage`, enables
+`METSR_WITH_VEINS`, and links the Veins library.
 
 To build and run the separate Simu5G Uu backend:
 
@@ -184,17 +194,19 @@ The build emits `libmetsr_veins_bridge*.so` in `omnetpp_bridge`; `out/`
 contains object files. When invoking `opp_run -l` manually, pass the library
 stem (for example `./metsr_veins_bridge`), without `lib` or `.so`.
 
-If OMNeT++ reports that a declared NED package does not match the expected
-package, make sure you are running from `omnetpp_bridge` with `-n .`.
-The bridge NED files are intentionally package-less because they live directly
-in that directory.
+For `AbstractOmnetpp`, use `run_abstract.sh` or pass
+`-n .generated/abstract-ned` manually. OMNeT++ recursively scans every NED
+source folder, so `-n .` is intentionally avoided: it could also discover
+artifacts generated for a different backend. The root bridge NED files are
+package-less source inputs. Optional Veins NEDs are loaded only by
+`run_veins_80211p.sh`, and Simu5G NEDs only by their corresponding run scripts.
 
 If OMNeT++ reports that `simtime_t` cannot represent the configured time, the
 simulation limit is too large for the active time resolution. The included
 `omnetpp.ini` uses a 7-day limit, which is within the default OMNeT++ range.
 Idle socket polling stays at a fixed OMNeT++ timestamp; only an active
 `sync_tick` advances model time. After changing bridge C++ code, rerun
-`bash ./build.sh` for `AbstractOmnetpp` or
+`bash ./build.sh` for `AbstractOmnetpp` (then `bash ./run_abstract.sh`) or
 `bash ./build_veins.sh` for `Veins80211p` before starting `opp_run`.
 
 Cmdenv status lines such as `** Event #...`, `Speed:`, and `Messages:` are

@@ -12,6 +12,19 @@ test -f "$VEINS_HOME/src/veins/veins.h" || {
     exit 1
 }
 
+GENERATED_NED_ROOT="${VEINS_GENERATED_NED_ROOT:-.generated/veins-ned}"
+mkdir -p "$GENERATED_NED_ROOT"
+cp MetsrVeinsBridge.ned "$GENERATED_NED_ROOT/MetsrVeinsBridge.ned"
+for ned_name in \
+    MetsrVeins80211pNetwork \
+    MetsrVeinsApp \
+    MetsrVeinsExternalMobility \
+    MetsrVeinsVehicle; do
+    cp "veins/$ned_name.ned.template" "$GENERATED_NED_ROOT/$ned_name.ned"
+done
+
+echo "Generated Veins-only NED files under $GENERATED_NED_ROOT"
+
 had_makefile=0
 makefile_backup=""
 if [ -f Makefile ]; then
