@@ -47,15 +47,90 @@ Additional notebooks:
 - [`tutorials/advanced_commands.ipynb`](tutorials/advanced_commands.ipynb): command patterns and longer workflows.
 - [`tutorials/security_examples.ipynb`](tutorials/security_examples.ipynb): security and attack-scenario examples.
 
+### Security research replication demos
+
+The dependency-free, simulator-safe five-demo suite is documented in [`tutorials/security_demos/`](tutorials/security_demos/). For example:
+
+```bash
+python tutorials/security_demos/demo_01_location_spoofing.py
+```
+
 Runnable tutorial scripts:
 
 ```bash
 # CARLA/METS-R co-simulation example
 python tutorials/cosim_example.py -r configs/run_cosim_CARLAT5.json -v
 
-# Veins latency stress example; start the OMNeT++/Veins bridge first
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json
+# Town05 BSM example; start one OMNeT++ radio backend first
+python tutorials/v2x_veins_example.py -r configs/run_v2x_veins_Template.json
 ```
+
+### PCLA dashboard debugging
+
+Run the PCLA dashboard demos from the PCLA Conda environment and point
+`PCLA_HOME` at the PCLA checkout (the directory containing `PCLA.py`):
+
+```bash
+conda activate PCLA
+export PCLA_HOME=/path/to/PCLA
+python -c 'import sys, PCLA; print(sys.executable); print(PCLA.__file__)'
+```
+
+If Scenic reports `ModuleNotFoundError: No module named 'PCLA'`, the active
+Python process cannot see the PCLA checkout. Check `which python`, verify that
+`$PCLA_HOME/PCLA.py` exists, and set `PCLA_HOME` in the same shell used to
+launch the demo.
+
+The default PCLA scenario generates an ego route under
+`scenic_exp/helpers/routes`. Create that output directory if route generation
+fails with `No such file or directory: .../ego_route.xml`:
+
+```bash
+mkdir -p scenic_exp/helpers/routes
+```
+
+SimLingo weights are not stored in the PCLA Git checkout. Current PCLA
+versions download just that agent with:
+
+```bash
+cd /path/to/PCLA
+python pcla_functions/download_weights.py --agents simlingo
+```
+
+If the downloader instead requests `pretrained.zip` and receives HTTP 404, it
+is the retired single-archive downloader. Check for local PCLA changes before
+updating it, then use the current resumable per-agent downloader:
+
+```bash
+cd /path/to/PCLA
+git status --short
+git pull --ff-only origin main
+python -c 'import huggingface_hub; print(huggingface_hub.__version__)'
+python pcla_functions/download_weights.py --agents simlingo
+```
+
+Install `huggingface_hub` into the active PCLA environment if the import check
+fails. After downloading, verify
+`pcla_agents/simlingo_pretrained/.hydra/config.yaml` and
+`pcla_agents/simlingo_pretrained/checkpoints/epoch=013.ckpt/pytorch_model.pt`.
+
+PCLA pins `antlr4-python3-runtime==4.9.3` for its OmegaConf configuration
+parser. The error `Could not deserialize ATN with version 3 (expected 4)` means
+that the active environment contains an incompatible ANTLR runtime. Inspect
+and repair the package using the same Python executable that launches the
+demo:
+
+```bash
+python -m pip show antlr4-python3-runtime omegaconf
+python -m pip install --no-cache-dir --force-reinstall antlr4-python3-runtime==4.9.3
+python -m pip show antlr4-python3-runtime omegaconf
+```
+
+The final command should report ANTLR `4.9.3` and OmegaConf `2.3.0`. A CARLA
+warning that a sensor object went out of scope after one of these failures is
+secondary cleanup noise: the exception interrupted the simulation after its
+sensors were spawned. Fix the preceding exception and reload or restart the
+CARLA world to remove any leftover sensor actor.
 
 ## New: CARLA Visualization Integration
 
@@ -78,34 +153,46 @@ python tutorials/cosim_example.py -r configs/run_cosim_CARLAT1.json -v
 
 CARLA settings such as `carla_dir`, `carla_host`, `carla_port`, and `carla_map` are defined in the selected run config under [`configs/`](configs/).
 
-## Experimental: OMNeT++/VEINS V2X Client
+## Packet-level V2X Backends
 
-The Python clients include an experimental bridge client for packet-level V2X
-experiments. A real OMNeT++/VEINS bridge must already be listening on the
-configured host/port. The remaining tutorial sends a synthetic noise-message
-load toward one target vehicle and reports the latency values returned by the
-Veins bridge.
+`omnetpp_bridge/` now contains separate implementations rather than one
+OMNeT++ profile presented as several radios:
 
-Build and start the included OMNeT++ bridge from WSL:
+- `Veins80211p` dynamically creates real Veins 5.3.1
+  `Nic80211p`/`Mac1609_4`/`PhyLayer80211p` vehicles driven by METS-R mobility.
+- `Sim5gCv2xPc5` uses Simu5G 1.4.4's runnable LTE D2D multicast stack for a
+  direct, eNodeB-scheduled transmission and reports each UE receive event.
+- `Sim5gCellularUu` remains the infrastructure-mediated NR Uu path.
+- `AbstractOmnetpp` remains available for fast analytical regressions.
 
-```bash
-export OMNETPP_HOME=~/src/omnetpp-6.1
-source "$OMNETPP_HOME/setenv"
-
-cd ~/src/METS-R_HPC/veins_bridge/omnetpp
-bash ./build.sh
-opp_run -u Cmdenv -n . -l ./out/gcc-release/src/libmetsr_veins_bridge omnetpp.ini
-```
-
-Then run the Python latency example from this repository:
+Build and start exactly one radio backend from WSL:
 
 ```bash
-python tutorials/v2x_veins_cosim_example.py -r configs/run_v2x_veins_Template.json \
-  --noise_senders 60 --messages_per_sender 10 --ticks 100 --csv output/veins_latency.csv
+cd ~/src/METS-R_HPC/omnetpp_bridge
+
+# Real Veins 802.11p
+bash ./build_veins.sh
+bash ./run_veins_80211p.sh
+
+# Or network-controlled Simu5G LTE D2D/PC5
+bash ./build_sim5g.sh
+bash ./run_sim5g_pc5.sh
 ```
 
-Veins installation and protocol notes have moved to the online
-[METS-R documentation](https://umnilab.github.io/METS-R_doc).
+Then run the broadcast BSM example:
+
+```bash
+python tutorials/v2x_veins_example.py \
+  -r configs/run_v2x_veins_Template.json \
+  --vehicle_source town05_seed --ticks 5
+```
+
+The default payload mode remains explicitly labelled `SAE J2735-aligned`.
+For real ASN.1/UPER bytes, install `requirements-j2735.txt`, supply your
+revision-matched SAE ASN.1 modules, and select strict
+`veins_j2735_codec=uper`. See [J2735 UPER setup](docs/j2735_uper.md) and the
+[radio backend guide](omnetpp_bridge/README.md) for requirements, commands, and
+the exact fidelity boundaries.
 
 ## License
 

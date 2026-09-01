@@ -1,0 +1,70 @@
+[General]
+network = Sim5gCv2xPc5BridgeNetwork
+sim-time-limit = 7d
+cmdenv-express-mode = true
+cmdenv-autoflush = true
+cmdenv-status-frequency = 30s
+abstract = true
+print-undisposed = false
+
+**.routingRecorder.enabled = false
+*.configurator.config = xmldoc("sim5g/pc5.xml")
+
+# Stable METS-R/Python socket contract, distinct Simu5G PC5 implementation.
+*.bridge.bridgeHost = "0.0.0.0"
+*.bridge.bridgePort = 9099
+*.bridge.bridgeBackend = "cv2x_pc5_sidelink"
+*.bridge.backendImplementation = "simu5g_lte_d2d_pc5"
+*.bridge.networkModel = "simu5g_lte_d2d_network_scheduled"
+*.bridge.radioAccess = "cv2x_pc5_lte_network_scheduled"
+*.bridge.backendNote = "Runnable Simu5G 1.4.4 LTE D2D multicast with eNB-controlled resources; not a standards-complete C-V2X Mode 3 stack and not autonomous Mode 4/NR Mode 2."
+*.bridge.simu5gVehicleModuleName = "car"
+*.bridge.simu5gMobilityModuleName = "mobility"
+*.bridge.simu5gBsmAppIndex = 0
+*.bridge.simu5gLocalPort = 4400
+*.bridge.simu5gDestPort = 4400
+*.bridge.simu5gReceiveTimeoutMs = 1000
+
+# METS-R/CARLA-controlled vehicle UEs and the bridge-facing PC5 app.
+*.numVehicles = 64
+*.car[*].numApps = 1
+*.car[*].app[0].typename = "metsr.veinsbridge.sim5g.MetsrBsmPc5App"
+*.car[*].app[0].localPort = 4400
+*.car[*].app[0].destPort = 4400
+*.car[*].app[0].multicastAddress = "224.0.0.10"
+*.car[*].app[0].bridgeModule = "^.^.bridge"
+*.car[*].app[0].requireD2dInitialMode = true
+*.car[*].mobility.typename = "metsr.veinsbridge.sim5g.MetsrExternalMobility"
+*.car[*].mobility.constraintAreaMinX = -10000m
+*.car[*].mobility.constraintAreaMinY = -10000m
+*.car[*].mobility.constraintAreaMinZ = -100m
+*.car[*].mobility.constraintAreaMaxX = 10000m
+*.car[*].mobility.constraintAreaMaxY = 10000m
+*.car[*].mobility.constraintAreaMaxZ = 200m
+*.car[*].mobility.initFromDisplayString = false
+
+# Simu5G's supported LTE D2D multicast pipeline. Explicit D2D NICs avoid the
+# duplicate LTE/NR bearer registration bug in v1.4.4 NrUe multicast.
+*.enb.cellularNic.typename = "LteNicEnbD2D"
+*.car[*].cellularNic.typename = "LteNicUeD2D"
+*.car[*].cellularNic.d2dInitialMode = true
+**.amcMode = "D2D"
+**.enableD2DCqiReporting = false
+**.usePreconfiguredTxParams = true
+**.d2dCqi = 7
+
+# LTE radio parameters. Multicast uses fixed CQI because Simu5G's
+# one-to-many D2D implementation has no per-receiver CQI/HARQ feedback.
+**.numBands = 50
+**.ueTxPower = 26dBm
+**.eNodeBTxPower = 40dBm
+**.targetBler = 0.01
+**.blerShift = 5
+*.enb.mobility.initFromDisplayString = false
+*.enb.mobility.initialX = 450m
+*.enb.mobility.initialY = 300m
+*.car[*].servingNodeId = 1
+
+# This is Simu5G's network-controlled LTE D2D abstraction. It is analogous to
+# Mode 3 resource control but does not implement the complete C-V2X PC5 PHY/MAC.
+# Simu5G v1.4.4 also lacks autonomous Mode 4 and NR Mode 2 sensing/SPS.

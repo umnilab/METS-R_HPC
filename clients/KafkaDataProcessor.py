@@ -177,6 +177,8 @@ def _latitude_to_e7(value):
     number = _to_float(value)
     if number is None:
         return BSM_LATITUDE_UNAVAILABLE
+    if int(round(number)) == BSM_LATITUDE_UNAVAILABLE:
+        return BSM_LATITUDE_UNAVAILABLE
     if -90.0 <= number <= 90.0:
         number *= 10_000_000
     return max(-900000000, min(900000000, int(round(number))))
@@ -185,6 +187,8 @@ def _latitude_to_e7(value):
 def _longitude_to_e7(value):
     number = _to_float(value)
     if number is None:
+        return BSM_LONGITUDE_UNAVAILABLE
+    if int(round(number)) == BSM_LONGITUDE_UNAVAILABLE:
         return BSM_LONGITUDE_UNAVAILABLE
     if -180.0 <= number <= 180.0:
         number *= 10_000_000
@@ -545,6 +549,17 @@ def _build_bsm_core_data(record):
         "brakes": _bsm_brakes(record, core_data),
         "size": _bsm_size(record, core_data),
     }
+
+
+def build_bsm_core_data(record):
+    """Return a canonical SAE J2735 ``BSMCoreData`` semantic value.
+
+    Integer units and unavailable sentinels follow J2735. An ASN.1 codec is
+    still required before this becomes a standards-conformant wire payload.
+    """
+    if not isinstance(record, Mapping):
+        raise TypeError("A BSM record must be a mapping.")
+    return _build_bsm_core_data(record)
 
 
 def _sensor_type_name(sensor_type):

@@ -1,0 +1,8 @@
+<config>
+    <!-- Simu5G 1.4.4's Ip2Nic registers these cellular-interface groups in
+         the Binder during transport-layer initialization. This mirrors the
+         shipped lte/d2d_multicast example. -->
+    <multicast-group hosts="car[*]" interfaces="cellular" address="224.0.0.10"/>
+    <interface among='eNB* eNodeB* enb* *Enb* gNB* gNodeB* gnb* *Gnb* upf* *Upf* mecHost* pgw*' address='10.x.x.x' netmask='255.255.255.0'/>
+    <interface hosts='*' address='192.168.x.x' netmask='255.255.255.0'/>
+</config>

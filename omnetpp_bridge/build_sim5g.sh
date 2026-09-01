@@ -8,19 +8,27 @@ bash ./check_sim5g_env.sh
 : "${INET_LIB_NAME:=INET}"
 : "${SIMU5G_LIB_NAME:=simu5g}"
 
-GENERATED_NED_ROOT="${GENERATED_NED_ROOT:-../.generated/sim5g-ned}"
+GENERATED_NED_ROOT="${GENERATED_NED_ROOT:-.generated/sim5g-ned}"
 mkdir -p "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g"
 mkdir -p "$GENERATED_NED_ROOT/sim5g"
+cp MetsrVeinsBridge.ned "$GENERATED_NED_ROOT/MetsrVeinsBridge.ned"
 
 sed 's/\.template$//' sim5g/Sim5gCellularUuBridgeNetwork.ned.template > \
     "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned"
 sed 's/\.template$//' sim5g/MetsrBsmUuApp.ned.template > \
     "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmUuApp.ned"
+sed 's/\.template$//' sim5g/MetsrBsmPc5App.ned.template > \
+    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmPc5App.ned"
 sed 's/\.template$//' sim5g/MetsrExternalMobility.ned.template > \
     "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrExternalMobility.ned"
 sed 's/\.template$//' sim5g/omnetpp-sim5g-uu.ini.template > \
     "$GENERATED_NED_ROOT/omnetpp-sim5g-uu.ini"
+sed 's/\.template$//' sim5g/Sim5gCv2xPc5BridgeNetwork.ned.template > \
+    "$GENERATED_NED_ROOT/Sim5gCv2xPc5BridgeNetwork.ned"
+sed 's/\.template$//' sim5g/omnetpp-sim5g-pc5.ini.template > \
+    "$GENERATED_NED_ROOT/omnetpp-sim5g-pc5.ini"
 cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
+cp sim5g/pc5.xml "$GENERATED_NED_ROOT/sim5g/pc5.xml"
 
 echo "Generated Simu5G NED/INI/XML files under $GENERATED_NED_ROOT"
 
@@ -34,6 +42,7 @@ fi
 opp_makemake \
     -f \
     --deep \
+    -Xsrc/veins \
     --make-so \
     -O out \
     -o metsr_veins_bridge_simu5g \
@@ -59,5 +68,7 @@ fi
 
 echo
 echo "Simu5G bridge build complete."
-echo "Run it with:"
+echo "Run the legacy Uu backend with:"
 echo "  bash ./run_sim5g_uu.sh"
+echo "Run the network-controlled PC5/D2D backend with:"
+echo "  bash ./run_sim5g_pc5.sh"

@@ -4,8 +4,8 @@ This example assumes METS-R and the OMNeT++ bridge are already listening on the
 configured host/ports. It does not start METS-R, SUMO, a Python sidecar, or a
 local range fallback. By default, the script uses METSRClient to query at least
 four active METS-R vehicles, treats their coordinates as CARLA Town 05 vehicle
-states, sends Basic Safety Messages between each pair, and prints a table of
-communication records returned by the bridge.
+states, sends one broadcast Basic Safety Message per vehicle, and prints a
+per-receiver table of communication records returned by the bridge.
 """
 
 import argparse
@@ -454,36 +454,36 @@ def make_town05_bsm_messages(args, vehicles, tick):
     sequence = 0
     for sender in vehicles:
         sender_id = sender["ID"]
-        for receiver in vehicles:
-            receiver_id = receiver["ID"]
-            if sender_id == receiver_id:
-                continue
-            sequence += 1
-            messages.append(
-                {
-                    "message_id": f"town05:{tick}:{sender_id}>{receiver_id}:{sequence}",
-                    "tick": tick,
-                    "vehicle_id": sender_id,
-                    "sender_id": sender_id,
-                    "receiver_id": receiver_id,
-                    "target_vehicle_id": receiver_id,
-                    "message_name": "BasicSafetyMessage",
-                    "message_standard": "SAE J2735-aligned",
-                    "message_count": (tick * 16 + sequence) % 128,
-                    "payload_bytes": args.payload_bytes,
-                    "tx_time_s": tick * args.duration_s,
-                    "radio_mode": args.radio_mode,
-                    "content": bsm_content(sender, tick),
-                    "map_name": "Town05",
-                    "sender_role": sender.get("role"),
-                    "receiver_role": receiver.get("role"),
-                    "x": sender["x"],
-                    "y": sender["y"],
-                    "z": sender.get("z", 0.0),
-                    "speed_mps": sender.get("speed", 0.0),
-                    "heading_deg": sender.get("bearing", 0.0),
-                }
-            )
+        expected_receivers = [
+            vehicle["ID"] for vehicle in vehicles if vehicle.get("ID") != sender_id
+        ]
+        if not expected_receivers:
+            continue
+        sequence += 1
+        messages.append(
+            {
+                "message_id": f"town05:{tick}:{sender_id}:broadcast:{sequence}",
+                "tick": tick,
+                "vehicle_id": sender_id,
+                "sender_id": sender_id,
+                "receiver_id": -1,
+                "expected_receiver_ids": expected_receivers,
+                "message_name": "BasicSafetyMessage",
+                "message_standard": "SAE J2735-aligned",
+                "message_count": (tick * 16 + sequence) % 128,
+                "payload_bytes": args.payload_bytes,
+                "tx_time_s": tick * args.duration_s,
+                "radio_mode": args.radio_mode,
+                "content": bsm_content(sender, tick),
+                "map_name": "Town05",
+                "sender_role": sender.get("role"),
+                "x": sender["x"],
+                "y": sender["y"],
+                "z": sender.get("z", 0.0),
+                "speed_mps": sender.get("speed", 0.0),
+                "heading_deg": sender.get("bearing", 0.0),
+            }
+        )
     return messages
 
 
@@ -634,29 +634,26 @@ def apply_bsm_attack(args, vehicles, messages, tick):
             }
         )
         updated_vehicles.append(ghost)
-        sequence = 0
-        for receiver in vehicles:
-            receiver_id = receiver.get("ID")
-            if receiver_id is None:
-                continue
-            sequence += 1
+        expected_receivers = [
+            vehicle.get("ID") for vehicle in vehicles if vehicle.get("ID") is not None
+        ]
+        if expected_receivers:
             message = {
-                "message_id": f"ghost:{tick}:{ghost['ID']}>{receiver_id}:{sequence}",
+                "message_id": f"ghost:{tick}:{ghost['ID']}:broadcast",
                 "tick": tick,
                 "vehicle_id": ghost["ID"],
                 "sender_id": ghost["ID"],
-                "receiver_id": receiver_id,
-                "target_vehicle_id": receiver_id,
+                "receiver_id": -1,
+                "expected_receiver_ids": expected_receivers,
                 "message_name": "BasicSafetyMessage",
                 "message_standard": "SAE J2735-aligned",
-                "message_count": (tick * 32 + sequence) % 128,
+                "message_count": tick * 32 % 128,
                 "payload_bytes": args.payload_bytes,
                 "tx_time_s": tick * args.duration_s,
                 "radio_mode": args.radio_mode,
                 "content": bsm_content(ghost, tick),
                 "map_name": ghost.get("map_name", "Town05"),
                 "sender_role": "ghost_attacker",
-                "receiver_role": receiver.get("role"),
                 "x": ghost["x"],
                 "y": ghost["y"],
                 "z": ghost.get("z", 0.0),
@@ -808,15 +805,16 @@ def vehicle_by_id(vehicles):
 def message_by_link(messages):
     lookup = {}
     for message in messages:
-        key = (
-            message.get("sender_id", message.get("vehicle_id")),
-            message.get("receiver_id", message.get("target_vehicle_id")),
-            message.get("message_count"),
-        )
-        lookup[key] = message
-        fallback_key = (key[0], key[1], None)
-        if fallback_key not in lookup:
-            lookup[fallback_key] = message
+        sender_id = message.get("sender_id", message.get("vehicle_id"))
+        receivers = message.get("expected_receiver_ids") or [
+            message.get("receiver_id", message.get("target_vehicle_id"))
+        ]
+        for receiver_id in receivers:
+            key = (sender_id, receiver_id, message.get("message_count"))
+            lookup[key] = message
+            fallback_key = (sender_id, receiver_id, None)
+            if fallback_key not in lookup:
+                lookup[fallback_key] = message
     return lookup
 
 
@@ -851,6 +849,7 @@ def communication_records_from_result(result, vehicles, messages):
                 "distance_m": metric.get("distance_m"),
                 "message_name": metric.get("message_name", message.get("message_name")),
                 "message_id": metric.get("message_id", message.get("message_id")),
+                "transmission_id": metric.get("transmission_id"),
                 "message_count": message_count,
                 "message_content": message.get("content", metric.get("message_content", "")),
                 "attacked": metric.get("attacked", message.get("attacked", False)),
@@ -862,6 +861,17 @@ def communication_records_from_result(result, vehicles, messages):
                 "packet_error_rate": metric.get("packet_error_rate"),
                 "delivery_probability": metric.get("delivery_probability"),
                 "radio_mode": metric.get("radio_mode", message.get("radio_mode")),
+                "payload_encoding": metric.get(
+                    "payload_encoding", message.get("payload_encoding")
+                ),
+                "payload_bytes": metric.get("payload_bytes", message.get("payload_bytes")),
+                "payload_bit_length": metric.get(
+                    "payload_bit_length", message.get("payload_bit_length")
+                ),
+                "wire_payload_verified": metric.get("wire_payload_verified"),
+                "snir_db": metric.get("snir_db"),
+                "recv_power_dbm": metric.get("recv_power_dbm"),
+                "bitrate_bps": metric.get("bitrate_bps"),
                 "bridge_backend": metric.get("bridge_backend"),
                 "backend_implementation": metric.get("backend_implementation"),
                 "radio_access": metric.get("radio_access"),

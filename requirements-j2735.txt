@@ -1,0 +1,3 @@
+# Optional runtime for veins_j2735_codec "uper" or "auto".
+# Revision-matched SAE J2735 ASN.1 modules must be supplied separately.
+asn1tools>=0.166.0

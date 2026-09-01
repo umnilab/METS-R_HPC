@@ -13,6 +13,12 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 
+from clients.J2735Codec import (
+    annotate_decoded_j2735_messages,
+    create_j2735_codec,
+    encode_j2735_messages,
+)
+
 
 PROTOCOL_NAME = "metsr-veins-jsonl"
 PROTOCOL_VERSION = 1
@@ -175,6 +181,13 @@ class VeinsClient:
         request_timeout=None,
         retry_interval=None,
         verbose=None,
+        j2735_codec=None,
+        j2735_schema_files=None,
+        j2735_type_name=None,
+        j2735_schema_revision=None,
+        j2735_allow_fallback=None,
+        j2735_value_builder=None,
+        decode_j2735=None,
     ):
         self.config = config
         self.host = host or _config_get(config, "veins_host", "127.0.0.1")
@@ -203,6 +216,33 @@ class VeinsClient:
         )
         self.verbose = bool(
             _config_get(config, "verbose", False) if verbose is None else verbose
+        )
+        if hasattr(j2735_codec, "encode_message"):
+            self.j2735_codec = j2735_codec
+        else:
+            self.j2735_codec = create_j2735_codec(
+                config=config,
+                mode=j2735_codec,
+                schema_files=j2735_schema_files,
+                type_name=j2735_type_name,
+                schema_revision=j2735_schema_revision,
+                allow_fallback=j2735_allow_fallback,
+                value_builder=j2735_value_builder,
+            )
+        describe_codec = getattr(self.j2735_codec, "describe", None)
+        self.j2735_codec_info = (
+            describe_codec()
+            if callable(describe_codec)
+            else {
+                "requested": "custom",
+                "active": type(self.j2735_codec).__name__,
+                "status": "configured",
+            }
+        )
+        self.decode_j2735 = (
+            bool(_config_get(config, "veins_j2735_decode_received", True))
+            if decode_j2735 is None
+            else bool(decode_j2735)
         )
         self.process = None
         self.socket = None
@@ -269,12 +309,20 @@ class VeinsClient:
             "hello",
             protocol=PROTOCOL_NAME,
             version=PROTOCOL_VERSION,
+            payload_codec=self.j2735_codec_info,
         )
 
     def ping(self):
         return self.request("ping")
 
     def reset(self, **fields):
+        """Request a sidecar reset.
+
+        Current packet-level OMNeT++ backends reject this request because
+        rewinding simulation time without reconstructing every PHY/MAC/RLC
+        module would preserve hidden radio state. Restart the sidecar for a
+        clean experiment.
+        """
         return self.request("reset", **fields)
 
     def update_mobility(self, tick, vehicles):
@@ -288,7 +336,7 @@ class VeinsClient:
         return self.request(
             "inject_bsm",
             tick=int(tick),
-            messages=list(messages or []),
+            messages=encode_j2735_messages(self.j2735_codec, messages),
         )
 
     def inject_attacks(self, tick, attacks):
@@ -316,7 +364,9 @@ class VeinsClient:
         message = {
             "tick": int(tick),
             "vehicles": list(vehicles or []),
-            "bsm_messages": list(bsm_messages or []),
+            "bsm_messages": encode_j2735_messages(
+                self.j2735_codec, bsm_messages
+            ),
         }
         if attacks:
             message["attacks"] = list(attacks)
@@ -325,10 +375,18 @@ class VeinsClient:
 
         response = self.request("sync_tick", **message)
         data = response.get("data", response)
+        received_bsms = data.get("received_bsms", data.get("rx_bsms", []))
+        if self.decode_j2735:
+            received_bsms = annotate_decoded_j2735_messages(
+                self.j2735_codec, received_bsms
+            )
         return {
-            "received_bsms": data.get("received_bsms", data.get("rx_bsms", [])),
+            "received_bsms": received_bsms,
             "link_metrics": data.get("link_metrics", data.get("metrics", [])),
             "attack_events": data.get("attack_events", []),
+            "duration_s": data.get("duration_s", duration_s),
+            "tick_start_time_s": data.get("tick_start_time_s"),
+            "tick_end_time_s": data.get("tick_end_time_s"),
             "bridge_backend": data.get(
                 "bridge_backend", response.get("bridge_backend")
             ),

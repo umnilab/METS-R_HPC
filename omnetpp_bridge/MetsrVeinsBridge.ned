@@ -14,6 +14,7 @@ simple MetsrVeinsBridge
         double distanceLatencyUsPerM = default(2);
         double distanceLossAtRange = default(0.05);
         int pollIntervalMs = default(10);
+        double defaultTickDurationS @unit(s) = default(0.1s);
         string bridgeBackend = default("abstract_omnetpp");
         string backendImplementation = default("abstract_event_profile");
         string networkModel = default("omnetpp_event_wireless_queue_model");
@@ -26,8 +27,16 @@ simple MetsrVeinsBridge
         int simu5gLocalPort = default(4400);
         int simu5gDestPort = default(4400);
         bool simu5gUpdateMobility = default(true);
+        double veinsReceiveTimeoutMs = default(1000);
+        string veinsVehicleModuleType = default("MetsrVeinsVehicle");
+        double veinsCoordinateOffsetX = default(10000);
+        double veinsCoordinateOffsetY = default(10000);
+        double veinsCoordinateOffsetZ = default(0);
+        bool veinsFlipY = default(false);
+        int veinsMaxVehicles = default(4096);
         bool logRequests = default(true);
         @display("i=block/network2");
     gates:
         input sim5gReportIn @directIn;
+        input veinsReportIn @directIn;
 }

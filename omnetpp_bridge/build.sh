@@ -8,8 +8,6 @@ if ! command -v opp_makemake >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -f Makefile ]; then
-    opp_makemake -f --deep --make-so -O out -o metsr_veins_bridge
-fi
+opp_makemake -f --deep -Xsrc/veins --make-so -O out -o metsr_veins_bridge
 
 make -j"$(nproc 2>/dev/null || echo 4)"

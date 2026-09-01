@@ -1,0 +1,24 @@
+package metsr.veinsbridge.sim5g;
+
+import inet.applications.contract.IApp;
+
+// One physical multicast packet is emitted for each bridge BSM request.
+// Simu5G maps it to D2D_MULTI when cellularNic.d2dInitialMode is enabled.
+simple MetsrBsmPc5App like IApp
+{
+    parameters:
+        int localPort = default(4400);
+        int destPort = default(4400);
+        string multicastAddress = default("224.0.0.10");
+        string bridgeModule = default("^.^.bridge");
+        bool requireD2dInitialMode = default(true);
+        string interfaceTableModule;
+        string multicastInterface = default("cellular");
+        int tos = default(-1);
+        @class(metsr::veinsbridge::sim5g::MetsrBsmPc5App);
+        @display("i=block/rxtx");
+    gates:
+        input socketIn;
+        output socketOut;
+        input bridgeIn @directIn;
+}
