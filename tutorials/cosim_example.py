@@ -394,8 +394,8 @@ def manage_active_vehicle_routes(
     verbose=False,
 ):
     # Kept in the signature for compatibility with older configs. Current
-    # METS-R versions commit road/connector transitions from the authoritative
-    # poses sent by step_carla_metsr_cosim, not from enterNextRoad requests.
+    # METS-R versions mirror the segment reported by CARLA and acknowledge an
+    # explicit handoff when that segment returns to native control.
     del tick, route_advance_interval
     cosim_vehicles = step_result.get("cosim_vehicles", [])
     vehicle_states = {
@@ -413,17 +413,6 @@ def manage_active_vehicle_routes(
             state.get("roadId", state.get("roadID"))
             or (route[0] if route else None)
         )
-
-        # The route has already advanced to the connector target while the
-        # transition is pending. A reroute or another next-road assertion here
-        # would target route[1] and can produce PENDING_TARGET_MISMATCH.
-        if vehicle.get("transitionPending") is True:
-            if verbose:
-                print(
-                    f"Vehicle {veh_id} is waiting for its pending METS-R "
-                    "road transition to commit."
-                )
-            continue
 
         if len(route) <= route_threshold:
             reroute_vehicle(

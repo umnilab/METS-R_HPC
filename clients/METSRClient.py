@@ -1861,15 +1861,7 @@ class METSRClient:
               'intersectionId': <int> connector intersection ID,
               'intersectionCollision': <bool> current conflict state,
               'currentParkingRoadId': <str | None> original road ID where the
-                                      vehicle is parked or has reserved parking,
-              'transitionPending': <bool> whether the vehicle is externally
-                                   traversing a co-simulation connector,
-              'transitionSourceRoadId': <str> source road ID while a
-                                           transition is pending,
-              'transitionTargetRoadId': <str> target road ID while a
-                                          transition is pending,
-              'transitionTargetLaneIndex': <int> target lane index while pending,
-              'transitionTargetInternalLaneId': <int> internal target lane ID
+                                      vehicle is parked or has reserved parking
             }
 
         Parameters
@@ -1992,11 +1984,7 @@ class METSRClient:
                                       taxi is parked or has reserved parking,
               'segmentId': <str>   physical or connector road ID,
               'onConnector': <bool>,
-              'laneIndex':    <int | None> compact lane index, or None on a connector,
-              'transitionPending': <bool>,
-              'transitionTargetRoadId': <str>,       # present while pending
-              'transitionTargetLaneIndex': <int>,    # present while pending
-              'transitionTargetInternalLaneId': <int> # present while pending
+              'laneIndex':    <int | None> compact lane index, or None on a connector
             }
 
         Parameters
@@ -2074,11 +2062,7 @@ class METSRClient:
               'currentStopIndex': <int> index of the last completed stop
                                        in the route's stop list (0-based),
               'passengerCount': <int>  number of passengers currently on board,
-              'battery':       <float> remaining battery energy (kWh),
-              'transitionPending': <bool>,
-              'transitionTargetRoadId': <str>,       # present while pending
-              'transitionTargetLaneIndex': <int>,    # present while pending
-              'transitionTargetInternalLaneId': <int> # present while pending
+              'battery':       <float> remaining battery energy (kWh)
             }
 
         Notes
@@ -2540,10 +2524,8 @@ class METSRClient:
     def query_cosim_vehicle(self):
         """Query vehicles currently owned by the external co-simulator.
 
-        Returns vehicles on roads previously registered with
-        :meth:`set_cosim_road`, plus externally controlled vehicles whose
-        connector transition is still pending. Connector-resident vehicles are
-        included even though a connector is not a routing edge. Each entry in
+        Returns vehicles currently owned by the external co-simulator on roads
+        and connectors registered through :meth:`set_cosim_road`. Each entry in
         ``data`` represents one vehicle::
 
             {
@@ -2561,12 +2543,7 @@ class METSRClient:
               'segmentId': <str>   physical or connector segment ID,
               'connectorId': <str> present while on a connector,
               'onConnector': <bool>,
-              'laneIndex':    <int>   compact lane index, or -1 on a connector,
-              'transitionPending': <bool>,
-              'transitionSourceRoadId': <str>,       # present while pending
-              'transitionTargetRoadId': <str>,       # present while pending
-              'transitionTargetLaneIndex': <int>,    # present while pending
-              'transitionTargetInternalLaneId': <int> # present while pending
+              'laneIndex':    <int> compact lane index, or -1 on a connector
             }
 
         Returns
@@ -4120,9 +4097,6 @@ class METSRClient:
         -----
         A temporarily reserved or occupied entry lane is reported per record
         as ``status='error'`` with ``retryable=True`` and an ``errorCode``.
-        A vehicle that enters through an external connector may return
-        ``status='ok'`` with
-        ``transitionPending=True``.
         """
         msg = {"messageType": "enterRoadFromQueue", "data": []}
         if requests is not None:
@@ -4284,29 +4258,28 @@ class METSRClient:
             segment_id = None,
             segmentID = None,
             road_id = None,
-            roadID = None):
-        """Map-match authoritative poses on co-simulation road segments.
+            roadID = None,
+            lane_index = None,
+            laneIndex = None,
+            connector_path_id = None,
+            connectorPathID = None):
+        """Apply an authoritative external pose to a co-simulation vehicle.
 
-        ``segment_id`` is the preferred optional hint and may identify a
-        controlled physical road or an intersection connector. ``road_id`` and
-        ``observed_road_id`` remain Python-call aliases; all three are
-        normalized to the native ``segmentId`` wire field.
+        Without ``segment_id``, METS-R map-matches only against co-simulation
+        roads and connectors. An explicit segment is authoritative.
+        ``lane_index`` selects a road lane and ``connector_path_id`` selects a
+        connector path; both require a segment and are mutually exclusive.
 
-        METS-R SIM now infers the lane or connector path from geometry,
-        heading, retained membership, and the planned route. It also starts and
-        commits connector transitions from these pose updates, replacing the
-        removed ``enterNextRoad`` command. ``observed_lane_id`` is retained for
-        compatibility, but the latest server ignores it and reports
-        ``providedLaneIgnored=True``.
+        An explicit native segment releases a co-simulation-owned vehicle back
+        to METS-R. The response reports ``controlMode='native'`` and
+        ``releasedFromCoSim=True``; callers should then remove their external
+        actor.
 
-        Successful records include inferred ``segmentId``/``roadId``,
-        ``laneIndex`` (``-1`` on connectors), ``lateralError``,
-        ``distanceToSegmentEnd``,
-        ``transitionStarted``, ``transitionCommitted``, and the remaining
-        external-transition state. Poses that cannot be map-matched or overlap
-        another vehicle return structured per-record failures.
-        Record-level failures use ``status='error'`` with ``errorCode`` and an
-        optional ``message``; the top-level response becomes ``partial``.
+        ``road_id``/``observed_road_id`` and ``observed_lane_id`` are deprecated
+        Python aliases. The wire payload always uses ``segmentId``,
+        ``laneIndex``, and ``connectorPathId``. Record failures use
+        ``status='error'`` with ``errorCode``; the top-level status may be
+        ``partial``.
         """
         if observedRoadID is not None:
             if observed_road_id is not None:
@@ -4328,6 +4301,30 @@ class METSRClient:
             if road_id is not None:
                 raise ValueError("Use either road_id or roadID, not both")
             road_id = roadID
+        if laneIndex is not None:
+            if lane_index is not None:
+                raise ValueError("Use either lane_index or laneIndex, not both")
+            lane_index = laneIndex
+        if observed_lane_id is not None:
+            if lane_index is not None:
+                raise ValueError(
+                    "observed_lane_id is a legacy alias for lane_index; use only one"
+                )
+            lane_index = observed_lane_id
+        if connectorPathID is not None:
+            if connector_path_id is not None:
+                raise ValueError(
+                    "Use either connector_path_id or connectorPathID, not both"
+                )
+            connector_path_id = connectorPathID
+        segment_source_count = sum(
+            value is not None
+            for value in (segment_id, road_id, observed_road_id)
+        )
+        if segment_source_count > 1:
+            raise ValueError(
+                "segment_id, road_id, and observed_road_id are aliases; use only one"
+            )
 
         msg = {
                 "messageType": "teleportCoSimVeh",
@@ -4347,15 +4344,16 @@ class METSRClient:
         observed_road_ids = _batch_field_values(
             observed_road_id, count, "observed_road_id"
         )
-        observed_lane_ids = _batch_field_values(
-            observed_lane_id, count, "observed_lane_id"
-        )
         segment_ids = _batch_field_values(segment_id, count, "segment_id")
         road_ids = _batch_field_values(road_id, count, "road_id")
+        lane_indices = _batch_field_values(lane_index, count, "lane_index")
+        connector_path_ids = _batch_field_values(
+            connector_path_id, count, "connector_path_id"
+        )
 
         for (veh_id, x_value, y_value, z_value, bearing_value, speed_value,
-             private_flag, transform_flag, observed_road, observed_lane,
-             segment_hint, road_hint) in zip(
+             private_flag, transform_flag, observed_road, segment_hint,
+             road_hint, selected_lane, selected_connector_path) in zip(
                 veh_ids,
                 xs,
                 ys,
@@ -4365,9 +4363,10 @@ class METSRClient:
                 private_flags,
                 transform_flags,
                 observed_road_ids,
-                observed_lane_ids,
                 segment_ids,
-                road_ids):
+                road_ids,
+                lane_indices,
+                connector_path_ids):
             record = {
                 "vehicleId": veh_id,
                 "x": x_value,
@@ -4378,11 +4377,27 @@ class METSRClient:
                 "isPrivate": private_flag,
                 "transformCoordinates": transform_flag,
             }
-            selected_segment = segment_hint or road_hint or observed_road
+            selected_segment = next(
+                (candidate for candidate in
+                 (segment_hint, road_hint, observed_road)
+                 if candidate is not None),
+                None,
+            )
+            if selected_lane is not None and selected_connector_path is not None:
+                raise ValueError(
+                    "lane_index and connector_path_id are mutually exclusive"
+                )
+            if (selected_lane is not None or selected_connector_path is not None) \
+                    and selected_segment is None:
+                raise ValueError(
+                    "lane_index and connector_path_id require segment_id"
+                )
             if selected_segment is not None:
                 record["segmentId"] = selected_segment
-            if observed_lane is not None:
-                record["laneIndex"] = observed_lane
+            if selected_lane is not None:
+                record["laneIndex"] = selected_lane
+            if selected_connector_path is not None:
+                record["connectorPathId"] = selected_connector_path
             msg["data"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["messageType"] == "teleportCoSimVeh", res["messageType"]
@@ -4393,33 +4408,66 @@ class METSRClient:
             self,
             message_type,
             vehID,
-            roadID,
-            laneID = -1,
-            dist = None,
+            segment_id = None,
+            lane_index = None,
+            distance_to_segment_end = None,
             private_veh = False,
             x = None,
             y = None,
-            transform_coords = False):
+            transform_coords = False,
+            z = None,
+            connector_path_id = None,
+            position_type = None,
+            roadID = None,
+            laneID = None,
+            dist = None,
+            segmentID = None,
+            laneIndex = None,
+            connectorPathID = None):
         """Implement digital-twin teleport for the current and legacy names.
 
-        ``dist`` is the distance to the downstream junction. ``x``/``y``
-        coordinates are projected onto the target lane by the simulator. Set
-        ``transform_coords=True`` when those coordinates are projected/local
-        SUMO, XODR, or CARLA-meter coordinates; leave it ``False`` for
-        SIM/internal coordinates.
+        Each record uses exactly one position mode. Coordinate mode takes
+        ``x``/``y`` and optional ``z`` and lets METS-R match a native road or
+        connector. Segment mode takes ``segment_id`` plus
+        ``distance_to_segment_end`` and optionally ``lane_index`` for a road or
+        ``connector_path_id`` for a connector. Set ``position_type`` explicitly
+        or let this client infer it from the supplied fields.
 
-        ``laneID=-1`` requires ``x``/``y`` and lets the simulator consider all
-        lanes on the road. Current servers choose the closest collision-free
-        placement at or behind the requested position. Per-record results
-        include ``LANE``, ``REQUESTED_DIST``, ``DIST``, ``BACKWARD_SHIFT``,
-        ``ADJUSTED``, and ``FORCED``. ``FORCED=True`` means the road was
-        saturated and only a best-effort overlapping placement was available.
-        Invalid records have ``status='error'`` and a ``message``; the
-        top-level response becomes ``partial``. The server rejects targets on
-        COSIM segments and vehicles currently owned by
-        COSIM, keeping digital-twin replay separate from authoritative
-        co-simulation control.
+        ``roadID``, ``laneID``, and ``dist`` remain Python-call aliases so old
+        code can migrate, but the removed ``roadId`` field is never sent on the
+        wire. The server rejects co-simulation targets, co-simulation-owned
+        vehicles, invalid geometry, and overlapping placements. Record errors
+        make the top-level response ``partial``.
         """
+        if segmentID is not None:
+            if segment_id is not None:
+                raise ValueError("Use either segment_id or segmentID, not both")
+            segment_id = segmentID
+        if roadID is not None:
+            if segment_id is not None:
+                raise ValueError("roadID is a legacy alias for segment_id; use only one")
+            segment_id = roadID
+        if laneIndex is not None:
+            if lane_index is not None:
+                raise ValueError("Use either lane_index or laneIndex, not both")
+            lane_index = laneIndex
+        if laneID is not None:
+            if lane_index is not None:
+                raise ValueError("laneID is a legacy alias for lane_index; use only one")
+            lane_index = laneID
+        if dist is not None:
+            if distance_to_segment_end is not None:
+                raise ValueError(
+                    "dist is a legacy alias for distance_to_segment_end; use only one"
+                )
+            distance_to_segment_end = dist
+        if connectorPathID is not None:
+            if connector_path_id is not None:
+                raise ValueError(
+                    "Use either connector_path_id or connectorPathID, not both"
+                )
+            connector_path_id = connectorPathID
+
         msg = {
                 "messageType": message_type,
                 "data": []
@@ -4427,38 +4475,107 @@ class METSRClient:
         veh_ids = _as_list(vehID)
         count = len(veh_ids)
 
-        road_ids = _batch_field_values(roadID, count, "roadID")
-        lane_ids = _batch_field_values(laneID, count, "laneIndex")
-        dists = _batch_field_values(dist, count, "dist")
+        segment_ids = _batch_field_values(segment_id, count, "segment_id")
+        lane_indices = _batch_field_values(lane_index, count, "lane_index")
+        distances = _batch_field_values(
+            distance_to_segment_end, count, "distance_to_segment_end"
+        )
         private_flags = _batch_field_values(private_veh, count, "private_veh")
         xs = _batch_field_values(x, count, "x")
         ys = _batch_field_values(y, count, "y")
+        zs = _batch_field_values(z, count, "z")
         transform_flags = _batch_field_values(
             transform_coords, count, "transform_coords"
         )
+        connector_path_ids = _batch_field_values(
+            connector_path_id, count, "connector_path_id"
+        )
+        position_types = _batch_field_values(
+            position_type, count, "position_type"
+        )
 
-        for veh_id, road_id, lane_id, dist_value, private_flag, x_value, y_value, transform_flag in zip(
-                veh_ids, road_ids, lane_ids, dists, private_flags, xs, ys, transform_flags):
+        for (veh_id, segment, lane, distance, private_flag, x_value, y_value,
+             z_value, transform_flag, connector_path, requested_mode) in zip(
+                veh_ids, segment_ids, lane_indices, distances, private_flags,
+                xs, ys, zs, transform_flags, connector_path_ids,
+                position_types):
+            if lane == -1:
+                lane = None
+
+            has_coordinates = any(
+                value is not None for value in (x_value, y_value, z_value)
+            )
+            has_segment_position = any(
+                value is not None
+                for value in (segment, lane, connector_path, distance)
+            )
+            if requested_mode is None:
+                if has_coordinates and has_segment_position:
+                    raise ValueError(
+                        "digital-twin teleport cannot mix coordinate and segment fields"
+                    )
+                if has_coordinates:
+                    mode = "coordinate"
+                elif has_segment_position:
+                    mode = "segment"
+                else:
+                    raise ValueError(
+                        "digital-twin teleport requires coordinates or a segment position"
+                    )
+            elif isinstance(requested_mode, str):
+                mode = requested_mode.lower()
+            else:
+                raise ValueError("position_type must be 'coordinate' or 'segment'")
+
+            if mode not in {"coordinate", "segment"}:
+                raise ValueError("position_type must be 'coordinate' or 'segment'")
+
             record = {
                 "vehicleId": veh_id,
-                "roadId": road_id,
-                "laneIndex": lane_id,
                 "isPrivate": private_flag,
+                "positionType": mode,
             }
-            if x_value is not None or y_value is not None:
+
+            if mode == "coordinate":
+                if has_segment_position:
+                    raise ValueError(
+                        "coordinate digital-twin teleport cannot include segment, "
+                        "distance, lane, or connector-path fields"
+                    )
                 if x_value is None or y_value is None:
-                    raise ValueError("Both x and y are required for coordinate digital-twin teleport")
+                    raise ValueError(
+                        "coordinate digital-twin teleport requires both x and y"
+                    )
                 record["x"] = x_value
                 record["y"] = y_value
+                if z_value is not None:
+                    record["z"] = z_value
                 record["transformCoordinates"] = transform_flag
-            elif dist_value is not None:
-                if lane_id == -1:
-                    raise ValueError(
-                        "laneID=-1 requires x and y for digital-twin teleport"
-                    )
-                record["distanceToSegmentEnd"] = dist_value
             else:
-                raise ValueError("digital-twin teleport requires dist or x/y")
+                if has_coordinates:
+                    raise ValueError(
+                        "segment digital-twin teleport cannot include x, y, or z"
+                    )
+                if transform_flag:
+                    raise ValueError(
+                        "transform_coords applies only to coordinate teleport"
+                    )
+                if segment is None or distance is None:
+                    raise ValueError(
+                        "segment digital-twin teleport requires segment_id and "
+                        "distance_to_segment_end"
+                    )
+                if lane is not None and connector_path is not None:
+                    raise ValueError(
+                        "lane_index and connector_path_id are mutually exclusive"
+                    )
+                record["segmentId"] = segment
+                record["distanceToSegmentEnd"] = distance
+                if lane is not None:
+                    record["laneIndex"] = lane
+                if connector_path is not None:
+                    record["connectorPathId"] = connector_path
+
             msg["data"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["messageType"] == message_type, res["messageType"]
@@ -4468,14 +4585,23 @@ class METSRClient:
     def teleport_digital_twin_vehicle(
             self,
             vehID,
-            roadID,
-            laneID = -1,
-            dist = None,
+            segment_id = None,
+            lane_index = None,
+            distance_to_segment_end = None,
             private_veh = False,
             x = None,
             y = None,
-            transform_coords = False):
-        """Teleport digital-twin vehicles by lane distance or coordinates.
+            transform_coords = False,
+            z = None,
+            connector_path_id = None,
+            position_type = None,
+            roadID = None,
+            laneID = None,
+            dist = None,
+            segmentID = None,
+            laneIndex = None,
+            connectorPathID = None):
+        """Teleport digital-twin vehicles by segment distance or coordinates.
 
         This is the canonical name in the latest METS-R SIM protocol. See
         :meth:`_teleport_digital_twin_vehicle` for placement semantics.
@@ -4483,36 +4609,63 @@ class METSRClient:
         return self._teleport_digital_twin_vehicle(
             "teleportDigitalTwinVeh",
             vehID,
-            roadID,
-            laneID=laneID,
-            dist=dist,
+            segment_id=segment_id,
+            lane_index=lane_index,
+            distance_to_segment_end=distance_to_segment_end,
             private_veh=private_veh,
             x=x,
             y=y,
             transform_coords=transform_coords,
+            z=z,
+            connector_path_id=connector_path_id,
+            position_type=position_type,
+            roadID=roadID,
+            laneID=laneID,
+            dist=dist,
+            segmentID=segmentID,
+            laneIndex=laneIndex,
+            connectorPathID=connectorPathID,
         )
 
     def teleport_trace_replay_vehicle(
             self,
             vehID,
-            roadID,
-            laneID = -1,
-            dist = None,
+            segment_id = None,
+            lane_index = None,
+            distance_to_segment_end = None,
             private_veh = False,
             x = None,
             y = None,
-            transform_coords = False):
+            transform_coords = False,
+            z = None,
+            connector_path_id = None,
+            position_type = None,
+            roadID = None,
+            laneID = None,
+            dist = None,
+            segmentID = None,
+            laneIndex = None,
+            connectorPathID = None):
         """Compatibility alias for the legacy trace-replay command name."""
         return self._teleport_digital_twin_vehicle(
             "teleportDigitalTwinVeh",
             vehID,
-            roadID,
-            laneID=laneID,
-            dist=dist,
+            segment_id=segment_id,
+            lane_index=lane_index,
+            distance_to_segment_end=distance_to_segment_end,
             private_veh=private_veh,
             x=x,
             y=y,
             transform_coords=transform_coords,
+            z=z,
+            connector_path_id=connector_path_id,
+            position_type=position_type,
+            roadID=roadID,
+            laneID=laneID,
+            dist=dist,
+            segmentID=segmentID,
+            laneIndex=laneIndex,
+            connectorPathID=connectorPathID,
         )
 
     # enter the next road
