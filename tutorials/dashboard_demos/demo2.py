@@ -19,6 +19,7 @@ import math
 import os
 import sys
 import threading
+import traceback
 import time
 import types
 from dataclasses import dataclass, fields
@@ -72,6 +73,9 @@ class Args:
     carla_timeout_s: float = 60.0
     output_root: str = str(_REPO_ROOT / "output")
     metsr_sim_dir: Optional[str] = None
+    pcla_dir: Optional[str] = os.environ.get('PCLA_HOME')
+    pcla_agent: str = 'simlingo_simlingo'
+    pcla_route: Optional[str] = None
     export_folder: str = str(_DEFAULT_EXPORT_DIR)
     dashboard_dir: str = str(_DEFAULT_DASHBOARD_DIR)
     dashboard_port: int = 8898
@@ -209,6 +213,11 @@ def wsl_windows_host() -> Optional[str]:
 
 def normalize_args(args: Args) -> Args:
     args.scenic_file = str(Path(args.scenic_file).expanduser().resolve())
+    if args.pcla_dir:
+        args.pcla_dir = str(Path(args.pcla_dir).expanduser().resolve())
+        os.environ['PCLA_HOME'] = args.pcla_dir
+    if args.pcla_route:
+        args.pcla_route = str(Path(args.pcla_route).expanduser().resolve())
     map_root = Path(args.map_locations).expanduser().resolve()
     args.map_locations = str(map_root)
     args.export_folder = str(Path(args.export_folder).expanduser().resolve())
@@ -248,6 +257,52 @@ def normalize_args(args: Args) -> Args:
     if args.metsr_sim_dir:
         args.metsr_sim_dir = resolve_metsr_sim_folder(args)
     return args
+
+
+def _scenario_uses_pcla(scenic_file: str) -> bool:
+    try:
+        source = Path(scenic_file).read_text(encoding='utf-8')
+    except OSError:
+        return False
+    return 'from PCLA import PCLA' in source
+
+
+def validate_pcla_setup(args: Args) -> None:
+    '''Fail before CARLA startup when a PCLA scenario lacks required assets.'''
+    if not _scenario_uses_pcla(args.scenic_file):
+        return
+
+    pcla_root = Path(args.pcla_dir).expanduser().resolve() if args.pcla_dir else None
+    if pcla_root is None:
+        for entry in sys.path:
+            candidate = Path(entry or '.').resolve() / 'PCLA.py'
+            if candidate.is_file():
+                pcla_root = candidate.parent
+                break
+    if pcla_root is None or not (pcla_root / 'PCLA.py').is_file():
+        raise RuntimeError(
+            'This Scenic scenario uses PCLA, but its checkout could not be found. '
+            'Pass --pcla-dir /path/to/PCLA or set PCLA_HOME.'
+        )
+
+    args.pcla_dir = str(pcla_root)
+    os.environ['PCLA_HOME'] = str(pcla_root)
+    if str(args.pcla_agent).strip() != 'simlingo_simlingo':
+        return
+
+    pretrained_root = pcla_root / 'pcla_agents' / 'simlingo_pretrained'
+    required = (
+        pretrained_root / '.hydra' / 'config.yaml',
+        pretrained_root / 'checkpoints' / 'epoch=013.ckpt' / 'pytorch_model.pt',
+    )
+    missing = [path for path in required if not path.is_file()]
+    if missing:
+        missing_text = ', '.join(str(path) for path in missing)
+        raise FileNotFoundError(
+            'PCLA SimLingo pretrained assets are incomplete; missing: '
+            f'{missing_text}. Install them with: cd {pcla_root} && '
+            f'{sys.executable} pcla_functions/download_weights.py --agents simlingo'
+        )
 
 
 def format_exception(exc: BaseException) -> str:
@@ -599,8 +654,16 @@ class ScenicTRACRDashboard(TRACRDashboard):
             width: 100%;
             border-collapse: collapse;
             font-size: 10px;
+            background: #f8fafc;
+            color: #0f172a;
           }
-          .scenic-runs-table th {top: 0; z-index: 2;}
+          .scenic-runs-table th, .scenic-runs-table td {color: #0f172a;}
+          .scenic-runs-table th {
+            top: 0;
+            z-index: 2;
+            background: #e2e8f0;
+            color: #334155;
+          }
           .scenic-run--running td {background: #dbeafe;}
           .scenic-run--finalizing td {background: #fef3c7;}
           .scenic-run--finished td {background: #dcfce7;}
@@ -1390,6 +1453,7 @@ def compile_scenario(args: Args, scenic_module: Any, set_debugging_options: Any,
         "bubble_size": int(args.bubble_size),
         "export_folder": args.export_folder,
     }
+    params.update(pcla_agent=args.pcla_agent, pcla_route=args.pcla_route)
     return scenic_module.scenarioFromFile(path=args.scenic_file, model=args.scenic_model, mode2D=True, params=params)
 
 
@@ -1430,6 +1494,7 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
 
 
 def run(args: Args) -> int:
+    validate_pcla_setup(args)
     try:
         import scenic
         from scenic import setDebuggingOptions
@@ -1587,6 +1652,7 @@ def run(args: Args) -> int:
                 dashboard.set_status(f"Finished Scenic simulation {run_number}/{args.total_simulations}", run_state="finished")
                 print(f"Terminating simulation number: {run_index}")
             except (Exception, KeyboardInterrupt) as exc:
+                traceback.print_exception(type(exc), exc, exc.__traceback__)
                 exit_code = 130 if isinstance(exc, KeyboardInterrupt) else 1
                 status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 live_summary = dashboard.current_run_telemetry()
