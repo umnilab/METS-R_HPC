@@ -7,6 +7,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -2240,6 +2241,7 @@ class TRACRDashboard:
         self.media_min_update_interval_s = 0.12
         self.lidar_min_update_interval_s = float(lidar_min_update_interval_s or 0.0)
         self._external_last_write_time = 0.0
+        self._external_state_lock = threading.RLock()
         self._media_last_update_time = 0.0
         self._lidar_last_update_time = 0.0
         self.stream_probe = None
@@ -2967,41 +2969,45 @@ class TRACRDashboard:
     def _refresh_external_state(self, force=False):
         if not self.external_directory:
             return
-        now = time.time()
-        if (
-            not force
-            and self.external_min_update_interval_s > 0
-            and now - self._external_last_write_time < self.external_min_update_interval_s
-        ):
-            return
-        os.makedirs(self.external_directory, exist_ok=True)
-        tmp_path = os.path.join(
-            self.external_directory,
-            f"state.{os.getpid()}.{id(self)}.tmp",
-        )
-        state_path = os.path.join(self.external_directory, "state.json")
-        payload = json.dumps(self._external_state())
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as output:
-                output.write(payload)
-            for attempt in range(8):
-                try:
-                    os.replace(tmp_path, state_path)
-                    self._external_last_write_time = time.time()
-                    return
-                except PermissionError:
-                    time.sleep(0.015 * (attempt + 1))
-            self._external_last_write_time = time.time()
-            return
-        except PermissionError:
-            self._external_last_write_time = time.time()
-            return
-        finally:
+        state_lock = getattr(self, "_external_state_lock", None)
+        if state_lock is None:
+            state_lock = self._external_state_lock = threading.RLock()
+        with state_lock:
+            now = time.time()
+            if (
+                not force
+                and self.external_min_update_interval_s > 0
+                and now - self._external_last_write_time < self.external_min_update_interval_s
+            ):
+                return
+            os.makedirs(self.external_directory, exist_ok=True)
+            tmp_path = os.path.join(
+                self.external_directory,
+                f"state.{os.getpid()}.{id(self)}.tmp",
+            )
+            state_path = os.path.join(self.external_directory, "state.json")
+            payload = json.dumps(self._external_state())
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                with open(tmp_path, "w", encoding="utf-8") as output:
+                    output.write(payload)
+                for attempt in range(8):
+                    try:
+                        os.replace(tmp_path, state_path)
+                        self._external_last_write_time = time.time()
+                        return
+                    except PermissionError:
+                        time.sleep(0.015 * (attempt + 1))
+                self._external_last_write_time = time.time()
+                return
             except OSError:
-                pass
+                self._external_last_write_time = time.time()
+                return
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def _ipython_display_(self):
         self.display()
