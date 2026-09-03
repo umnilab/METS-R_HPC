@@ -768,6 +768,22 @@ def patch_cosim_carla_motion_compat(args: Args) -> None:
         print("Using Scenic's native CARLA motion path; TRACR Traffic Manager override is disabled.")
 
 
+def patch_scenic_metsr_ready_compat(client_class: Optional[type] = None) -> bool:
+    """Allow Scenic to attach after METS-R's one-time ready notification."""
+    from clients.METSRClient import METSRClient as RepositoryMETSRClient
+
+    if client_class is None:
+        from scenic.simulators.metsr.client import METSRClient as ScenicMETSRClient
+
+        client_class = ScenicMETSRClient
+    if getattr(client_class, "_tracr_late_ready_compat", False):
+        return False
+
+    client_class._await_simulator_ready = RepositoryMETSRClient._await_simulator_ready
+    client_class._tracr_late_ready_compat = True
+    return True
+
+
 class VizRenderWorker:
     def __init__(self, args: Args, dashboard: ScenicTRACRDashboard, client: Any, client_lock: Any, owns_client: bool = False):
         self.args = args
@@ -1505,6 +1521,8 @@ def run(args: Args) -> int:
             f"Scenic is not available in this Python environment. Install the METSRSim branch from {_SCENIC_SOURCE_URL}, then rerun this script."
         ) from exc
 
+    if patch_scenic_metsr_ready_compat():
+        print("Enabled Scenic METS-R late-connection readiness compatibility.")
     patch_cosim_carla_motion_compat(args)
 
     run_seeds = [
