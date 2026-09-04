@@ -340,6 +340,38 @@ def mean(values: Sequence[float]) -> Optional[float]:
     return sum(valid) / len(valid) if valid else None
 
 
+def metsr_vehicle_id(record: Dict[str, Any]) -> Any:
+    """Read a vehicle ID from current v2 or legacy METS-R records."""
+    return next(
+        (
+            record.get(key)
+            for key in ("vehicleId", "ID", "id", "vehID", "vehicle_id", "vid")
+            if record.get(key) is not None
+        ),
+        None,
+    )
+
+
+def metsr_vehicle_segment(record: Dict[str, Any]) -> Any:
+    """Read the authoritative physical segment from a METS-R vehicle record."""
+    return next(
+        (
+            record.get(key)
+            for key in (
+                "segmentId",
+                "roadId",
+                "road",
+                "roadID",
+                "road_id",
+                "link",
+                "edge",
+            )
+            if record.get(key) not in (None, "")
+        ),
+        None,
+    )
+
+
 def fmt(value: Optional[float], digits: int = 1, suffix: str = "") -> str:
     if value is None or not math.isfinite(float(value)):
         return "—"
@@ -434,6 +466,8 @@ class ScenicTRACRDashboard(TRACRDashboard):
                 "avg_mph_samples": 0,
                 "max_vehicle_count": 0,
                 "ego_spawned_link": None,
+                "ego_current_link": None,
+                "completed_routes": 0,
                 "last_tick": None,
             }
             self._update_run_locked(
@@ -491,6 +525,8 @@ class ScenicTRACRDashboard(TRACRDashboard):
                     )
                 if self._run_telemetry.get("ego_spawned_link") in (None, "") and selected_vehicle_road not in (None, ""):
                     self._run_telemetry["ego_spawned_link"] = selected_vehicle_road
+                if selected_vehicle_road not in (None, ""):
+                    self._run_telemetry["ego_current_link"] = selected_vehicle_road
                 self._update_run_locked(
                     self.current_run,
                     {"progress": self._progress_text(self._run_telemetry.get("last_tick"))},
@@ -498,6 +534,16 @@ class ScenicTRACRDashboard(TRACRDashboard):
             self._status_text = self._compose_status(self.run_state or "running")
             self._update_metrics_html_locked()
         self._sync_metsr_vis_frame_url(force_external=True)
+
+    def update_simulation_progress(self, completed_routes: Any) -> None:
+        """Retain progress available from a live or partially failed simulation."""
+        parsed = first_float(completed_routes)
+        if parsed is None:
+            return
+        with self._scenic_lock:
+            self._run_telemetry["completed_routes"] = max(0, int(parsed))
+            self._update_metrics_html_locked()
+        self._refresh_external_state(force=False)
 
     def add_result(self, result: Dict[str, Any]) -> None:
         self.set_run_result(result)
@@ -516,6 +562,8 @@ class ScenicTRACRDashboard(TRACRDashboard):
                 "avg_mph": avg_mph,
                 "max_vehicle_count": int(self._run_telemetry.get("max_vehicle_count", 0) or 0),
                 "ego_spawned_link": self._run_telemetry.get("ego_spawned_link"),
+                "ego_current_link": self._run_telemetry.get("ego_current_link"),
+                "completed_routes": int(self._run_telemetry.get("completed_routes", 0) or 0),
                 "last_tick": self._run_telemetry.get("last_tick"),
             }
 
@@ -580,7 +628,8 @@ class ScenicTRACRDashboard(TRACRDashboard):
             ("progress", self._progress_text(sp.get("tick"))),
             ("vehicles", sp.get("vehicle_count", 0)),
             ("avg", fmt(sp.get("avg_mph"), 1, " mph")),
-            ("ego link", self._run_telemetry.get("ego_spawned_link") or sp.get("selected_vehicle_road")),
+            ("ego link", self._run_telemetry.get("ego_current_link") or sp.get("selected_vehicle_road")),
+            ("completed routes", self._run_telemetry.get("completed_routes", 0)),
         ]
         live_html = "".join(
             "<span class='scenic-live-item'>"
@@ -593,9 +642,9 @@ class ScenicTRACRDashboard(TRACRDashboard):
             ("seed", "seed"),
             ("status", "status"),
             ("progress", "progress"),
-            ("ego_spawned_link", "ego link"),
-            ("completed_trips", "trips"),
-            ("completed_routes", "routes"),
+            ("ego_spawned_link", "ego start link"),
+            ("completed_trips", "completed trips"),
+            ("completed_routes", "completed routes"),
             ("avg_speed_mph", "avg speed"),
             ("max_active_vehicles", "max vehicles"),
         ]
@@ -938,13 +987,10 @@ class VizRenderWorker:
         fallback_record = None
         preferred_record = None
 
-        def record_vehicle_id(record: Dict[str, Any]) -> Any:
-            return next((record.get(key) for key in ("ID", "id", "vehID", "vehicle_id", "vid") if record.get(key) is not None), None)
-
         for record in records or []:
             if not isinstance(record, dict):
                 continue
-            vehicle_id = record_vehicle_id(record)
+            vehicle_id = metsr_vehicle_id(record)
             if fallback_record is None and vehicle_id is not None:
                 fallback_record = record
             if vehicle_id is not None and str(vehicle_id) == preferred_vehicle_id:
@@ -955,9 +1001,9 @@ class VizRenderWorker:
 
         selected_record = preferred_record or fallback_record
         if selected_record is not None:
-            selected_vehicle_id = record_vehicle_id(selected_record)
+            selected_vehicle_id = metsr_vehicle_id(selected_record)
             selected_vehicle_type = metsr_vis_vehicle_type_for_record(selected_record, default=self.args.metsr_viz_vehicle_type)
-            selected_vehicle_road = next((selected_record.get(key) for key in ("road", "roadID", "road_id", "link", "edge") if selected_record.get(key) not in (None, "")), None)
+            selected_vehicle_road = metsr_vehicle_segment(selected_record)
         avg_mps = mean(speeds)
         return {
             "tick": tick,
@@ -1016,13 +1062,25 @@ def install_scenic_step_viz_hook(simulator: Any, worker: VizRenderWorker, args: 
     if simulation_cls is None:
         raise RuntimeError("Could not find Scenic CosimSimulation class for TRACR step visualization hook.")
 
-    patch_version = 2
+    patch_version = 3
     if getattr(simulation_cls, "_tracr_step_viz_patch_version", 0) < patch_version:
         original_step = getattr(simulation_cls, "_tracr_original_step", simulation_cls.step)
         simulation_cls._tracr_original_step = original_step
 
         def step_with_dashboard(self: Any) -> Any:
-            result = original_step(self)
+            try:
+                result = original_step(self)
+            finally:
+                try:
+                    progress_worker = getattr(self, "_tracr_viz_worker", None) or getattr(
+                        type(self), "_tracr_pending_viz_worker", None
+                    )
+                    completed_route = getattr(self, "completed_route", None)
+                    if progress_worker is not None and completed_route is not None:
+                        progress_worker.dashboard.update_simulation_progress(len(completed_route))
+                except Exception:
+                    # Dashboard telemetry must never hide the original simulation error.
+                    pass
             sensor = getattr(self, "_tracr_sensor_worker", None) or getattr(type(self), "_tracr_pending_sensor_worker", None)
             if sensor is not None:
                 try:
@@ -1629,6 +1687,8 @@ def run(args: Args) -> int:
             simulator.run_name = str(run_base)
             print(f"Starting simulation number: {run_index} seed={run_seed}")
 
+            before_evlogs: Dict[str, Tuple[float, int]] = {}
+            run_start = time.time()
             try:
                 dashboard.update_run_status(run_number, "running")
                 dashboard.set_status(f"Starting Scenic simulation {run_number}/{args.total_simulations}", run_state="running")
@@ -1674,16 +1734,26 @@ def run(args: Args) -> int:
                 exit_code = 130 if isinstance(exc, KeyboardInterrupt) else 1
                 status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 live_summary = dashboard.current_run_telemetry()
+                try:
+                    failure_evlogs = changed_evlogs(before_evlogs, args.output_root, run_start)
+                    failure_evlog_summary = summarize_evlogs(
+                        failure_evlogs,
+                        tick_seconds=float(args.metsr_tick_seconds),
+                    )
+                except OSError:
+                    failure_evlog_summary = {"completed_trips_raw": 0, "evlog_paths": []}
+                failure_evlog_paths = failure_evlog_summary.get("evlog_paths") or []
                 failure_row = {
                     "run": run_number,
                     "seed": run_seed,
                     "status": status,
                     "progress": dashboard._progress_text(live_summary.get("last_tick")),
-                    "completed_trips": 0,
-                    "completed_routes": 0,
+                    "completed_trips": int(failure_evlog_summary.get("completed_trips_raw", 0) or 0),
+                    "completed_routes": int(live_summary.get("completed_routes", 0) or 0),
                     "ego_spawned_link": live_summary.get("ego_spawned_link") or "not observed",
                     "avg_speed_mph": live_summary.get("avg_mph"),
                     "max_active_vehicles": live_summary.get("max_vehicle_count", 0),
+                    "evlog": Path(failure_evlog_paths[-1]).name if failure_evlog_paths else "",
                     "artifact_base": str(run_base),
                     "error": str(exc).splitlines()[0],
                 }
