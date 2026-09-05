@@ -74,6 +74,40 @@ class Args:
     output_root: str = str(_REPO_ROOT / "output")
     metsr_sim_dir: Optional[str] = None
     pcla_dir: Optional[str] = os.environ.get('PCLA_HOME')
+
+    # PCLA agent selector. Prefer overriding this default from the command line:
+    #
+    #   python demo2.py --pcla-dir /path/to/PCLA --pcla-agent lav_fast
+    #
+    # Runtime selectors use ``<family>_<variant>[_seed]``. Supported selectors:
+    #
+    #   SimLingo:       simlingo_simlingo
+    #   LAV:            lav_fast, lav_lav
+    #   InterFuser:     if_if
+    #   NEAT:           neat_neat, neat_aimbev, neat_aim2dsem, neat_aim2ddepth
+    #   TransFuser V3:  tfv3_tf, tfv3_ltf, tfv3_lf, tfv3_gf
+    #   TransFuser V4:  tfv4_{l6,lav,wp,aim}_{0,1,2}
+    #   TransFuser V5:  tfv5_alltowns, tfv5_notown13
+    #   TransFuser V6:  tfv6_regnet, tfv6_resnet, tfv6_4cameras,
+    #                    tfv6_noradar, tfv6_visiononly, tfv6_notown13
+    #   CaRL:           carl_carl_{0,1}, carl_carlv11
+    #   Roach:          carl_roach_{0,1,2,3,4}
+    #   PlanT:          carl_plant_{0,1,2,3,4}
+    #   PlanT 2:        plant2_plant2_{0,1,2}
+    #   LBC:            lbc_lb, lbc_nc
+    #   World on Rails: wor_lb, wor_nc
+    #   LMDrive:        lmdrive_llava, lmdrive_vicuna, lmdrive_llama
+    #   ThinkTwice:     tt_tt
+    #   ORION:          orion_base
+    #   MindDrive:      minddrive_05b, minddrive_3b
+    #   Autoware:       autoware_v1
+    #
+    # Download weights with the *family* name rather than the full selector,
+    # for example: ``python pcla_functions/download_weights.py --agents tfv5``.
+    # Run that downloader with ``--list`` to see all families. Autoware has no
+    # model weights; it requires the separate ROS 2/Docker stack documented by
+    # PCLA. Agent support does not imply that every family's optional runtime
+    # dependencies or weights are already installed in the active environment.
     pcla_agent: str = 'simlingo_simlingo'
     pcla_route: Optional[str] = None
     export_folder: str = str(_DEFAULT_EXPORT_DIR)

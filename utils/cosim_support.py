@@ -3141,7 +3141,11 @@ class TRACRDashboard:
         state = step_result.get("state") if isinstance(step_result, dict) else None
         carla_actors = 0
         if state is not None:
-            carla_actors = len(state.active_vehicles) + len(state.display_vehicles)
+            carla_actors = (
+                len(state.active_vehicles)
+                + len(state.display_vehicles)
+                + len(getattr(state, "boundary_vehicles", {}))
+            )
         tick = getattr(runtime.metsr, "current_tick", None)
         configured_v2x = len(getattr(runtime, "v2x_vehicle_ids", []) or [])
         if speedy_mode:
@@ -3233,7 +3237,11 @@ class TRACRDemoRuntime:
             self.sensor_panel.close()
         state = self.carla_state
         if state is not None:
-            for store in (state.active_vehicles, state.display_vehicles):
+            for store in (
+                state.active_vehicles,
+                state.display_vehicles,
+                getattr(state, "boundary_vehicles", {}),
+            ):
                 for actor in list(store.values()):
                     try:
                         actor.destroy()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import inspect
 import math
 import os
@@ -75,6 +76,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--town", default="Town05")
     parser.add_argument("--map-locations", default=str(_MAP_ROOT))
+    parser.add_argument(
+        "--opendrive-map",
+        default=None,
+        help="Exact XODR loaded by both Scenic and CosimSimulator.",
+    )
+    parser.add_argument(
+        "--sumo-map",
+        default=None,
+        help="Exact SUMO/METS-R network paired with --opendrive-map.",
+    )
     parser.add_argument("--num-commuters", type=_positive_int, default=100)
     parser.add_argument("--length", type=_positive_int, default=60)
     parser.add_argument("--timestep", type=float, default=0.05)
@@ -100,6 +111,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--attack-min-red", type=int, default=90)
     parser.add_argument("--attack-red-dominance", type=float, default=1.25)
     parser.add_argument("--attack-roi-scale", type=float, default=1.7)
+    parser.add_argument(
+        "--attack-min-patch-pixels",
+        type=_positive_int,
+        default=25,
+        help="Minimum recolored pixels in one camera frame for a meaningful patch.",
+    )
+    parser.add_argument(
+        "--attack-min-valid-frames",
+        type=_positive_int,
+        default=3,
+        help="Meaningful patched camera frames required for a valid attack run.",
+    )
     parser.add_argument("--free-flow-speed-mps", type=float, default=13.4)
 
     parser.add_argument("--pcla-dir", default=os.environ.get("PCLA_HOME"))
@@ -177,6 +200,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         if not value.is_absolute():
             value = _REPO_ROOT / value
         setattr(args, name, str(value.resolve()))
+    map_root = Path(args.map_locations)
+    town_road_dir = map_root / args.town / "facility" / "road"
+    map_dir = town_road_dir if town_road_dir.is_dir() else map_root
+    for name, default_name in (
+        ("opendrive_map", f"{args.town}.xodr"),
+        ("sumo_map", f"{args.town}.net.xml"),
+    ):
+        configured = getattr(args, name)
+        value = Path(configured).expanduser() if configured else map_dir / default_name
+        if not value.is_absolute():
+            value = _REPO_ROOT / value
+        setattr(args, name, str(value.resolve()))
     if args.pcla_route:
         route = Path(args.pcla_route).expanduser()
         if not route.is_absolute():
@@ -198,6 +233,9 @@ class StopSignCandidate:
     same_road_distance_m: float
     road_id: Optional[int]
     route_is_junction: bool
+    route_waypoint: Any = None
+    visual_id: str = ""
+    visual_name: str = ""
 
     @property
     def location_text(self) -> str:
@@ -209,6 +247,11 @@ class StopSignCandidate:
         if self.approach_transform is None:
             return "unavailable"
         loc = self.approach_transform.location
+        return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
+
+    @property
+    def visual_location_text(self) -> str:
+        loc = self.visual_location
         return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
 
     @property
@@ -240,6 +283,10 @@ def _distance(a: Any, b: Any) -> float:
     )
 
 
+def _horizontal_distance(a: Any, b: Any) -> float:
+    return math.hypot(float(a.x) - float(b.x), float(a.y) - float(b.y))
+
+
 def _environment_location(obj: Any) -> Optional[Any]:
     location = getattr(getattr(obj, "bounding_box", None), "location", None)
     if location is not None:
@@ -254,6 +301,94 @@ def _environment_extent(obj: Any) -> float:
         for axis in ("x", "y", "z")
     ]
     return max((value for value in values if 0.05 <= value <= 5.0), default=0.65)
+
+
+def _environment_vertical_extent(obj: Any) -> float:
+    extent = getattr(getattr(obj, "bounding_box", None), "extent", None)
+    return abs(float(getattr(extent, "z", 0.0) or 0.0))
+
+
+def _is_upright_stop_sign(obj: Any) -> bool:
+    """Reject STOP road paint and retain actual elevated sign meshes."""
+    name = str(getattr(obj, "name", "")).lower()
+    if "stop" not in name:
+        return False
+    non_sign_markers = ("stencil", "stopline", "stop_line", "roadmark", "road_mark")
+    if any(marker in name for marker in non_sign_markers):
+        return False
+    if _environment_location(obj) is None:
+        return False
+    # Town05's upright BP_Stop/Sign_Stop meshes have a meaningful vertical
+    # extent; its painted Stencil_STOP objects are essentially flat.
+    return _environment_vertical_extent(obj) >= 0.25
+
+
+def _match_stop_actors_to_signs(
+    actor_routes: Mapping[str, Any],
+    upright_stops: Sequence[Any],
+    maximum_distance_m: float = 15.0,
+) -> Dict[str, Tuple[float, str, Any, Any]]:
+    """Return a deterministic maximum-cardinality, minimum-cost assignment."""
+    visuals = sorted(
+        [
+            (
+            str(getattr(obj, "id", id(obj))),
+            obj,
+            _environment_location(obj),
+            )
+            for obj in upright_stops
+            if _environment_location(obj) is not None
+        ],
+        key=lambda row: row[0],
+    )
+    # mask -> (total XY distance, assignment records)
+    states: Dict[int, Tuple[float, Tuple[Tuple[str, str, Any, Any, float], ...]]] = {
+        0: (0.0, ())
+    }
+    for actor_id in sorted(actor_routes):
+        route = actor_routes[actor_id]
+        updated = dict(states)
+        for mask, (cost, assignments) in states.items():
+            for index, (visual_id, obj, visual) in enumerate(visuals):
+                bit = 1 << index
+                if mask & bit:
+                    continue
+                distance = _horizontal_distance(route, visual)
+                if distance > maximum_distance_m:
+                    continue
+                new_mask = mask | bit
+                new_assignments = assignments + (
+                    (actor_id, visual_id, obj, visual, distance),
+                )
+                candidate_value = (cost + distance, new_assignments)
+                current = updated.get(new_mask)
+                candidate_key = (
+                    candidate_value[0],
+                    tuple((row[0], row[1]) for row in candidate_value[1]),
+                )
+                current_key = (
+                    math.inf,
+                    (),
+                ) if current is None else (
+                    current[0],
+                    tuple((row[0], row[1]) for row in current[1]),
+                )
+                if candidate_key < current_key:
+                    updated[new_mask] = candidate_value
+        states = updated
+
+    _, assignments = min(
+        states.values(),
+        key=lambda value: (
+            -len(value[1]),
+            value[0],
+            tuple((row[0], row[1]) for row in value[1]),
+        ),
+    )
+    return {
+        actor_id: (distance, visual_id, obj, visual)
+        for actor_id, visual_id, obj, visual, distance in assignments
+    }
 
 
 def _copy_location(location: Any, carla_module: Any) -> Any:
@@ -313,11 +448,11 @@ def _find_stop_approach(
     actor: Any,
     route: Any,
     requested_distance_m: float,
-) -> Tuple[Any, float, float, Optional[int], bool]:
+) -> Tuple[Any, float, float, Optional[int], bool, Any]:
     """Find a driving waypoint upstream, favoring a long same-road lead-in."""
     waypoints = _stop_waypoints(world_map, actor, route)
     if not waypoints:
-        return None, 0.0, 0.0, None, False
+        return None, 0.0, 0.0, None, False, None
     route_waypoint = min(
         waypoints,
         key=lambda waypoint: _distance(waypoint.transform.location, route),
@@ -332,7 +467,7 @@ def _find_stop_approach(
     if not distances or not math.isclose(distances[-1], 5.0):
         distances.append(5.0)
 
-    options: List[Tuple[float, float, float, Any]] = []
+    options: List[Tuple[float, float, float, Any, Any]] = []
     same_road_distance = 0.0
     for waypoint in waypoints:
         for requested in distances:
@@ -350,14 +485,14 @@ def _find_stop_approach(
                     actual if getattr(upstream, "road_id", None) == road_id else 0.0
                 )
                 same_road_distance = max(same_road_distance, same_road)
-                options.append((requested, same_road, actual, transform))
+                options.append((requested, same_road, actual, transform, waypoint))
     if not options:
-        return None, 0.0, same_road_distance, road_id, is_junction
-    _, _, actual, transform = max(
+        return None, 0.0, same_road_distance, road_id, is_junction, route_waypoint
+    _, _, actual, transform, route_waypoint = max(
         options,
         key=lambda option: (option[0], option[1], option[2]),
     )
-    return transform, actual, same_road_distance, road_id, is_junction
+    return transform, actual, same_road_distance, road_id, is_junction, route_waypoint
 
 
 def discover_stop_signs(
@@ -382,36 +517,36 @@ def discover_stop_signs(
             sign_objects = list(world.get_environment_objects(label))
         except Exception:
             pass
-    named_stops = [
-        obj for obj in sign_objects
-        if "stop" in str(getattr(obj, "name", "")).lower()
-    ]
-    visual_pool = named_stops or sign_objects
+    upright_stops = [obj for obj in sign_objects if _is_upright_stop_sign(obj)]
 
     world_map = world.get_map()
     raw: List[Dict[str, Any]] = []
+    actor_routes = {
+        actor_id: _stop_trigger_location(actor, carla_module)
+        for actor_id, actor in unique.items()
+    }
+    matches = _match_stop_actors_to_signs(actor_routes, upright_stops)
+
     for actor_id, actor in unique.items():
+        match = matches.get(actor_id)
+        if match is None:
+            # A traffic.stop actor without a nearby physical mesh often
+            # represents only Stencil_STOP road paint. Such a target cannot
+            # support a camera-space color attack and must not be fabricated.
+            continue
+        distance, visual_id, obj, visual = match
         route = _stop_trigger_location(actor, carla_module)
-        nearby = [
-            (_distance(route, location), obj, location)
-            for obj in visual_pool
-            if (location := _environment_location(obj)) is not None
-        ]
-        nearest = min(nearby, default=None, key=lambda item: item[0])
-        if nearest is not None and nearest[0] <= 25.0:
-            distance, obj, visual = nearest
-            extent = _environment_extent(obj)
-            source = f"traffic.stop + environment sign ({distance:.1f} m)"
-        else:
-            actor_location = actor.get_location()
-            visual = carla_module.Location(
-                x=float(actor_location.x),
-                y=float(actor_location.y),
-                z=float(actor_location.z) + 2.25,
-            )
-            extent = 0.65
-            source = "traffic.stop actor"
-        approach, approach_distance, same_road_distance, road_id, is_junction = (
+        visual_name = str(getattr(obj, "name", ""))
+        extent = _environment_extent(obj)
+        source = f"traffic.stop + upright {visual_name} ({distance:.1f} m XY)"
+        (
+            approach,
+            approach_distance,
+            same_road_distance,
+            road_id,
+            is_junction,
+            route_waypoint,
+        ) = (
             _find_stop_approach(world_map, actor, route, approach_distance_m)
         )
         raw.append(
@@ -426,29 +561,44 @@ def discover_stop_signs(
                 "same_road_distance": same_road_distance,
                 "road_id": road_id,
                 "is_junction": is_junction,
+                "route_waypoint": route_waypoint,
+                "visual_id": visual_id,
+                "visual_name": visual_name,
             }
         )
 
-    if not raw:
-        for obj in named_stops:
+    if not raw and not unique:
+        for obj in upright_stops:
             location = _environment_location(obj)
             if location is None:
                 continue
-            approach, approach_distance, same_road_distance, road_id, is_junction = (
+            (
+                approach,
+                approach_distance,
+                same_road_distance,
+                road_id,
+                is_junction,
+                route_waypoint,
+            ) = (
                 _find_stop_approach(world_map, obj, location, approach_distance_m)
             )
+            visual_id = str(getattr(obj, "id", len(raw)))
+            visual_name = str(getattr(obj, "name", ""))
             raw.append(
                 {
-                    "actor_id": str(getattr(obj, "id", len(raw))),
+                    "actor_id": visual_id,
                     "route": location,
                     "visual": location,
                     "extent": _environment_extent(obj),
-                    "source": "named CARLA environment stop sign",
+                    "source": f"upright CARLA environment stop sign {visual_name}",
                     "approach": approach,
                     "approach_distance": approach_distance,
                     "same_road_distance": same_road_distance,
                     "road_id": road_id,
                     "is_junction": is_junction,
+                    "route_waypoint": route_waypoint,
+                    "visual_id": visual_id,
+                    "visual_name": visual_name,
                 }
             )
     raw.sort(
@@ -471,6 +621,9 @@ def discover_stop_signs(
             same_road_distance_m=row["same_road_distance"],
             road_id=row["road_id"],
             route_is_junction=row["is_junction"],
+            route_waypoint=row["route_waypoint"],
+            visual_id=row["visual_id"],
+            visual_name=row["visual_name"],
         )
         for index, row in enumerate(raw)
     ]
@@ -676,6 +829,10 @@ class StopSignColorPatchTap:
         self._png_cache: Dict[str, Tuple[Any, bytes]] = {}
         self.frames_patched = 0
         self.pixels_patched = 0
+        self.projected_frames = 0
+        self.meaningful_patched_frames = 0
+        self.max_pixels_patched_per_frame = 0
+        self.closest_patched_distance_m: Optional[float] = None
         self.last_target_distance_m: Optional[float] = None
         self.minimum_target_distance_m: Optional[float] = None
         original_update = self._original_update
@@ -700,6 +857,7 @@ class StopSignColorPatchTap:
                             array.shape, candidate.visual_extent_m, args.attack_roi_scale,
                         )
                         if projection is not None:
+                            self.projected_frames += 1
                             x0, y0, x1, y1, _ = projection
                             working = np.array(array, copy=True)
                             count = self.recolor_red_bgra(
@@ -711,6 +869,17 @@ class StopSignColorPatchTap:
                                 delivered = working
                                 self.frames_patched += 1
                                 self.pixels_patched += count
+                                self.max_pixels_patched_per_frame = max(
+                                    self.max_pixels_patched_per_frame, count
+                                )
+                                self.closest_patched_distance_m = min(
+                                    distance,
+                                    self.closest_patched_distance_m
+                                    if self.closest_patched_distance_m is not None
+                                    else distance,
+                                )
+                                if count >= args.attack_min_patch_pixels:
+                                    self.meaningful_patched_frames += 1
                     shown = np.asarray(delivered)
                     rgb = shown[:, :, :3][:, :, ::-1].copy()
                     with self._lock:
@@ -741,6 +910,14 @@ class StopSignColorPatchTap:
             region[:, :, 0][mask] = np.maximum(old_red, 128)
             region[:, :, 2][mask] = np.minimum(old_blue, 48)
         return count
+
+    @property
+    def pixels_per_patched_frame(self) -> float:
+        return (
+            0.0
+            if self.frames_patched <= 0
+            else self.pixels_patched / self.frames_patched
+        )
 
     def snapshots(self) -> Dict[str, Tuple[str, bytes, Any]]:
         result: Dict[str, Tuple[str, bytes, Any]] = {}
@@ -993,6 +1170,85 @@ def _call_route_maker(pcla_module: Any, waypoints: Sequence[Any], path: Path) ->
         raise RuntimeError(f"PCLA route_maker did not create {path}")
 
 
+def _waypoint_location(waypoint: Any) -> Optional[Any]:
+    return getattr(getattr(waypoint, "transform", None), "location", None)
+
+
+def _route_distance(waypoints: Sequence[Any], start_index: int = 0) -> float:
+    locations = [
+        location
+        for waypoint in waypoints[start_index:]
+        if (location := _waypoint_location(waypoint)) is not None
+    ]
+    return sum(_distance(first, second) for first, second in zip(locations, locations[1:]))
+
+
+def _route_through_stop_quality(
+    waypoints: Sequence[Any],
+    candidate: StopSignCandidate,
+    minimum_downstream_m: float,
+) -> Optional[Tuple[int, float]]:
+    """Validate one continuous route through the selected stop-sign lane."""
+    target_waypoint = candidate.route_waypoint
+    target_location = (
+        _waypoint_location(target_waypoint)
+        if target_waypoint is not None
+        else candidate.route_location
+    )
+    if target_location is None or len(waypoints) <= 1:
+        return None
+
+    target_road = getattr(target_waypoint, "road_id", candidate.road_id)
+    target_lane = getattr(target_waypoint, "lane_id", None)
+    matches: List[Tuple[float, int]] = []
+    for index, waypoint in enumerate(waypoints):
+        location = _waypoint_location(waypoint)
+        if location is None:
+            continue
+        same_lane = (
+            target_lane is None
+            or (
+                getattr(waypoint, "road_id", None) == target_road
+                and getattr(waypoint, "lane_id", None) == target_lane
+            )
+        )
+        if same_lane:
+            matches.append((_horizontal_distance(location, target_location), index))
+    if not matches:
+        return None
+    target_distance, target_index = min(matches)
+    if target_distance > 5.0:
+        return None
+
+    # Detect the exact failure reproduced in the original route: immediately
+    # after the stop, the stitched route moved 3.5 m sideways and then backward.
+    window_start = max(0, target_index - 5)
+    window_end = min(len(waypoints), target_index + 9)
+    for first, second in zip(
+        waypoints[window_start:window_end],
+        waypoints[window_start + 1:window_end],
+    ):
+        first_location = _waypoint_location(first)
+        second_location = _waypoint_location(second)
+        rotation = getattr(getattr(first, "transform", None), "rotation", None)
+        if first_location is None or second_location is None or rotation is None:
+            continue
+        yaw = math.radians(float(getattr(rotation, "yaw", 0.0)))
+        dx = float(second_location.x) - float(first_location.x)
+        dy = float(second_location.y) - float(first_location.y)
+        longitudinal = dx * math.cos(yaw) + dy * math.sin(yaw)
+        lateral = -dx * math.sin(yaw) + dy * math.cos(yaw)
+        if longitudinal < -0.25:
+            return None
+        if longitudinal < 0.25 and abs(lateral) > 0.5:
+            return None
+
+    downstream_m = _route_distance(waypoints, target_index)
+    if downstream_m < minimum_downstream_m:
+        return None
+    return target_index, downstream_m
+
+
 def generate_route_via_stop(
     pcla_module: Any,
     client: Any,
@@ -1003,35 +1259,75 @@ def generate_route_via_stop(
 ) -> Path:
     world_map = client.get_world().get_map()
     start = ego_actor.get_location()
-    waypoint = world_map.get_waypoint(candidate.route_location, project_to_road=True)
-    target = waypoint.transform.location if waypoint is not None else candidate.route_location
-    first = list(pcla_module.location_to_waypoint(client, start, target))
-    if len(first) <= 1:
-        raise RuntimeError(f"Could not route the PCLA ego to {candidate.label}")
+    target_waypoint = candidate.route_waypoint or world_map.get_waypoint(
+        candidate.route_location, project_to_road=True
+    )
+    if target_waypoint is None:
+        raise RuntimeError(f"Could not project {candidate.label} onto a driving lane")
+    target = target_waypoint.transform.location
 
-    destinations = sorted(
+    # Prefer destinations reached by following the selected stop lane forward.
+    # Each candidate is planned once from start to destination; independently
+    # planned legs are never concatenated at the ambiguous stop trigger.
+    desired = max(10.0, float(min_distance_m))
+    requested_distances: List[float] = []
+    for value in (desired, desired * 0.8, desired * 0.6, desired * 0.4, 50.0, 25.0):
+        value = max(10.0, value)
+        if not any(math.isclose(value, seen, abs_tol=0.1) for seen in requested_distances):
+            requested_distances.append(value)
+    options: List[Tuple[Any, float, str]] = []
+    for requested in requested_distances:
+        try:
+            downstream = list(target_waypoint.next(requested) or [])
+        except Exception:
+            downstream = []
+        for waypoint in downstream:
+            location = _waypoint_location(waypoint)
+            if location is not None:
+                options.append((location, max(10.0, requested * 0.8), "forward lane"))
+
+    spawn_points = sorted(
         world_map.get_spawn_points(),
-        key=lambda transform: _distance(target, transform.location),
+        key=lambda transform: _horizontal_distance(target, transform.location),
         reverse=True,
     )
-    preferred = [
-        transform for transform in destinations
-        if _distance(target, transform.location) >= min_distance_m
-    ]
+    options.extend(
+        (transform.location, 10.0, "map spawn")
+        for transform in spawn_points
+        if _horizontal_distance(target, transform.location) >= 10.0
+    )
+
+    deduplicated: List[Tuple[Any, float, str]] = []
+    seen_destinations: set[Tuple[float, float]] = set()
+    for location, required_downstream, source in options:
+        key = (round(float(location.x), 1), round(float(location.y), 1))
+        if key not in seen_destinations:
+            deduplicated.append((location, required_downstream, source))
+            seen_destinations.add(key)
+
     last_error: Optional[BaseException] = None
-    for destination in (preferred or destinations)[:30]:
+    for destination, required_downstream, source in deduplicated:
         try:
-            second = list(
-                pcla_module.location_to_waypoint(client, target, destination.location)
+            waypoints = list(
+                pcla_module.location_to_waypoint(client, start, destination)
             )
-            if len(second) <= 1:
+            quality = _route_through_stop_quality(
+                waypoints, candidate, required_downstream
+            )
+            if quality is None:
                 continue
-            _call_route_maker(pcla_module, first + second[1:], output_path)
+            target_index, downstream_m = quality
+            _call_route_maker(pcla_module, waypoints, output_path)
+            print(
+                f"Continuous PCLA route via {candidate.label}: "
+                f"{len(waypoints)} waypoints, stop waypoint {target_index}, "
+                f"{downstream_m:.1f} m downstream ({source})."
+            )
             return output_path
         except Exception as exc:
             last_error = exc
     raise RuntimeError(
-        f"Could not generate a PCLA route through {candidate.label}"
+        f"Could not generate a continuous PCLA route through {candidate.label}"
     ) from last_error
 
 
@@ -1045,6 +1341,15 @@ class RunStats:
     speed_samples: int = 0
     max_bubble_queue: int = 0
     max_carla_actors: int = 0
+    target_seen: bool = False
+    stopped_at_target: bool = False
+    resumed_after_stop: bool = False
+    crossed_stop: bool = False
+    stop_zone_stopped_s: float = 0.0
+    current_stop_dwell_s: float = 0.0
+    max_stop_dwell_s: float = 0.0
+    signed_stop_progress_m: Optional[float] = None
+    stop_lateral_m: Optional[float] = None
 
     @property
     def avg_network_speed_mps(self) -> Optional[float]:
@@ -1109,6 +1414,15 @@ class RunRuntime:
         if self.controller is not None:
             return
         ego, actor = self._ego()
+        # METS-R ownership transitions can leave a zero constant-velocity
+        # constraint behind. Releasing it does not command motion; PCLA remains
+        # the sole source of throttle, brake, and steering.
+        disable_constant_velocity = getattr(actor, "disable_constant_velocity", None)
+        if callable(disable_constant_velocity):
+            try:
+                disable_constant_velocity()
+            except Exception:
+                pass
         if self.args.pcla_route:
             route_path = Path(self.args.pcla_route)
         else:
@@ -1160,7 +1474,17 @@ class RunRuntime:
 
     def before_step(self) -> None:
         self._ensure_controller()
+
+    def apply_control(self) -> None:
+        self._ensure_controller()
         assert self.controller is not None
+        _, actor = self._ego()
+        disable_constant_velocity = getattr(actor, "disable_constant_velocity", None)
+        if callable(disable_constant_velocity):
+            try:
+                disable_constant_velocity()
+            except Exception:
+                pass
         self.last_control = self.controller.step()
 
     def _world_vehicle_speeds(self) -> List[float]:
@@ -1233,8 +1557,51 @@ class RunRuntime:
         self.stats.max_bubble_queue = max(self.stats.max_bubble_queue, queue)
         self.stats.max_carla_actors = max(self.stats.max_carla_actors, actors)
         self.stats.queue_vehicle_s += queue * self.args.timestep
-        if pcla_demo._speed_kmh(actor) < 1.0:
+        speed_kmh = pcla_demo._speed_kmh(actor)
+        if speed_kmh < 1.0:
             self.stats.ego_stopped_s += self.args.timestep
+        actor_location = actor.get_location()
+        target_waypoint = self.spec.candidate.route_waypoint
+        target_transform = getattr(target_waypoint, "transform", None)
+        target_location = getattr(target_transform, "location", None)
+        if target_location is None:
+            target_location = self.spec.candidate.route_location
+        target_distance = _horizontal_distance(actor_location, target_location)
+        if target_distance <= 8.0:
+            self.stats.target_seen = True
+            if speed_kmh < 1.0:
+                self.stats.stopped_at_target = True
+                self.stats.stop_zone_stopped_s += self.args.timestep
+                self.stats.current_stop_dwell_s += self.args.timestep
+                self.stats.max_stop_dwell_s = max(
+                    self.stats.max_stop_dwell_s,
+                    self.stats.current_stop_dwell_s,
+                )
+            else:
+                self.stats.current_stop_dwell_s = 0.0
+        else:
+            self.stats.current_stop_dwell_s = 0.0
+        if self.stats.stopped_at_target and speed_kmh >= 3.6:
+            self.stats.resumed_after_stop = True
+
+        rotation = getattr(target_transform, "rotation", None)
+        if rotation is not None:
+            yaw = math.radians(float(getattr(rotation, "yaw", 0.0)))
+            dx = float(actor_location.x) - float(target_location.x)
+            dy = float(actor_location.y) - float(target_location.y)
+            progress = dx * math.cos(yaw) + dy * math.sin(yaw)
+            lateral = -dx * math.sin(yaw) + dy * math.cos(yaw)
+            previous_progress = self.stats.signed_stop_progress_m
+            self.stats.signed_stop_progress_m = progress
+            self.stats.stop_lateral_m = lateral
+            lane_width = float(getattr(target_waypoint, "lane_width", 3.5) or 3.5)
+            if (
+                self.stats.target_seen
+                and abs(lateral) <= max(4.0, lane_width)
+                and previous_progress is not None
+                and previous_progress < 0.0 <= progress
+            ):
+                self.stats.crossed_stop = True
         if self.stats.steps % self.args.dashboard_every == 0:
             self._sample_congestion()
 
@@ -1292,6 +1659,11 @@ class RunRuntime:
     def _telemetry(self, actor: Any) -> Dict[str, Any]:
         tap = self.tap
         avg_speed = self.stats.avg_network_speed_mps
+        requested = self.last_control
+        try:
+            applied = actor.get_control()
+        except Exception:
+            applied = None
         return {
             "run": self.spec.run_number,
             "seed": self.spec.seed,
@@ -1299,6 +1671,10 @@ class RunRuntime:
             "target_stop": self.spec.candidate.index,
             "target_id": self.spec.candidate.actor_id,
             "target_xyz": self.spec.candidate.location_text,
+            "target_route_xyz": self.spec.candidate.location_text,
+            "target_visual_xyz": self.spec.candidate.visual_location_text,
+            "target_visual_id": self.spec.candidate.visual_id,
+            "target_visual_name": self.spec.candidate.visual_name,
             "target_road": self.spec.candidate.road_id,
             "initial_xyz": self.spec.candidate.initial_location_text,
             "target_distance_m": (
@@ -1308,6 +1684,29 @@ class RunRuntime:
             "patched_frames": 0 if tap is None else tap.frames_patched,
             "patched_pixels": 0 if tap is None else tap.pixels_patched,
             "ego_speed_kmh": f"{pcla_demo._speed_kmh(actor):.1f}",
+            "pcla_throttle": (
+                "n/a" if requested is None
+                else f"{float(getattr(requested, 'throttle', 0.0)):.3f}"
+            ),
+            "pcla_brake": (
+                "n/a" if requested is None
+                else f"{float(getattr(requested, 'brake', 0.0)):.3f}"
+            ),
+            "applied_throttle": (
+                "n/a" if applied is None
+                else f"{float(getattr(applied, 'throttle', 0.0)):.3f}"
+            ),
+            "applied_brake": (
+                "n/a" if applied is None
+                else f"{float(getattr(applied, 'brake', 0.0)):.3f}"
+            ),
+            "stop_progress_m": (
+                "n/a" if self.stats.signed_stop_progress_m is None
+                else f"{self.stats.signed_stop_progress_m:.1f}"
+            ),
+            "stop_zone_stopped_s": f"{self.stats.stop_zone_stopped_s:.1f}",
+            "max_stop_dwell_s": f"{self.stats.max_stop_dwell_s:.1f}",
+            "stop_outcome": self._outcome(),
             "network_speed_kmh": "n/a" if avg_speed is None else f"{avg_speed * 3.6:.1f}",
             "network_delay_s": f"{self.stats.network_delay_s:.1f}",
             "queue_vehicle_s": f"{self.stats.queue_vehicle_s:.1f}",
@@ -1315,6 +1714,32 @@ class RunRuntime:
             "max_bubble_queue": self.stats.max_bubble_queue,
             "best_so_far": self.best_provider(),
         }
+
+    def _outcome(self) -> str:
+        tap = self.tap
+        entered_attack_range = (
+            tap is not None
+            and tap.minimum_target_distance_m is not None
+            and tap.minimum_target_distance_m <= self.args.attack_max_distance_m
+        )
+        if (
+            self.spec.attack_enabled
+            and entered_attack_range
+            and tap is not None
+            and tap.frames_patched == 0
+        ):
+            return "unpatchable"
+        if self.stats.crossed_stop:
+            return (
+                "stopped_then_resumed"
+                if self.stats.stopped_at_target
+                else "passed_without_stop"
+            )
+        if self.stats.stopped_at_target and self.stats.max_stop_dwell_s >= 5.0:
+            return "stalled_at_line"
+        if self.stats.target_seen:
+            return "approached_no_crossing"
+        return "missed_target"
 
     def after_step(self) -> None:
         _, actor = self._ego()
@@ -1346,6 +1771,9 @@ class RunRuntime:
         initial_transform = candidate.approach_transform
         initial_location = initial_transform.location
         initial_rotation = initial_transform.rotation
+        outcome = self._outcome()
+        if status == "finished" and outcome == "unpatchable":
+            status = "unpatchable"
         self.summary = {
             "run": self.spec.run_number,
             "seed": self.spec.seed,
@@ -1364,6 +1792,11 @@ class RunRuntime:
             "target_x": float(candidate.route_location.x),
             "target_y": float(candidate.route_location.y),
             "target_z": float(candidate.route_location.z),
+            "visual_id": candidate.visual_id,
+            "visual_name": candidate.visual_name,
+            "visual_x": float(candidate.visual_location.x),
+            "visual_y": float(candidate.visual_location.y),
+            "visual_z": float(candidate.visual_location.z),
             "phase": self.spec.phase,
             "attack_enabled": self.spec.attack_enabled,
             "patched_frames": 0 if tap is None else tap.frames_patched,
@@ -1375,10 +1808,27 @@ class RunRuntime:
             "network_delay_s": self.stats.network_delay_s,
             "queue_vehicle_s": self.stats.queue_vehicle_s,
             "ego_stopped_s": self.stats.ego_stopped_s,
+            "stop_zone_stopped_s": self.stats.stop_zone_stopped_s,
+            "max_stop_dwell_s": self.stats.max_stop_dwell_s,
+            "stop_progress_m": self.stats.signed_stop_progress_m,
+            "stop_lateral_m": self.stats.stop_lateral_m,
+            "target_seen": self.stats.target_seen,
+            "stopped_at_target": self.stats.stopped_at_target,
+            "resumed_after_stop": self.stats.resumed_after_stop,
+            "crossed_stop": self.stats.crossed_stop,
+            "stop_outcome": outcome,
             "congestion_score_s": self.stats.congestion_score_s,
             "max_bubble_queue": self.stats.max_bubble_queue,
             "max_carla_actors": self.stats.max_carla_actors,
             "route": "" if self.route_path is None else str(self.route_path),
+            "pcla_throttle": (
+                None if self.last_control is None
+                else float(getattr(self.last_control, "throttle", 0.0))
+            ),
+            "pcla_brake": (
+                None if self.last_control is None
+                else float(getattr(self.last_control, "brake", 0.0))
+            ),
             "attack_delta_s": None,
             "rank": None,
             "error": error,
@@ -1419,7 +1869,7 @@ def install_runtime_hook(simulator: Any, holder: RuntimeHolder) -> None:
     if simulation_cls is None:
         raise RuntimeError("Could not find Scenic CosimSimulation for demo4 hooks")
 
-    patch_version = 1
+    patch_version = 2
     if getattr(simulation_cls, "_tracr_demo4_patch_version", 0) < patch_version:
         original_step = getattr(
             simulation_cls, "_tracr_demo4_original_step", simulation_cls.step
@@ -1443,6 +1893,9 @@ def install_runtime_hook(simulator: Any, holder: RuntimeHolder) -> None:
                 runtime.attach(self)
             runtime.before_step()
             result = original_step(self, *args, **kwargs)
+            # Apply PCLA after Scenic/METS-R has advanced and transferred
+            # actors, making PCLA the final control writer for the next tick.
+            runtime.apply_control()
             runtime.after_step()
             return result
 
@@ -1481,11 +1934,16 @@ def install_runtime_hook(simulator: Any, holder: RuntimeHolder) -> None:
 _RESULT_FIELDS = [
     "run", "seed", "status", "rank", "candidate_index", "candidate_id",
     "road_id", "route_is_junction", "target_x", "target_y", "target_z",
+    "visual_id", "visual_name", "visual_x", "visual_y", "visual_z",
     "initial_x", "initial_y", "initial_z", "initial_carla_yaw",
     "approach_distance_m", "same_road_distance_m", "candidate_source", "phase",
     "attack_enabled", "patched_frames", "patched_pixels",
     "minimum_target_distance_m", "avg_network_speed_mps", "network_delay_s",
     "queue_vehicle_s", "ego_stopped_s", "congestion_score_s",
+    "stop_zone_stopped_s", "max_stop_dwell_s", "stop_progress_m",
+    "stop_lateral_m", "target_seen",
+    "stopped_at_target", "resumed_after_stop", "crossed_stop", "stop_outcome",
+    "pcla_throttle", "pcla_brake",
     "attack_delta_s", "max_bubble_queue", "max_carla_actors", "route",
     "artifact_base", "error",
 ]
@@ -1494,7 +1952,11 @@ _RESULT_FIELDS = [
 def update_rankings(rows: List[Dict[str, Any]], paired: bool) -> None:
     by_candidate: Dict[int, Dict[str, Dict[str, Any]]] = {}
     for row in rows:
-        if row.get("status") == "finished":
+        attack_is_valid = (
+            row.get("phase") != "attack"
+            or int(row.get("patched_frames") or 0) > 0
+        )
+        if row.get("status") == "finished" and attack_is_valid:
             by_candidate.setdefault(int(row["candidate_index"]), {})[
                 str(row["phase"])
             ] = row
@@ -1541,7 +2003,6 @@ def best_result_text(rows: Sequence[Mapping[str, Any]], paired: bool) -> str:
 
 
 def _simulator_kwargs(args: argparse.Namespace, cls: Any, run_name: Path) -> Dict[str, Any]:
-    map_dir = Path(args.map_locations) / args.town / "facility" / "road"
     kwargs: Dict[str, Any] = {
         "metsr_host": args.metsr_host,
         "metsr_port": args.metsr_port,
@@ -1549,8 +2010,8 @@ def _simulator_kwargs(args: argparse.Namespace, cls: Any, run_name: Path) -> Dic
         "carla_port": args.carla_port,
         "timeout": args.carla_timeout_s,
         "carla_map": args.town,
-        "xml_map": str(map_dir / f"{args.town}.net.xml"),
-        "map_path": str(map_dir / f"{args.town}.xodr"),
+        "xml_map": args.sumo_map,
+        "map_path": args.opendrive_map,
         "timestep": args.timestep,
         "bubble_size": args.bubble_size,
         "run_name": str(run_name),
@@ -1588,12 +2049,11 @@ def _compile_scenario(
 ) -> Any:
     set_debugging_options(verbosity=args.verbosity, fullBacktrace=False)
     set_seed(args.seed)
-    map_dir = Path(args.map_locations) / args.town / "facility" / "road"
     params = {
         "address": args.address,
         "town": args.town,
-        "map": str(map_dir / f"{args.town}.xodr"),
-        "xml_map": str(map_dir / f"{args.town}.net.xml"),
+        "map": args.opendrive_map,
+        "xml_map": args.sumo_map,
         "num_commuters": args.num_commuters,
         "length": args.length,
         "timestep": args.timestep,
@@ -1615,6 +2075,34 @@ def _compile_scenario(
         mode2D=True,
         params=params,
     )
+
+
+def _verify_carla_opendrive(args: argparse.Namespace, world: Any) -> str:
+    """Fail before Scenic compilation if CARLA and the selected XODR differ."""
+    path = Path(args.opendrive_map)
+    if not path.is_file():
+        raise FileNotFoundError(f"OpenDRIVE map does not exist: {path}")
+    sumo_path = Path(args.sumo_map)
+    if not sumo_path.is_file():
+        raise FileNotFoundError(f"SUMO/METS-R map does not exist: {sumo_path}")
+    world_map = world.get_map()
+    live_opendrive = world_map.to_opendrive()
+    selected_bytes = path.read_bytes()
+    live_bytes = live_opendrive.encode("utf-8")
+    selected_digest = hashlib.sha256(selected_bytes).hexdigest()
+    live_digest = hashlib.sha256(live_bytes).hexdigest()
+    if selected_digest != live_digest:
+        raise RuntimeError(
+            f"OpenDRIVE mismatch: Scenic/Cosim selected {path} "
+            f"(sha256 {selected_digest[:12]}), but CARLA {world_map.name} exposes "
+            f"sha256 {live_digest[:12]}. Pass --opendrive-map for the CARLA map "
+            "actually loaded by the server."
+        )
+    print(
+        f"Verified Scenic/CARLA OpenDRIVE: {path} "
+        f"(sha256 {selected_digest[:12]})."
+    )
+    return selected_digest
 
 
 def _start_stream(client: Any, args: argparse.Namespace) -> str:
@@ -1680,6 +2168,7 @@ def run(args: argparse.Namespace) -> int:
         simulator = CosimSimulator(
             **_simulator_kwargs(args, CosimSimulator, export_dir / "demo4_pending")
         )
+        _verify_carla_opendrive(args, simulator.world)
         discovered = discover_stop_signs(
             simulator.world,
             RunRuntime._carla_module(),

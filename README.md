@@ -153,6 +153,32 @@ python tutorials/cosim_example.py -r configs/run_cosim_CARLAT1.json -v
 
 CARLA settings such as `carla_dir`, `carla_host`, `carla_port`, and `carla_map` are defined in the selected run config under [`configs/`](configs/).
 
+The co-simulation bridge requires METS-R SIM commit
+[`6b360bc`](https://github.com/umnilab/METS-R_SIM/commit/6b360bc7c6999c11cba536e8f7e20f89fac3cb2f)
+or newer. `onConnector` becomes false when a vehicle leaves the connector.
+Native vehicles near downstream road entries are exposed by
+`query_boundary_vehicle()` (wire message
+`boundaryVehicle`, simulator handler `queryBoundaryVeh`):
+
+```python
+controlled = metsr.query_cosim_vehicle()["data"]
+boundary = metsr.query_boundary_vehicle()["data"]
+if boundary:
+    boundary_poses = metsr.query_vehicle(
+        id=[vehicle["vehicleId"] for vehicle in boundary],
+        private_veh=[vehicle["isPrivate"] for vehicle in boundary],
+        transform_coords=True,
+    )["data"]
+```
+
+Boundary records use the co-simulation vehicle schema but retain native
+road/lane IDs and `controlMode="native"`. METS-R selects vehicles strictly less
+than 1.2 vehicle lengths from their lane's entry. `step_carla_metsr_cosim`
+automatically mirrors these blockers before each CARLA tick, even with
+`display_all=False`, and removes them when they leave the boundary. Their
+CARLA actors have autopilot and physics disabled and follow METS-R poses.
+Only externally owned vehicles send poses through `teleport_cosim_vehicle`.
+
 ## Packet-level V2X Backends
 
 `omnetpp_bridge/` now contains separate implementations rather than one

@@ -54,6 +54,9 @@ class CarlaCosimState:
       entered: dict = field(default_factory=dict)
       waiting_vehicles: set = field(default_factory=set)
       transition_failures: dict = field(default_factory=dict)
+      # Native mirrors are keyed by (visible ID, isPrivate): the two ID spaces
+      # can overlap. These actors never send authoritative poses back to METS-R.
+      boundary_vehicles: dict = field(default_factory=dict)
 
 
 def set_overlook_camera(world, x=0.0, y=0.0, z=300.0, yaw=-90.0, pitch=-90.0):
@@ -646,6 +649,87 @@ def _sync_active_carla_vehicle(
       )
 
 
+def sync_carla_boundary_vehicles(
+      metsr,
+      world,
+      traffic_manager,
+      state,
+      transform_coords=True,
+      display_all=False,
+      verbose=False,
+):
+      """Mirror native downstream blockers before CARLA advances.
+
+      The simulator determines boundary membership. Actors follow METS-R poses
+      with autopilot and physics disabled, so they cannot drive independently
+      or acquire co-simulation ownership. Re-query on every step to retire
+      mirrors as soon as their native vehicles clear the boundary.
+      """
+      response = metsr.query_boundary_vehicle()
+      vehicles_by_key = {
+            (record["vehicleId"], record["isPrivate"]): record
+            for record in response.get("data", [])
+      }
+      for key in list(state.boundary_vehicles):
+            if key not in vehicles_by_key:
+                  actor = state.boundary_vehicles.pop(key)
+                  veh_id, private_veh = key
+                  if display_all and private_veh and veh_id not in state.display_vehicles:
+                        state.display_vehicles[veh_id] = actor
+                  else:
+                        destroy_carla_actor(actor)
+
+      if not vehicles_by_key:
+            return {"boundary_vehicles": [], "boundary_vehicle_states": []}
+
+      keys = list(vehicles_by_key)
+      vehicle_response = metsr.query_vehicle(
+            id=[key[0] for key in keys],
+            private_veh=[key[1] for key in keys],
+            transform_coords=transform_coords,
+      )
+      vehicle_states = vehicle_response.get("data", [])
+      if len(vehicle_states) != len(keys):
+            raise RuntimeError("Incomplete vehicle response for native boundary mirrors")
+      for key, vehicle_state in zip(keys, vehicle_states):
+            veh_id, private_veh = key
+            if vehicle_state.get("status", "ok") != "ok" \
+                        or vehicle_state.get("onRoad") is False:
+                  destroy_carla_actor(state.boundary_vehicles.pop(key, None))
+                  continue
+            actor = state.boundary_vehicles.get(key)
+            if actor is None and private_veh:
+                  actor = state.display_vehicles.pop(veh_id, None)
+            if actor is not None:
+                  try:
+                        update_carla_vehicle_from_metsr(world, actor, vehicle_state)
+                  except RuntimeError:
+                        destroy_carla_actor(actor)
+                        state.boundary_vehicles.pop(key, None)
+                        actor = None
+            if actor is None:
+                  actor = spawn_carla_vehicle(
+                        world,
+                        traffic_manager,
+                        veh_id,
+                        private_veh,
+                        vehicle_state,
+                        autopilot=False,
+                        ignore_lights_percentage=None,
+                        verbose=verbose,
+                  )
+            if actor is not None:
+                  actor.set_autopilot(False)
+                  actor.set_target_velocity(carla.Vector3D(x=0.0, y=0.0, z=0.0))
+                  actor.set_simulate_physics(False)
+                  state.boundary_vehicles[key] = actor
+
+      return {
+            "boundary_vehicles": list(vehicles_by_key.values()),
+            "boundary_vehicle_states": vehicle_states,
+      }
+
+
 def step_carla_metsr_cosim(
       metsr,
       world,
@@ -665,7 +749,22 @@ def step_carla_metsr_cosim(
       metsr_poll_timeout=5,
       verbose=False,
 ):
+      """Advance both simulators with native boundary blockers visible in CARLA.
+
+      The returned ``boundary_vehicles`` and ``boundary_vehicle_states`` are
+      the native snapshot used before this CARLA tick. ``cosim_vehicles`` and
+      ``vehicle_states`` retain their existing post-METS-R-tick semantics.
+      """
       state = state or CarlaCosimState()
+      boundary_result = sync_carla_boundary_vehicles(
+            metsr,
+            world,
+            traffic_manager,
+            state,
+            transform_coords=transform_coords,
+            display_all=display_all,
+            verbose=verbose,
+      )
       world.tick()
 
       results = []
@@ -709,6 +808,11 @@ def step_carla_metsr_cosim(
             private_flags,
             vehicle_states,
       ):
+            # A boundary road may have become controlled since the last query.
+            # Remove the native mirror before spawning an externally owned actor.
+            destroy_carla_actor(
+                  state.boundary_vehicles.pop((cosim_id, private_flag), None)
+            )
             if cosim_id in state.active_vehicles:
                   route = cosim_vehicle.get(
                         "routeRoadIds"
@@ -774,6 +878,8 @@ def step_carla_metsr_cosim(
                   batch_states = batch_response.get("data", [])
 
                   for veh_id, vehicle_state in zip(batch_ids, batch_states):
+                        if (veh_id, True) in state.boundary_vehicles:
+                              continue
                         if veh_id not in state.active_vehicles and veh_id not in state.display_vehicles:
                               if vehicle_state.get("state", 0) > 0:
                                     spawn_carla_vehicle(
@@ -800,4 +906,5 @@ def step_carla_metsr_cosim(
             "vehicles": results,
             "cosim_vehicles": cosim_vehicles,
             "vehicle_states": vehicle_states,
+            **boundary_result,
       }

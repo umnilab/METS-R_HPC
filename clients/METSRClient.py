@@ -2551,8 +2551,12 @@ class METSRClient:
               'segmentId': <str>   physical or connector segment ID,
               'connectorId': <str> present while on a connector,
               'onConnector': <bool>,
-              'laneIndex':    <int> compact lane index, or -1 on a connector
+              'laneIndex':    <int> compact lane index, or None on a connector
             }
+
+        Connector occupancy ends when the vehicle leaves that segment. Native
+        vehicles just beyond a controlled connector are returned separately by
+        :meth:`query_boundary_vehicle` and remain under METS-R control.
 
         Returns
         -------
@@ -2566,6 +2570,33 @@ class METSRClient:
 
     # Historical camel-case spelling retained for source compatibility.
     query_coSimVehicle = query_cosim_vehicle
+
+    def query_boundary_vehicle(self):
+        """Query native vehicles near exits of co-simulation connectors.
+
+        Sends ``boundaryVehicle`` (the simulator's ``queryBoundaryVeh`` handler)
+        without input data. Each entry in ``data`` uses the same bridge schema
+        as :meth:`query_cosim_vehicle`: ``vehicleId``, ``isPrivate``,
+        ``coordinateTrail``, ``routeRoadIds``, and road/lane/control fields.
+
+        These vehicles are on native physical roads immediately downstream of
+        controlled connectors, strictly less than 1.2 vehicle lengths from
+        their current lane's entry. ``controlMode`` is ``native`` and
+        ``onConnector`` is false. Mirror them as obstacles in the external
+        simulator; they remain METS-R controlled.
+        Use :meth:`query_vehicle` with the returned IDs and private flags to
+        obtain current poses in the desired coordinate system.
+
+        Returns ``{'messageType': 'boundaryVehicle', 'data': [...]}``, with an
+        empty list when there are no qualifying vehicles.
+        """
+        msg = {"messageType": "boundaryVehicle"}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["messageType"] == "boundaryVehicle", res["messageType"]
+        return res
+
+    query_boundaryVehicle = query_boundary_vehicle
+    queryBoundaryVeh = query_boundary_vehicle
 
     def query_cosim_roads(self):
         """Query every physical road and connector controlled by co-simulation.
@@ -4103,7 +4134,7 @@ class METSRClient:
 
         Notes
         -----
-        A temporarily reserved or occupied entry lane is reported per record
+        A temporarily blocked or occupied entry lane is reported per record
         as ``status='error'`` with ``retryable=True`` and an ``errorCode``.
         """
         msg = {"messageType": "enterRoadFromQueue", "data": []}

@@ -18,6 +18,7 @@ from clients.METSRClient import METSRClient
 from utils.carla_util import (
     CarlaCosimState,
     configure_metsr_cosim_roads,
+    destroy_carla_actor,
     open_carla,
     release_ready_cosim_vehicles_from_queue,
     set_overlook_camera,
@@ -527,6 +528,10 @@ def run_cosimulation(config, carla_client, carla_tm):
     except KeyboardInterrupt:
         print("simulation interrupted by user")
     finally:
+        for store in (state.active_vehicles, state.display_vehicles, state.boundary_vehicles):
+            for actor in list(store.values()):
+                destroy_carla_actor(actor)
+            store.clear()
         print("Terminating METS-R client and visualization server.")
         shutdown_metsr(metsr)
 

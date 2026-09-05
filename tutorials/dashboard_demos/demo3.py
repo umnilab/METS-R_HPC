@@ -1033,7 +1033,11 @@ def run(args: argparse.Namespace) -> int:
                     camera_views = controller.camera_snapshots()
 
             if dashboard_now and dashboard is not None:
-                actor_count = len(state.active_vehicles) + len(state.display_vehicles)
+                actor_count = (
+                    len(state.active_vehicles)
+                    + len(state.display_vehicles)
+                    + len(getattr(state, "boundary_vehicles", {}))
+                )
                 speed_kmh = _speed_kmh(ego_actor)
                 current_tick = getattr(metsr, "current_tick", loop_index)
                 pcla_state = "driving" if controller is not None else "waiting for ego"
@@ -1125,7 +1129,11 @@ def run(args: argparse.Namespace) -> int:
         if controller is not None:
             controller.close()
         if state is not None:
-            for store in (state.active_vehicles, state.display_vehicles):
+            for store in (
+                state.active_vehicles,
+                state.display_vehicles,
+                getattr(state, "boundary_vehicles", {}),
+            ):
                 for actor in list(store.values()):
                     try:
                         deps.destroy_carla_actor(actor)
