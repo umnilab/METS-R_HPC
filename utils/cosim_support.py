@@ -445,6 +445,7 @@ class CarlaSensorPanel:
         self.vehicle_camera_parent_id = None
         self.target_actor_id = None
         self.target_vehicle_id = None
+        self._sensor_spawn_frames = {}
         self.overhead_camera_z = 205.8
         self.overhead_camera_yaw = -90.0
         self.overhead_camera_pitch = -90.0
@@ -458,6 +459,21 @@ class CarlaSensorPanel:
         self.latest_vehicle_camera_frame = None
         self.latest_lidar_frame = None
         self.latest_lidar_yaw = None
+
+    def _remember_sensor_spawn(self, actor):
+        self._sensor_spawn_frames[actor.id] = self.world.get_snapshot().frame
+
+    def _sensor_is_available(self, actor):
+        if actor.is_alive:
+            return True
+        # CARLA's actor state comes from the last tick. A successful spawn is
+        # usable immediately, even though is_alive is false until the next tick.
+        spawn_frame = self._sensor_spawn_frames.get(actor.id)
+        return spawn_frame is not None and self.world.get_snapshot().frame <= spawn_frame
+
+    def _retire_sensor(self, actor):
+        self.destroy_actor(actor)
+        self._sensor_spawn_frames.pop(actor.id, None)
 
     def spawn_overhead_camera(
         self,
@@ -484,6 +500,7 @@ class CarlaSensorPanel:
             self.carla.Rotation(pitch=float(pitch), yaw=float(yaw), roll=0.0),
         )
         self.camera_actor = self.world.spawn_actor(blueprint, transform)
+        self._remember_sensor_spawn(self.camera_actor)
         self.camera_actor.listen(self._on_camera)
         return self.camera_actor
 
@@ -527,13 +544,13 @@ class CarlaSensorPanel:
             return None
         if self.vehicle_camera_actor is not None and self.vehicle_camera_parent_id == parent_id:
             try:
-                if self.vehicle_camera_actor.is_alive:
+                if self._sensor_is_available(self.vehicle_camera_actor):
                     self._sync_vehicle_camera_transform(parent_actor, x=x, z=z, pitch=pitch)
                     return self.vehicle_camera_actor
             except RuntimeError:
                 pass
         if self.vehicle_camera_actor is not None:
-            self.destroy_actor(self.vehicle_camera_actor)
+            self._retire_sensor(self.vehicle_camera_actor)
             self.vehicle_camera_actor = None
             self.vehicle_camera_parent_id = None
             self.latest_vehicle_camera = None
@@ -545,6 +562,7 @@ class CarlaSensorPanel:
         transform = self._vehicle_camera_transform(parent_actor, x=x, z=z, pitch=pitch)
         self.vehicle_camera_actor = self.world.spawn_actor(blueprint, transform)
         self.vehicle_camera_parent_id = parent_id
+        self._remember_sensor_spawn(self.vehicle_camera_actor)
         self.vehicle_camera_actor.listen(self._on_vehicle_camera)
         return self.vehicle_camera_actor
 
@@ -590,12 +608,12 @@ class CarlaSensorPanel:
         )
         if self.lidar_actor is not None and self.lidar_parent_id == parent_id:
             try:
-                if self.lidar_actor.is_alive and self.lidar_settings == settings:
+                if self._sensor_is_available(self.lidar_actor) and self.lidar_settings == settings:
                     return self.lidar_actor
             except RuntimeError:
                 pass
         if self.lidar_actor is not None:
-            self.destroy_actor(self.lidar_actor)
+            self._retire_sensor(self.lidar_actor)
             self.lidar_actor = None
             self.lidar_parent_id = None
             self.lidar_settings = None
@@ -627,6 +645,7 @@ class CarlaSensorPanel:
         self.lidar_settings = settings
         self.lidar_range = float(lidar_range)
         self.lidar_attenuation_rate = float(atmosphere_attenuation_rate)
+        self._remember_sensor_spawn(self.lidar_actor)
         self.lidar_actor.listen(self._on_lidar)
         return self.lidar_actor
 
@@ -764,7 +783,7 @@ class CarlaSensorPanel:
     def close(self):
         for actor in (self.camera_actor, self.vehicle_camera_actor, self.lidar_actor):
             if actor is not None:
-                self.destroy_actor(actor)
+                self._retire_sensor(actor)
         self.camera_actor = None
         self.vehicle_camera_actor = None
         self.lidar_actor = None

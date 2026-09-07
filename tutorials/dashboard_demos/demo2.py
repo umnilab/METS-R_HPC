@@ -1080,6 +1080,46 @@ class VizRenderWorker:
             return message, None
 
 
+def install_scenic_sensor_lifecycle_hook(simulator: Any, sensor_worker: "CarlaSensorWorker") -> None:
+    """Close dashboard sensors before Scenic destroys their parent actors."""
+    if getattr(simulator, "_tracr_sensor_lifecycle_hook_installed", False):
+        return
+    from scenic.simulators.cosim import simulator as cosim_module
+
+    simulation_cls = cosim_module.CosimSimulation
+    if not getattr(simulation_cls, "_tracr_sensor_lifecycle_patched", False):
+        original_setup = simulation_cls.setup
+
+        def setup_with_dashboard_sensors(self: Any) -> Any:
+            sensor = getattr(type(self), "_tracr_pending_sensor_lifecycle_worker", None)
+            if sensor is not None:
+                # Register before setup, which can itself fail after spawning actors.
+                self.add_pre_actor_teardown_callback(sensor.end_simulation)
+                self._tracr_sensor_worker = sensor
+            result = original_setup(self)
+            if sensor is not None:
+                sensor.begin_simulation()
+            return result
+
+        simulation_cls.setup = setup_with_dashboard_sensors
+        simulation_cls._tracr_sensor_lifecycle_patched = True
+
+    original_create_simulation = simulator.createSimulation
+
+    def create_simulation_with_sensors(scene: Any, *method_args: Any, **method_kwargs: Any) -> Any:
+        previous = getattr(simulation_cls, "_tracr_pending_sensor_lifecycle_worker", None)
+        simulation_cls._tracr_pending_sensor_lifecycle_worker = sensor_worker
+        try:
+            # Scenic runs and destroys the simulation inside this constructor.
+            return original_create_simulation(scene, *method_args, **method_kwargs)
+        finally:
+            simulation_cls._tracr_pending_sensor_lifecycle_worker = previous
+            sensor_worker.end_simulation()
+
+    simulator.createSimulation = create_simulation_with_sensors
+    simulator._tracr_sensor_lifecycle_hook_installed = True
+
+
 def install_scenic_step_viz_hook(simulator: Any, worker: VizRenderWorker, args: Args, sensor_worker: Optional["CarlaSensorWorker"] = None) -> None:
     """Patch CosimSimulation.step before Scenic constructs/runs the simulation."""
     if bool(args.viz_render_thread) or not bool(args.viz_render_on_step):
@@ -1174,6 +1214,7 @@ class CarlaSensorWorker:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="tracr-demo2-carla-sensors", daemon=True)
         self.panel = None
+        self._simulation_active = False
         self.lock = threading.RLock()
         self.last_error = ""
 
@@ -1182,19 +1223,40 @@ class CarlaSensorWorker:
 
     def stop(self) -> None:
         self.stop_event.set()
-        self.thread.join(timeout=2.0)
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+        self.end_simulation()
+
+    def begin_simulation(self) -> None:
         with self.lock:
+            self._simulation_active = not self.stop_event.is_set()
+
+    def end_simulation(self) -> None:
+        with self.lock:
+            # Keep the background renderer from respawning sensors between runs.
+            self._simulation_active = False
             if self.panel is not None:
                 try:
                     self.panel.close()
-                except Exception:
-                    pass
-                self.panel = None
+                except Exception as exc:
+                    self.last_error = str(exc).splitlines()[0]
+                finally:
+                    self.panel = None
 
     def _destroy_actor(self, actor: Any) -> None:
+        if actor is None:
+            return
         try:
-            if actor is not None and getattr(actor, "is_alive", True):
-                actor.destroy()
+            # is_alive can be cached after Scenic has already removed an actor.
+            world = self._world()
+            if world is not None and world.get_actor(actor.id) is None:
+                return
+            listening = getattr(actor, "is_listening", False)
+            listening = listening() if callable(listening) else bool(listening)
+            if listening:
+                actor.stop()
+            # A newly spawned sensor may still report is_alive=False.
+            actor.destroy()
         except Exception:
             pass
 
@@ -1224,6 +1286,8 @@ class CarlaSensorWorker:
 
     def update_once(self) -> None:
         with self.lock:
+            if not self._simulation_active or self.stop_event.is_set():
+                return
             world = self._world()
             carla_module = self._carla_module()
             if world is None or carla_module is None:
@@ -1661,6 +1725,7 @@ def run(args: Args) -> int:
 
         if args.carla_sensor_panels:
             sensor_worker = CarlaSensorWorker(args, dashboard, simulator)
+            install_scenic_sensor_lifecycle_hook(simulator, sensor_worker)
 
         if args.viz_render_thread:
             install_metsr_client_lock(metsr_client, metsr_client_lock)
