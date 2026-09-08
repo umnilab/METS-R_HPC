@@ -5303,29 +5303,45 @@ class METSRClient:
     cancel_request = cancel_requests
     cancelRequests = cancel_requests
 
-    def reposition_taxi(self, vehID, zoneID):
-        """Reposition idle/cruising taxi(s) to destination zone(s).
-
+    def reposition_taxi(self, vehID, zoneID=None, roadID=None):
+        """Reposition idle/cruising taxi(s) to destination zone(s) or road(s).
         If the taxi was already traveling to reserved parking, the simulator can
         release that reservation and report ``parkingReservationReleased`` in
         the response record.
         """
         msg = {"messageType": "repositionTaxi", "data": []}
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-        if not isinstance(zoneID, list):
+        vehID = _as_list(vehID)
+        if zoneID is None:
+            zoneID = [None] * len(vehID)
+        elif not _is_sequence(zoneID):
             zoneID = [zoneID] * len(vehID)
-        assert len(vehID) == len(zoneID), "vehID and zoneID must have the same length"
-
-        for vehID, zoneID in zip(vehID, zoneID):
-            msg["data"].append({"vehicleId": vehID, "zoneId": zoneID})
+        else:
+            zoneID = list(zoneID)
+        if roadID is None:
+            roadID = [None] * len(vehID)
+        elif not _is_sequence(roadID):
+            roadID = [roadID] * len(vehID)
+        else:
+            roadID = list(roadID)
+        assert len(vehID) == len(zoneID) == len(roadID), \
+            "vehID, zoneID, and roadID must have the same length"
+        
+        for vid, zid, rid in zip(vehID, zoneID, roadID):
+            if zid is None and rid is None:
+                raise ValueError("zoneID or roadID is required for reposition_taxi")
+            record = {"vehicleId": vid}
+            if zid is not None:
+                record["zoneId"] = zid
+            if rid is not None:
+                record["roadId"] = rid
+            msg["data"].append(record)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["messageType"] == "repositionTaxi", res["messageType"]
         assert res["status"] in {"ok", "partial"}, res["status"]
         return res
 
     def go_parking(self, vehID, zoneID=None, roadID=None):
-        """Send idle taxi(s) to park at a target zone or road.
+        """Send idle taxi(s) to park at target zone(s) or road(s).
 
         Provide ``zoneID``, ``roadID``, or both. If only ``zoneID`` is supplied,
         METS-R SIM samples a parking road in that zone. If only ``roadID`` is
