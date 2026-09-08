@@ -1664,6 +1664,7 @@ def run_simulation_in_docker(options):
                 ]
             )
 
+            launch_cwd = os.getcwd()
             launch_started = time.perf_counter()
             launched_at = time.time()
             try:
@@ -1678,6 +1679,14 @@ def run_simulation_in_docker(options):
                     f"Docker executable {docker_executable!r} was not found. "
                     "Set options.docker_executable or METSR_DOCKER_EXECUTABLE."
                 ) from exc
+            finally:
+                # Docker Desktop bind mounts can detach the current Windows-drive
+                # mount under WSL. Re-enter its absolute path before later imports
+                # (including MKL) or relative-path operations use the stale cwd.
+                try:
+                    os.getcwd()
+                except FileNotFoundError:
+                    os.chdir(launch_cwd)
             launch_duration = time.perf_counter() - launch_started
             if result.returncode != 0:
                 error = (result.stderr or result.stdout or "").strip()
