@@ -11,6 +11,7 @@ param length = 60
 param seed = 33
 param export_folder = localPath('../data_logs/CARLA_05/stop_sign_patch')
 param allow_bubble_spawns = False
+param local_commuter_poses = ()
 param attack_stop_index = 0
 param attack_enabled = True
 param initial_x = 0.0
@@ -30,7 +31,11 @@ behavior AwaitExternalPCLA():
 
 scenario SpawnCar(veh_num):
     if veh_num < globalParameters.num_commuters:
-        if not globalParameters.allow_bubble_spawns:
+        if veh_num < len(globalParameters.local_commuter_poses):
+            pose = globalParameters.local_commuter_poses[veh_num]
+            new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior(),
+                at pose[0] @ pose[1], facing pose[3]
+        elif not globalParameters.allow_bubble_spawns:
             target = simulation().objects[0]
             spawn_region = metsrMappedRoad.difference(target.bubble)
             new NPCCar with name f"car_{veh_num}", with behavior FollowSingleTrajectoryBehavior(), in spawn_region

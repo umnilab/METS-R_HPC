@@ -4301,10 +4301,23 @@ class METSRClient:
             lane_index = None,
             laneIndex = None,
             connector_path_id = None,
-            connectorPathID = None):
+            connectorPathID = None,
+            pose_only = False):
         """Apply an authoritative external pose to a co-simulation vehicle.
 
-        Without ``segment_id``, METS-R map-matches only against co-simulation
+        Set ``pose_only=True`` to mirror a CARLA-authoritative pose without
+        imposing METS-R road, lane, or connector membership. This mode requires
+        finite coordinates, bearing, and speed, and cannot be combined with
+        segment, lane, or connector-path selectors (including their aliases).
+        ``pose_only`` accepts a boolean or one boolean per vehicle. False is the
+        legacy behavior and does not add a wire field.
+
+        A successful pose-only response keeps ``controlMode='cosim'`` and
+        ``releasedFromCoSim=False``, sets ``externalPoseAuthoritative=True``, and
+        reports ``shadowMatched``. Nullable segment/lane/path fields describe
+        only the best-effort native shadow, not external vehicle authority.
+
+        Without ``pose_only`` or ``segment_id``, METS-R map-matches only against co-simulation
         roads and connectors. An explicit segment is authoritative.
         ``lane_index`` selects a road lane and ``connector_path_id`` selects a
         connector path; both require a segment and are mutually exclusive.
@@ -4389,10 +4402,11 @@ class METSRClient:
         connector_path_ids = _batch_field_values(
             connector_path_id, count, "connector_path_id"
         )
+        pose_only_flags = _batch_field_values(pose_only, count, "pose_only")
 
         for (veh_id, x_value, y_value, z_value, bearing_value, speed_value,
              private_flag, transform_flag, observed_road, segment_hint,
-             road_hint, selected_lane, selected_connector_path) in zip(
+             road_hint, selected_lane, selected_connector_path, pose_only_flag) in zip(
                 veh_ids,
                 xs,
                 ys,
@@ -4405,7 +4419,8 @@ class METSRClient:
                 segment_ids,
                 road_ids,
                 lane_indices,
-                connector_path_ids):
+                connector_path_ids,
+                pose_only_flags):
             record = {
                 "vehicleId": veh_id,
                 "x": x_value,
@@ -4422,6 +4437,25 @@ class METSRClient:
                  if candidate is not None),
                 None,
             )
+            if not isinstance(pose_only_flag, bool):
+                raise ValueError("pose_only must be a boolean for each vehicle")
+            if pose_only_flag:
+                if any(value is not None for value in (
+                        selected_segment, selected_lane, selected_connector_path)):
+                    raise ValueError(
+                        "pose_only cannot be combined with segment, lane, "
+                        "or connector-path selectors"
+                    )
+                for field in ("x", "y", "z", "bearing", "speed"):
+                    value = record[field]
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        number = math.nan
+                    if isinstance(value, bool) or not math.isfinite(number):
+                        raise ValueError(f"pose_only {field} must be finite")
+                    record[field] = number
+                record["poseOnly"] = True
             if selected_lane is not None and selected_connector_path is not None:
                 raise ValueError(
                     "lane_index and connector_path_id are mutually exclusive"
@@ -4727,6 +4761,57 @@ class METSRClient:
             "send the authoritative connector/road pose with "
             "teleport_cosim_vehicle instead"
         )
+
+    def cancel_cosim_vehicle(self, vehID, private_veh=False):
+        """Cancel external vehicle ownership and return the server reply unchanged.
+
+        Vehicle IDs and private-vehicle flags accept scalars or equal-length
+        batches. Visualization annotations are cleared only when a matching
+        reply explicitly confirms successful cancellation.
+        """
+        vehicle_ids = _as_list(vehID)
+        private_flags = _batch_field_values(
+            private_veh, len(vehicle_ids), "private_veh"
+        )
+        if any(not isinstance(flag, bool) for flag in private_flags):
+            raise ValueError("private_veh must be a boolean for each vehicle")
+        msg = {
+            "messageType": "cancelCoSimVeh",
+            "data": [{"vehicleId": vehicle_id, "isPrivate": private_flag}
+                     for vehicle_id, private_flag in zip(vehicle_ids, private_flags)],
+        }
+        response = self.send_receive_msg(msg, ignore_heartbeats=True)
+        if (not isinstance(response, dict)
+                or response.get("messageType") != "cancelCoSimVeh"
+                or response.get("status") not in ("ok", "partial")
+                or not isinstance(response.get("data"), (list, tuple))):
+            return response
+
+        requested_namespaces = {}
+        for vehicle_id, private_flag in zip(vehicle_ids, private_flags):
+            requested_namespaces.setdefault(str(vehicle_id), set()).add(private_flag)
+        cancelled_keys = set()
+        for record in response["data"]:
+            if (not isinstance(record, dict) or record.get("vehicleId") is None
+                    or record.get("status") != "ok"
+                    or record.get("cancelled") is not True
+                    or record.get("controlMode") != "native"
+                    or record.get("externalPoseAuthoritative") is not False):
+                continue
+            vehicle_id = str(record["vehicleId"])
+            namespaces = requested_namespaces.get(vehicle_id, set())
+            if "isPrivate" in record:
+                private_flag = record["isPrivate"]
+                if isinstance(private_flag, bool) and private_flag in namespaces:
+                    cancelled_keys.add((private_flag, vehicle_id))
+            elif len(namespaces) == 1:
+                # Older replies omit the namespace; only an unambiguous ID
+                # can safely identify the annotation to clear.
+                cancelled_keys.add((next(iter(namespaces)), vehicle_id))
+        if cancelled_keys:
+            with self.viz_stream_lock:
+                self._attack_vehicle_keys.difference_update(cancelled_keys)
+        return response
 
     # reach destination
     def reach_dest(self, vehID, private_veh = False):

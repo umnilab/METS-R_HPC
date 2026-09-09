@@ -723,13 +723,16 @@ class PCLAController:
     def camera_snapshots(self) -> Dict[str, Tuple[str, bytes, Any]]:
         return {} if self.tap is None else self.tap.snapshots()
 
-    def close(self) -> None:
+    def close(self, *, destroy_vehicle: bool = True) -> None:
         if self.tap is not None:
             self.tap.close()
             self.tap = None
         if self.pcla is not None:
             try:
-                self.pcla.cleanup()
+                if destroy_vehicle:
+                    self.pcla.cleanup()
+                else:
+                    self.pcla.cleanup(destroy_vehicle=False)
             except Exception as exc:
                 print(f"PCLA cleanup warning: {str(exc).splitlines()[0]}")
             self.pcla = None

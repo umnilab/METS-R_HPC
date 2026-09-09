@@ -12,11 +12,14 @@ import argparse
 import csv
 import hashlib
 import inspect
+import json
 import math
 import os
 import re
+import random
 import sys
 import threading
+import traceback
 import types
 from dataclasses import dataclass
 from html import escape
@@ -87,6 +90,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Exact SUMO/METS-R network paired with --opendrive-map.",
     )
     parser.add_argument("--num-commuters", type=_positive_int, default=100)
+    parser.add_argument(
+        "--local-commuters", type=int, default=8,
+        help="Commuters initially near the stop on its road layer, included in --num-commuters; 0 keeps citywide-only demand.",
+    )
     parser.add_argument("--length", type=_positive_int, default=60)
     parser.add_argument("--timestep", type=float, default=0.05)
     parser.add_argument("--metsr-client-timestep", type=float, default=0.05)
@@ -104,7 +111,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--approach-distance-m",
         type=float,
         default=35.0,
-        help="Place the Scenic/PCLA ego this far upstream of each selected stop.",
+        help=(
+            "Desired upstream lead-in; prefer a shorter approach outside a junction "
+            "on the stop sign's road when available."
+        ),
     )
     parser.add_argument("--attack-only", action="store_true")
     parser.add_argument("--attack-max-distance-m", type=float, default=90.0)
@@ -165,6 +175,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                 f"WSL detected: using Windows CARLA host {detected_host} "
                 f"instead of {configured_host}."
             )
+    if args.local_commuters < 0:
+        parser.error("--local-commuters must be nonnegative")
     if args.candidate_offset < 0:
         parser.error("--candidate-offset cannot be negative")
     if args.timestep <= 0 or args.metsr_client_timestep <= 0:
@@ -449,7 +461,7 @@ def _find_stop_approach(
     route: Any,
     requested_distance_m: float,
 ) -> Tuple[Any, float, float, Optional[int], bool, Any]:
-    """Find a driving waypoint upstream, favoring a long same-road lead-in."""
+    """Find an upstream start outside junctions, preferring the stop sign's road."""
     waypoints = _stop_waypoints(world_map, actor, route)
     if not waypoints:
         return None, 0.0, 0.0, None, False, None
@@ -467,7 +479,7 @@ def _find_stop_approach(
     if not distances or not math.isclose(distances[-1], 5.0):
         distances.append(5.0)
 
-    options: List[Tuple[float, float, float, Any, Any]] = []
+    options: List[Tuple[bool, bool, float, float, float, Any, Any]] = []
     same_road_distance = 0.0
     for waypoint in waypoints:
         for requested in distances:
@@ -485,12 +497,25 @@ def _find_stop_approach(
                     actual if getattr(upstream, "road_id", None) == road_id else 0.0
                 )
                 same_road_distance = max(same_road_distance, same_road)
-                options.append((requested, same_road, actual, transform, waypoint))
+                outside_junction = not bool(getattr(upstream, "is_junction", False))
+                options.append((
+                    outside_junction,
+                    outside_junction and same_road > 0.0,
+                    requested,
+                    same_road,
+                    actual,
+                    transform,
+                    waypoint,
+                ))
     if not options:
         return None, 0.0, same_road_distance, road_id, is_junction, route_waypoint
-    _, _, actual, transform, route_waypoint = max(
+    # Starting midway through a junction can make PCLA's route planner lose
+    # the ongoing turn command. Prefer a nonjunction start on this road even
+    # when reaching the requested lead-in would place the ego inside a turn.
+    # Keep other upstream candidates as a fallback for short approach roads.
+    _, _, _, _, actual, transform, route_waypoint = max(
         options,
-        key=lambda option: (option[0], option[1], option[2]),
+        key=lambda option: option[:5],
     )
     return transform, actual, same_road_distance, road_id, is_junction, route_waypoint
 
@@ -1391,6 +1416,8 @@ class RunRuntime:
 
     def attach(self, simulation: Any) -> None:
         self.simulation = simulation
+        # Stop dashboard/PCLA callbacks while their parent actors still exist.
+        simulation.add_pre_actor_teardown_callback(self.close)
 
     def _ego(self) -> Tuple[Any, Any]:
         ego = getattr(self.simulation, "ego", None)
@@ -1850,7 +1877,7 @@ class RunRuntime:
                 pass
             self.panel = None
         if self.controller is not None:
-            self.controller.close()
+            self.controller.close(destroy_vehicle=False)
             self.controller = None
 
 
@@ -2040,6 +2067,99 @@ def _scenic_initial_pose(candidate: StopSignCandidate) -> Dict[str, float]:
     }
 
 
+def _local_commuter_poses(
+    world_map: Any, helper: Any, candidate: StopSignCandidate,
+    count: int, seed: int, bubble_size: float,
+) -> Tuple[Tuple[float, ...], ...]:
+    """Choose initial local demand on the ego's connected ordinary road layer."""
+    if count == 0:
+        return ()
+    from scenic.core.regions import CircularRegion
+
+    start = candidate.approach_transform.location
+    anchor = world_map.get_waypoint(start)
+    radius = min(80.0, float(bubble_size) * 0.8)
+    region = CircularRegion(center=(start.x, -start.y), radius=radius)
+    roads = helper._get_bubble_roads(region, anchor_road_id=anchor.road_id)
+    road_ids = {str(road.id) for road in roads}
+    network = helper.workspace.network
+    candidates = []
+    for waypoint in world_map.generate_waypoints(4.0):
+        if waypoint.is_junction or str(waypoint.road_id) not in road_ids:
+            continue
+        key = f"{waypoint.road_id}_{waypoint.lane_id}"
+        if not helper.scenic_to_metsr_map_lanes.get(key):
+            continue
+        point = waypoint.transform.location
+        distance = math.hypot(point.x - start.x, point.y - start.y)
+        if not 15.0 <= distance <= radius:
+            continue
+        projected = world_map.get_waypoint(point)
+        lane = network.laneAt((point.x, -point.y))
+        if (projected is None or projected.is_junction or lane is None
+                or (projected.road_id, projected.lane_id)
+                != (waypoint.road_id, waypoint.lane_id)
+                or f"{lane.road.id}_{lane.id}" != key):
+            # Scenic's 2D lane lookup must agree at this initial pose, including
+            # where an overpass overlaps the local ground road component.
+            continue
+        def ordinary_neighbor(neighbors):
+            return any(not neighbor.is_junction
+                       and (neighbor.road_id, neighbor.lane_id)
+                       == (waypoint.road_id, waypoint.lane_id)
+                       for neighbor in neighbors)
+        if not (ordinary_neighbor(waypoint.previous(6.0))
+                and ordinary_neighbor(waypoint.next(6.0))):
+            continue
+        candidates.append(waypoint)
+
+    # A separate random stream makes the initial cohort independent of PCLA,
+    # rendering, or traffic evolution. Stable ordering removes map iteration
+    # order from the seed's meaning.
+    candidates.sort(key=lambda waypoint: (
+        waypoint.road_id, waypoint.section_id, waypoint.lane_id, waypoint.s))
+    random.Random(seed).shuffle(candidates)
+    yaw = math.radians(candidate.approach_transform.rotation.yaw)
+    def behind_ego(waypoint):
+        point = waypoint.transform.location
+        dx, dy = point.x - start.x, point.y - start.y
+        return (dx * math.cos(yaw) + dy * math.sin(yaw) < -10.0
+                and abs(-dx * math.sin(yaw) + dy * math.cos(yaw)) < 5.0
+                and math.cos(math.radians(waypoint.transform.rotation.yaw) - yaw) > .9)
+    candidates.sort(key=lambda waypoint: not behind_ego(waypoint))
+    selected = []
+    for waypoint in candidates:
+        point = waypoint.transform.location
+        if any(math.hypot(point.x - pose[0], -point.y - pose[1]) < 10.0
+               for pose in selected):
+            continue
+        heading = -math.radians(waypoint.transform.rotation.yaw + 90.0)
+        heading = (heading + math.pi) % (2.0 * math.pi) - math.pi
+        selected.append((float(point.x), -float(point.y), float(point.z),
+                         heading, int(waypoint.road_id), int(waypoint.lane_id)))
+        if len(selected) == count:
+            return tuple(selected)
+    raise RuntimeError(
+        f"Only {len(selected)} spaced local commuter poses fit near {candidate.label}; "
+        f"requested {count}. Reduce --local-commuters or use 0 for citywide-only demand."
+    )
+
+
+def _local_traffic_plan(args: argparse.Namespace, world_map: Any,
+                        candidate: StopSignCandidate, seed: int) -> Tuple[Tuple[float, ...], ...]:
+    count = min(args.local_commuters, args.num_commuters)
+    if not count:
+        return ()
+    from scenic.domains.driving.roads import Network
+    from scenic.simulators.cosim.utils.network_helper import network_cache
+    from scenic.simulators.cosim.utils.utils import generate_map
+
+    network = Network.fromFile(args.opendrive_map, writeCache=False)
+    mapping = generate_map(args.sumo_map)
+    helper = network_cache(types.SimpleNamespace(network=network), mapping, ())
+    return _local_commuter_poses(world_map, helper, candidate, count, seed, args.bubble_size)
+
+
 def _compile_scenario(
     args: argparse.Namespace,
     scenic: Any,
@@ -2061,6 +2181,7 @@ def _compile_scenario(
         "seed": args.seed,
         "export_folder": args.export_folder,
         "allow_bubble_spawns": args.allow_bubble_spawns,
+        "local_commuter_poses": (),
         "attack_stop_index": 0,
         "attack_enabled": False,
         "initial_x": 0.0,
@@ -2200,11 +2321,25 @@ def run(args: argparse.Namespace) -> int:
         def best_provider() -> str:
             return best_result_text(rows, paired)
 
+        local_plans: Dict[Tuple[int, int], Tuple[Tuple[float, ...], ...]] = {}
         for spec in specs:
             run_base = (
                 export_dir
                 / f"stop_{spec.candidate.index}_{spec.phase}_seed_{spec.seed}_run_{spec.run_number}"
             )
+            plan_key = (spec.candidate.index, spec.seed)
+            if plan_key not in local_plans:
+                local_plans[plan_key] = _local_traffic_plan(
+                    args, simulator.world.get_map(), spec.candidate, spec.seed)
+            local_poses = local_plans[plan_key]
+            run_base.parent.mkdir(parents=True, exist_ok=True)
+            run_base.with_name(run_base.name + "_local_traffic.json").write_text(
+                json.dumps({"seed": spec.seed, "local_commuters": len(local_poses),
+                            "citywide_commuters": args.num_commuters - len(local_poses),
+                            "pose_fields": ["scenic_x", "scenic_y", "z", "heading", "carla_road", "carla_lane"],
+                            "poses": local_poses}, indent=2), encoding="utf-8")
+            print(f"Demand: {len(local_poses)} local commuters and "
+                  f"{args.num_commuters - len(local_poses)} citywide commuters, seed={spec.seed}")
             run_params: Dict[str, Any] = _scenic_initial_pose(spec.candidate)
             run_params.update(
                 {
@@ -2212,6 +2347,7 @@ def run(args: argparse.Namespace) -> int:
                     "attack_stop_index": spec.candidate.index,
                     "attack_enabled": spec.attack_enabled,
                     "run_name": str(run_base),
+                    "local_commuter_poses": local_poses,
                 }
             )
             scenario = _compile_scenario(
@@ -2268,6 +2404,11 @@ def run(args: argparse.Namespace) -> int:
                 break
             except Exception as exc:
                 exit_code = 1
+                traceback_text = traceback.format_exc()
+                traceback_path = run_base.with_name(run_base.name + "_traceback.txt")
+                traceback_path.write_text(traceback_text, encoding="utf-8")
+                print(traceback_text, file=sys.stderr, end="")
+                print(f"Demo4 traceback: {traceback_path}")
                 message = str(exc).splitlines()[0]
                 row = runtime.finish("failed", message)
                 row["artifact_base"] = str(run_base)

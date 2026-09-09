@@ -37,7 +37,6 @@ if pcla_home and pcla_home not in sys.path:
 
 from PCLA import PCLA
 from pcla_functions.route_maker import route_maker
-from pcla_functions.location_to_waypoint import location_to_waypoint
 
 behavior hard_break(attack_duration):
     """
@@ -115,15 +114,17 @@ behavior PCLAAgent(agentType=globalParameters.pcla_agent, route=globalParameters
     """
         Drive the Scenic ego with a PCLA agent.
 
-        If no route is supplied, PCLA receives a route from the ego's current
-        location to a Scenic-sampled CARLA spawn point.
+        If no route is supplied, PCLA receives a CARLA trajectory generated
+        from the ego's authoritative METS-R route.
     """
     assert self.carlaActor
 
     if route is None:
-        start_pos = self.carlaActor.get_transform().location
-        end_point = Uniform(*simulation().spawn_points).location
-        waypoints = location_to_waypoint(simulation().carla_client, start_pos, end_point)
+        assert hasattr(self, 'route') and self.route
+        route_locations = simulation().generate_carla_trajectory(route=self.route, obj=self)
+        waypoints = [simulation().map.get_waypoint(location) for location in route_locations]
+        waypoints = [waypoint for waypoint in waypoints if waypoint is not None]
+        assert len(waypoints) > 1
         route = localPath('../helpers/routes/ego_route.xml')
         os.makedirs(os.path.dirname(route), exist_ok=True)
         route_maker(waypoints, savePath=route)
