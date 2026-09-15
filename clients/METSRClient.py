@@ -2571,26 +2571,55 @@ class METSRClient:
     # Historical camel-case spelling retained for source compatibility.
     query_coSimVehicle = query_cosim_vehicle
 
-    def query_boundary_vehicle(self):
+    def query_boundary_vehicle(self, boundary_dist=6.0):
         """Query native vehicles near exits of co-simulation connectors.
 
         Sends ``boundaryVehicle`` (the simulator's ``queryBoundaryVeh`` handler)
-        without input data. Each entry in ``data`` uses the same bridge schema
-        as :meth:`query_cosim_vehicle`: ``vehicleId``, ``isPrivate``,
-        ``coordinateTrail``, ``routeRoadIds``, and road/lane/control fields.
+        with the required top-level ``boundaryDist`` in meters. Each entry in
+        ``data`` uses the same bridge schema as :meth:`query_cosim_vehicle`:
+        ``vehicleId``, ``isPrivate``, ``coordinateTrail``, ``routeRoadIds``, and
+        road/lane/control fields.
 
         These vehicles are on native physical roads immediately downstream of
-        controlled connectors, strictly less than 1.2 vehicle lengths from
-        their current lane's entry. ``controlMode`` is ``native`` and
-        ``onConnector`` is false. Mirror them as obstacles in the external
+        controlled connectors, at a non-negative distance strictly less than
+        ``boundary_dist`` from their current lane's entry. The cutoff is fixed
+        in meters, independent of vehicle length. ``controlMode`` is ``native``
+        and ``onConnector`` is false. Mirror them as obstacles in the external
         simulator; they remain METS-R controlled.
         Use :meth:`query_vehicle` with the returned IDs and private flags to
         obtain current poses in the desired coordinate system.
 
-        Returns ``{'messageType': 'boundaryVehicle', 'data': [...]}``, with an
-        empty list when there are no qualifying vehicles.
+        Parameters
+        ----------
+        boundary_dist : float, default 6.0
+            Finite, non-negative entry-distance cutoff in meters. Zero returns
+            no vehicles, including those exactly at entry. The 6 m default is
+            supplied by this client to support existing no-argument calls;
+            the server requires an explicit ``boundaryDist``. This replaces
+            the old server rule of 1.2 times each vehicle's length.
+
+        Returns
+        -------
+        dict
+            ``{'messageType': 'boundaryVehicle', 'data': [...]}``, with an empty
+            list when there are no qualifying vehicles.
+
+        Raises
+        ------
+        ValueError
+            If ``boundary_dist`` is negative, non-finite, boolean, or cannot be
+            converted to a number. No request is sent for invalid input.
         """
-        msg = {"messageType": "boundaryVehicle"}
+        error = "boundary_dist must be a finite, non-negative distance in meters"
+        if isinstance(boundary_dist, bool):
+            raise ValueError(error)
+        try:
+            boundary_dist = float(boundary_dist)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(error) from exc
+        if not math.isfinite(boundary_dist) or boundary_dist < 0.0:
+            raise ValueError(error)
+        msg = {"messageType": "boundaryVehicle", "boundaryDist": boundary_dist}
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["messageType"] == "boundaryVehicle", res["messageType"]
         return res
