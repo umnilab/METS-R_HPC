@@ -7,3 +7,5 @@ output/*
 /data/UA
 /data/Birmingham
 /scenic_exp/data_logs/
+/eval
+/plant_viz

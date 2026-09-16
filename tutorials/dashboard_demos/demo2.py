@@ -3,11 +3,84 @@
 Run this script with a Scenic file and open the printed dashboard URL.
 The dashboard can render METS-R Vis from Scenic step boundaries using the single
 METS-R client. Pass --wait-for-space to pause before Scenic starts.
+Use --benchmark-agent --pcla-agent all for controller throughput CSVs without
+rendering. See demo2_benchmark.md for timing definitions and output details.
+For editable map, flow, controller and attack templates, see
+scenic_exp/scenarios/traffic_template.scenic and its README.md.
 
 Scenic requirement:
     Install and use the METSRSim branch from
     https://github.com/Kv139/Scenic/tree/METSRSim
 """
+
+# Optional PCLA controller dependencies (WSL; checked 2026-09-13):
+# Run these commands inside the existing PCLA environment:
+#
+#     conda activate PCLA
+#
+# Orion / FlashAttention:
+# This official wheel matches Linux x86_64, Python 3.10, Torch 2.2, CUDA 12,
+# and PyTorch's CXX11 ABI=False build. The RTX 3090 supports FlashAttention 2.
+# Using the wheel avoids requiring nvcc; --no-deps preserves installed Torch.
+# Recheck the wheel match if the Python/Torch/CUDA environment changes.
+#
+#     python -m pip install --no-deps \
+#       "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2%2Bcu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+#
+# Official release: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.7.0.post2
+#
+# MindDrive / nuScenes:
+# The Python package is nuscenes-devkit; its import name is nuscenes.
+# This command passed pip's dry-run resolver in the PCLA environment:
+#
+#     python -m pip install \
+#       "nuscenes-devkit==1.2.0" \
+#       "numpy==1.24.4" \
+#       "matplotlib==3.7.5"
+#
+# It keeps NumPy at 1.24.4, changes Matplotlib to 3.7.5 and Shapely to 2.0.7,
+# and installs missing helper packages. No Hugging Face changes were proposed.
+# Package details: https://pypi.org/project/nuscenes-devkit/1.2.0/
+#
+# Check both imports after installation:
+#
+#     python -c "import flash_attn; from nuscenes.eval.common.utils import quaternion_yaw; print('Both imports OK')"
+#
+# LMDrive / Hugging Face:
+# Keep huggingface-hub==0.36.2 and transformers==4.46.3. Benchmark mode uses
+# PCLA's bundled LAVIS/vision-encoder paths and omits unused BLIP-Diffusion
+# model/processor imports, avoiding old Diffusers' cached_download import error.
+# The bundled LMDrive inference imports work with the installed Hub/Transformers.
+# LMDrive driving-model and Llama/OPT imports passed with these versions;
+# full LMDrive model loading and simulation still require its base LLM weights.
+# Checkpoint paths under pcla_agents/ are resolved from --pcla-dir in benchmark
+# mode. The vision encoder + driving checkpoint do not include the base LLM:
+# llama uses huggyllama/llama-7b; llava uses liuhaotian/llava-v1.5-7b;
+# vicuna uses lmsys/vicuna-7b-v1.5-16k. Set each lmdriver_config_*.py llm_model
+# to an existing local model directory, or provision that model in the HF cache.
+#
+# LMDrive / large LiDAR scans and automatic interruptions:
+# Benchmark mode fixes LMDrive's source copy to match its 40,000-point buffer,
+# preserving its ego filter, random sampling, padding and coordinate rotation.
+# PCLA's watchdog raises KeyboardInterrupt itself when setup times out; this
+# does not necessarily mean Ctrl+C was pressed. Benchmark workers default to
+# PCLA_WATCHDOG_SEC=900 for LMDrive/MindDrive/Orion and honor an existing value.
+# Confirmed watchdog timeouts become failed CSV rows and the suite continues;
+# a real Ctrl+C still interrupts the sweep. For a longer setup allowance:
+#
+#     PCLA_WATCHDOG_SEC=1800 python tutorials/dashboard_demos/demo2.py --benchmark-agent --pcla-agent lmdrive_llava --pcla-dir /mnt/d/git/PCLA
+#
+# MindDrive and Orion / extra inference dependencies:
+# similaritymeasures supplies the vendored MMCV Frechet-distance import.
+# Diffusers 0.31.0 supplies DDIMScheduler without the removed cached_download API.
+# Both passed pip's resolver with the current PCLA stack; --no-deps keeps
+# huggingface-hub==0.36.2, transformers==4.46.3 and torch==2.2.0 unchanged.
+#
+#     python -m pip install --no-deps "similaritymeasures==1.4.0" "diffusers==0.31.0"
+#     python -c "import similaritymeasures; from diffusers.schedulers import DDIMScheduler; print('Imports OK')"
+#
+# Sources: https://pypi.org/project/similaritymeasures/1.4.0/
+# https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/utils/dynamic_modules_utils.py
 
 from __future__ import annotations
 
@@ -17,6 +90,7 @@ import functools
 import json
 import math
 import os
+import re
 import sys
 import threading
 import traceback
@@ -64,6 +138,19 @@ class Args:
     town: str = "Town06"
     map_locations: str = str(_DEFAULT_MAP_DIR)
     num_commuters: int = 5
+    # None preserves the selected Scenic preset; see scenic_exp/scenarios/README.md.
+    spawn_interval_s: Optional[float] = None
+    allow_bubble_spawns: Optional[bool] = None
+    ego_controller: Optional[str] = None
+    # Selectable safety/security profiles; JSON holds placement/trigger/effect values.
+    safety_scenario: Optional[str] = None
+    security_scenario: Optional[str] = None
+    test_config: Optional[str] = None
+    attack_behavior: Optional[str] = None
+    attack_target: Optional[str] = None
+    attack_start_s: Optional[float] = None
+    attack_duration_s: Optional[float] = None
+    attack_period_s: Optional[float] = None
     timestep: float = 0.1
     length: int = 10
     bubble_size: int = 100
@@ -109,6 +196,7 @@ class Args:
     # PCLA. Agent support does not imply that every family's optional runtime
     # dependencies or weights are already installed in the active environment.
     pcla_agent: str = 'simlingo_simlingo'
+    benchmark_agent: bool = False
     pcla_route: Optional[str] = None
     export_folder: str = str(_DEFAULT_EXPORT_DIR)
     dashboard_dir: str = str(_DEFAULT_DASHBOARD_DIR)
@@ -151,6 +239,7 @@ class Args:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Args:
+    from utils.scenic_testing import SAFETY_SCENARIOS, SECURITY_SCENARIOS
     defaults = Args()
     parser = argparse.ArgumentParser(
         description="Run a Scenic scenario with a TRACR-style live dashboard.",
@@ -158,25 +247,54 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Args:
         epilog=f"Required Scenic fork: {_SCENIC_SOURCE_URL}",
     )
     parser.add_argument("scenic_file_arg", nargs="?", help="Scenic program to run.")
+    parser.add_argument("--benchmark-worker-csv", help=argparse.SUPPRESS)
     for field in fields(Args):
         name = field.name
         default = getattr(defaults, name)
         option = "--" + name.replace("_", "-")
-        if isinstance(default, bool):
+        help_text = {
+            "benchmark_agent": "Measure controller throughput and runtime costs without the dashboard.",
+            "pcla_agent": "PCLA selector, or 'all' to benchmark the installed registry (excluding Autoware).",
+            "num_commuters": "Total background spawn budget, excluding the ego and safety hazards.",
+            "spawn_interval_s": "Seconds between arrivals, rounded up to Scenic ticks; default comes from the preset.",
+            "allow_bubble_spawns": "Allow random traffic spawns inside the co-simulation bubble.",
+            "ego_controller": "Override the preset: pcla, autopilot, or external (requires a runner-owned controller).",
+            "safety_scenario": "Safety profile: interception, blockage, braking, cut-in, merge, or collision avoidance.",
+            "security_scenario": "Security profile: sensor, traffic-control, perception, or driving perturbation.",
+            "test_config": "JSON with safety_scenario, security_scenario and/or nested test_parameters; CLI selectors win.",
+            "attack_behavior": "Legacy control attack: none or periodic_brake.",
+            "attack_target": "Actor name to attack: ego or car_0, car_1, etc.",
+            "attack_start_s": "First attack start in simulation seconds.",
+            "attack_duration_s": "Attack duration in simulation seconds.",
+            "attack_period_s": "Time between attack starts in simulation seconds.",
+        }.get(name)
+        if name == "allow_bubble_spawns":
+            parser.add_argument(option, action=argparse.BooleanOptionalAction, default=None, help=help_text)
+        elif name in {"spawn_interval_s", "attack_start_s", "attack_duration_s", "attack_period_s"}:
+            parser.add_argument(option, type=float, default=None, help=help_text)
+        elif name in {"safety_scenario", "security_scenario"}:
+            parser.add_argument(option, choices=SAFETY_SCENARIOS if name == "safety_scenario" else SECURITY_SCENARIOS,
+                                default=None, help=help_text)
+        elif name in {"ego_controller", "attack_behavior"}:
+            choices = ("pcla", "autopilot", "external") if name == "ego_controller" else ("none", "periodic_brake")
+            parser.add_argument(option, choices=choices, default=None, help=help_text)
+        elif isinstance(default, bool):
             group = parser.add_mutually_exclusive_group()
-            group.add_argument(option, dest=name, action="store_true")
+            group.add_argument(option, dest=name, action="store_true", help=help_text)
             group.add_argument("--no-" + name.replace("_", "-"), dest=name, action="store_false")
             parser.set_defaults(**{name: default})
         elif default is None:
-            parser.add_argument(option, dest=name, default=default)
+            parser.add_argument(option, dest=name, default=default, help=help_text)
         else:
-            parser.add_argument(option, dest=name, default=default, type=type(default))
+            parser.add_argument(option, dest=name, default=default, type=type(default), help=help_text)
     namespace = parser.parse_args(argv)
     args = Args()
     for field in fields(Args):
         setattr(args, field.name, getattr(namespace, field.name))
     if namespace.scenic_file_arg:
         args.scenic_file = namespace.scenic_file_arg
+    if namespace.benchmark_worker_csv:
+        args._benchmark_worker_csv = namespace.benchmark_worker_csv
     return normalize_args(args)
 
 
@@ -246,7 +364,21 @@ def wsl_windows_host() -> Optional[str]:
 
 
 def normalize_args(args: Args) -> Args:
+    args.pcla_agent = str(args.pcla_agent).strip()
+    if args.pcla_agent.lower() == "all":
+        args.pcla_agent = "all"
+        args.benchmark_agent = True
+    if args.benchmark_agent:
+        if args.ego_controller not in (None, "pcla"):
+            raise ValueError("--benchmark-agent requires --ego-controller pcla")
+        args.ego_controller = "pcla"
+    if args.benchmark_agent and int(args.total_simulations) < 1:
+        raise ValueError("--total-simulations must be at least one for benchmarking")
     args.scenic_file = str(Path(args.scenic_file).expanduser().resolve())
+    if args.test_config:
+        from utils.scenic_testing import load_test_config
+        args.test_config = str(Path(args.test_config).expanduser().resolve())
+        load_test_config(args.test_config)  # Fail before starting any simulators.
     if args.pcla_dir:
         args.pcla_dir = str(Path(args.pcla_dir).expanduser().resolve())
         os.environ['PCLA_HOME'] = args.pcla_dir
@@ -293,19 +425,22 @@ def normalize_args(args: Args) -> Args:
     return args
 
 
-def _scenario_uses_pcla(scenic_file: str) -> bool:
+def _scenario_uses_pcla(scenic_file: str, ego_controller: Optional[str] = None) -> bool:
     try:
         source = Path(scenic_file).read_text(encoding='utf-8')
     except OSError:
         return False
+    if ego_controller is not None:
+        return ego_controller == "pcla"
+    # Template presets declare their controller before importing the shared Main.
+    match = re.search(r"^\s*param\s+ego_controller\s*=\s*(['\"])([^'\"]+)\1", source, re.MULTILINE)
+    if match:
+        return match.group(2) == "pcla"
     return 'from PCLA import PCLA' in source
 
 
-def validate_pcla_setup(args: Args) -> None:
-    '''Fail before CARLA startup when a PCLA scenario lacks required assets.'''
-    if not _scenario_uses_pcla(args.scenic_file):
-        return
-
+def resolve_pcla_root(args: Args) -> Path:
+    """Find the checkout without importing optional controller dependencies."""
     pcla_root = Path(args.pcla_dir).expanduser().resolve() if args.pcla_dir else None
     if pcla_root is None:
         for entry in sys.path:
@@ -321,6 +456,14 @@ def validate_pcla_setup(args: Args) -> None:
 
     args.pcla_dir = str(pcla_root)
     os.environ['PCLA_HOME'] = str(pcla_root)
+    return pcla_root
+
+
+def validate_pcla_setup(args: Args) -> None:
+    """Fail before CARLA startup when a PCLA scenario lacks required assets."""
+    if not _scenario_uses_pcla(args.scenic_file, args.ego_controller):
+        return
+    pcla_root = resolve_pcla_root(args)
     if str(args.pcla_agent).strip() != 'simlingo_simlingo':
         return
 
@@ -1626,6 +1769,21 @@ def compile_scenario(args: Args, scenic_module: Any, set_debugging_options: Any,
         "export_folder": args.export_folder,
     }
     params.update(pcla_agent=args.pcla_agent, pcla_route=args.pcla_route)
+    if args.test_config:
+        from utils.scenic_testing import load_test_config
+        params.update(load_test_config(args.test_config))
+    # Forward resolved paths so the Scenic network matches the simulator's maps.
+    for name in ("spawn_interval_s", "allow_bubble_spawns", "ego_controller",
+                 "safety_scenario", "security_scenario",
+                 "attack_behavior", "attack_target", "attack_start_s",
+                 "attack_duration_s", "attack_period_s"):
+        value = getattr(args, name)
+        if value is not None:
+            params[name] = value
+    if args.opendrive_map:
+        params["map"] = args.opendrive_map
+    if args.sumo_map:
+        params["xml_map"] = args.sumo_map
     return scenic_module.scenarioFromFile(path=args.scenic_file, model=args.scenic_model, mode2D=True, params=params)
 
 
@@ -1647,6 +1805,7 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
     if args.metsr_sim_dir:
         metsr_output_path = resolve_metsr_sim_folder(args)
         print(f"Visualizing METS-R trajectory data from: {metsr_output_path}")
+    benchmark_options = {"render": False} if args.benchmark_agent else {}
     return cosim_simulator_cls(
         metsr_host=args.metsr_host,
         metsr_port=int(args.metsr_port),
@@ -1662,10 +1821,18 @@ def build_simulator(args: Args, cosim_simulator_cls: Any, run_name: Optional[Pat
         run_name=str(base_run_name),
         metsr_sim_dir=metsr_output_path,
         metsr_viz_port=int(args.viz_stream_port),
+        **benchmark_options,
     )
 
 
 def run(args: Args) -> int:
+    if args.benchmark_agent or args.pcla_agent == "all":
+        from tutorials.dashboard_demos import demo2_benchmark
+
+        worker_csv = getattr(args, "_benchmark_worker_csv", None)
+        if worker_csv:
+            return demo2_benchmark.run_worker(args, Path(worker_csv))
+        return demo2_benchmark.run_suite(args)
     validate_pcla_setup(args)
     try:
         import scenic
@@ -1804,6 +1971,8 @@ def run(args: Args) -> int:
                 csv_path = run_base.with_name(run_base.name + "_trajectory.csv")
                 print(f"Writing Scenic records to: {csv_path}")
                 write_scenic_records(records, csv_path)
+                from utils.scenic_testing import write_test_report
+                write_test_report(result, getattr(scenario, "params", {}), csv_path.with_name(csv_path.stem + "_test_events.json"))
 
                 evlogs = changed_evlogs(before_evlogs, args.output_root, run_start)
                 evlog_summary = summarize_evlogs(evlogs, tick_seconds=float(args.metsr_tick_seconds))
