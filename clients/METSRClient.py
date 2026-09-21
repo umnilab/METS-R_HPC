@@ -5353,7 +5353,7 @@ class METSRClient:
                 res["legacyFallback"] = True
         return res
 
-    def cancel_requests(self, reqID, zoneID=None):
+    def cancel_requests(self, reqID, zoneID=None, rematch=False):
         """Cancel one or more taxi/bus requests.
 
         The METS-R SIM control API uses ``cancelRequests`` and
@@ -5363,8 +5363,18 @@ class METSRClient:
         ``zoneID`` is omitted, the client attempts to infer it with
         :meth:`query_request`.
 
+        ``rematch`` defaults to ``False`` (normal cancellation). When ``True``,
+        matched taxi requests that have not been picked up return to their
+        origin queue, preserving their ID, generation time, waiting limit,
+        and activity plan; pending taxi requests remain unchanged. Occupied
+        taxi requests cannot be cancelled, and bus cancellation is unchanged.
+        Pass a boolean for all requests or a list/tuple aligned with ``reqID``.
+        A request record's non-None ``rematch`` value overrides this argument.
+
         The returned ``data`` list contains per-request ``status`` and
         ``message`` details; record errors make the top-level status ``partial``.
+        Successful taxi rematches report ``action="requeued"`` or
+        ``action="unchanged"`` for requests that were already pending.
         """
         if zoneID is None and isinstance(reqID, dict):
             request_records = [reqID]
@@ -5375,7 +5385,8 @@ class METSRClient:
         ):
             request_records = list(reqID)
         else:
-            request_ids = [_request_id_from_record(record) for record in _as_list(reqID)]
+            source_records = _as_list(reqID)
+            request_ids = [_request_id_from_record(record) for record in source_records]
             if zoneID is None:
                 zone_ids = [None] * len(request_ids)
             elif _is_sequence(zoneID):
@@ -5385,13 +5396,17 @@ class METSRClient:
             assert len(request_ids) == len(zone_ids), \
                 "reqID and zoneID must have the same length"
             request_records = [
-                {"requestId": rid, "zoneId": zid}
-                for rid, zid in zip(request_ids, zone_ids)
+                dict(record, requestId=rid, zoneId=zid)
+                if isinstance(record, dict) else {"requestId": rid, "zoneId": zid}
+                for record, rid, zid in zip(source_records, request_ids, zone_ids)
             ]
 
+        rematch_flags = _batch_field_values(
+            rematch, len(request_records), "rematch", batch_name="reqID"
+        )
         msg = {"messageType": "cancelRequests", "data": []}
         missing_zone_ids = []
-        for record in request_records:
+        for record, rematch_flag in zip(request_records, rematch_flags):
             rid = _request_id_from_record(record)
             zid = _request_zone_from_record(record)
             if rid is None:
@@ -5401,7 +5416,12 @@ class METSRClient:
             if zid is None:
                 missing_zone_ids.append(rid)
                 continue
-            msg["data"].append({"requestId": rid, "zoneId": zid})
+            record_rematch = record.get("rematch")
+            msg["data"].append({
+                "requestId": rid,
+                "zoneId": zid,
+                "rematch": rematch_flag if record_rematch is None else record_rematch,
+            })
 
         if missing_zone_ids:
             raise ValueError(
