@@ -1,24 +1,6 @@
-param map = "CARLA_TOWN5"
+"""METS-R-only demand; configure the road network on the server. See README.md."""
+param backend = "metsr"
 param num_commuters = 500
-
-model scenic.simulators.metsr.model
-
-param timestep = 0.1
-
-scenario Test():
-    setup:
-        num_commuters = globalParameters.num_commuters
-        stime = 0
-        etime = 50 * 10 # simulation length
-    compose:
-        for i in range(num_commuters):
-            new PrivateCar with origin -1, with destination -1
-            wait
-
-scenario Main():
-    setup:
-        GeneratePrivateTrip(-1,-1)
-    compose:
-        foo = Test()
-        do foo for globalParameters.length seconds
-
+param length = 300
+param spawn_interval_s = globalParameters.get("timestep", 0.1)
+from traffic_template import Main

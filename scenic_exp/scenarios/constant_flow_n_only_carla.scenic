@@ -1,24 +1,6 @@
-param map = localPath(f'../../data/CARLA/{globalParameters.town}/facility/road/{globalParameters.town}.xodr') 
-param address = "10.0.0.122"
-
-model scenic.simulators.carla.model
-
+"""CARLA-only autopilot flow: no METS-R or PCLA. See README.md."""
+param backend = "carla"
 param num_commuters = 500
-param timestep = 0.1
 param length = 300
-
-scenario Test():
-    setup:
-        num_commuters = globalParameters.num_commuters
-    compose:
-        for i in range(num_commuters):
-            name = f"car_{i}"
-            new Car with name name
-            wait
-
-scenario Main():
-    setup:
-        ego = new Car with name "Ego"
-    compose:
-        do Test() for globalParameters.length seconds 
-    
+param spawn_interval_s = globalParameters.get("timestep", 0.1)
+from traffic_template import Main
