@@ -1,0 +1,17 @@
+{
+  "safety_scenario": "none",
+  "security_scenario": "stop_sign_patch",
+  "test_parameters": {
+    "trigger": {"mode": "time", "start_s": 0},
+    "event": {"duration_s": 60},
+    "stop_sign": {
+      "index": 0,
+      "enabled": true,
+      "max_distance_m": 90,
+      "minimum_red": 90,
+      "red_dominance": 1.25,
+      "roi_scale": 1.7,
+      "min_patch_pixels": 25
+    }
+  }
+}

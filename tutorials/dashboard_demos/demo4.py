@@ -18,15 +18,12 @@ import os
 import re
 import random
 import sys
-import threading
 import traceback
 import types
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
-
-import numpy as np
 
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent.parent
@@ -41,10 +38,34 @@ os.chdir(_REPO_ROOT)
 
 from tutorials.dashboard_demos import demo2 as scenic_demo  # noqa: E402
 from tutorials.dashboard_demos import demo3 as pcla_demo  # noqa: E402
+from scenic_exp.runtime.external import StopSignControllerRuntime, stop_sign_test_parameters
+from scenic_exp.runtime.integration import install_runtime_hook
 from utils.cosim_support import (  # noqa: E402
     CarlaSensorPanel,
     _start_viz_with_port_fallback,
     image_array_to_png,
+)
+
+
+# Compatibility exports for existing demo callers; implementation lives in the runtime.
+from scenic_exp.runtime.stop_sign import (  # noqa: E402, F401
+    StopSignCandidate,
+    _distance,
+    _horizontal_distance,
+    _environment_location,
+    _match_stop_actors_to_signs,
+    _stop_trigger_location,
+    _find_stop_approach,
+    discover_stop_signs,
+    select_candidates,
+    _transform_matrix,
+    _actor_transform_matrix,
+    annotate_overhead_target,
+    project_stop_sign,
+    StopSignColorPatchTap,
+    _waypoint_location,
+    _route_through_stop_quality,
+    generate_route_via_stop,
 )
 
 
@@ -233,49 +254,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 @dataclass(frozen=True)
-class StopSignCandidate:
-    index: int
-    actor_id: str
-    route_location: Any
-    visual_location: Any
-    visual_extent_m: float
-    source: str
-    approach_transform: Any
-    approach_distance_m: float
-    same_road_distance_m: float
-    road_id: Optional[int]
-    route_is_junction: bool
-    route_waypoint: Any = None
-    visual_id: str = ""
-    visual_name: str = ""
-
-    @property
-    def location_text(self) -> str:
-        loc = self.route_location
-        return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
-
-    @property
-    def initial_location_text(self) -> str:
-        if self.approach_transform is None:
-            return "unavailable"
-        loc = self.approach_transform.location
-        return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
-
-    @property
-    def visual_location_text(self) -> str:
-        loc = self.visual_location
-        return f"({float(loc.x):.1f}, {float(loc.y):.1f}, {float(loc.z):.1f})"
-
-    @property
-    def label(self) -> str:
-        road = "?" if self.road_id is None else str(self.road_id)
-        return (
-            f"stop[{self.index}] road={road} id={self.actor_id} "
-            f"{self.location_text} start={self.approach_distance_m:.1f}m upstream"
-        )
-
-
-@dataclass(frozen=True)
 class RunSpec:
     run_number: int
     seed: int
@@ -285,680 +263,6 @@ class RunSpec:
     @property
     def phase(self) -> str:
         return "attack" if self.attack_enabled else "baseline"
-
-
-def _distance(a: Any, b: Any) -> float:
-    return math.sqrt(
-        (float(a.x) - float(b.x)) ** 2
-        + (float(a.y) - float(b.y)) ** 2
-        + (float(a.z) - float(b.z)) ** 2
-    )
-
-
-def _horizontal_distance(a: Any, b: Any) -> float:
-    return math.hypot(float(a.x) - float(b.x), float(a.y) - float(b.y))
-
-
-def _environment_location(obj: Any) -> Optional[Any]:
-    location = getattr(getattr(obj, "bounding_box", None), "location", None)
-    if location is not None:
-        return location
-    return getattr(getattr(obj, "transform", None), "location", None)
-
-
-def _environment_extent(obj: Any) -> float:
-    extent = getattr(getattr(obj, "bounding_box", None), "extent", None)
-    values = [
-        abs(float(getattr(extent, axis, 0.0) or 0.0))
-        for axis in ("x", "y", "z")
-    ]
-    return max((value for value in values if 0.05 <= value <= 5.0), default=0.65)
-
-
-def _environment_vertical_extent(obj: Any) -> float:
-    extent = getattr(getattr(obj, "bounding_box", None), "extent", None)
-    return abs(float(getattr(extent, "z", 0.0) or 0.0))
-
-
-def _is_upright_stop_sign(obj: Any) -> bool:
-    """Reject STOP road paint and retain actual elevated sign meshes."""
-    name = str(getattr(obj, "name", "")).lower()
-    if "stop" not in name:
-        return False
-    non_sign_markers = ("stencil", "stopline", "stop_line", "roadmark", "road_mark")
-    if any(marker in name for marker in non_sign_markers):
-        return False
-    if _environment_location(obj) is None:
-        return False
-    # Town05's upright BP_Stop/Sign_Stop meshes have a meaningful vertical
-    # extent; its painted Stencil_STOP objects are essentially flat.
-    return _environment_vertical_extent(obj) >= 0.25
-
-
-def _match_stop_actors_to_signs(
-    actor_routes: Mapping[str, Any],
-    upright_stops: Sequence[Any],
-    maximum_distance_m: float = 15.0,
-) -> Dict[str, Tuple[float, str, Any, Any]]:
-    """Return a deterministic maximum-cardinality, minimum-cost assignment."""
-    visuals = sorted(
-        [
-            (
-            str(getattr(obj, "id", id(obj))),
-            obj,
-            _environment_location(obj),
-            )
-            for obj in upright_stops
-            if _environment_location(obj) is not None
-        ],
-        key=lambda row: row[0],
-    )
-    # mask -> (total XY distance, assignment records)
-    states: Dict[int, Tuple[float, Tuple[Tuple[str, str, Any, Any, float], ...]]] = {
-        0: (0.0, ())
-    }
-    for actor_id in sorted(actor_routes):
-        route = actor_routes[actor_id]
-        updated = dict(states)
-        for mask, (cost, assignments) in states.items():
-            for index, (visual_id, obj, visual) in enumerate(visuals):
-                bit = 1 << index
-                if mask & bit:
-                    continue
-                distance = _horizontal_distance(route, visual)
-                if distance > maximum_distance_m:
-                    continue
-                new_mask = mask | bit
-                new_assignments = assignments + (
-                    (actor_id, visual_id, obj, visual, distance),
-                )
-                candidate_value = (cost + distance, new_assignments)
-                current = updated.get(new_mask)
-                candidate_key = (
-                    candidate_value[0],
-                    tuple((row[0], row[1]) for row in candidate_value[1]),
-                )
-                current_key = (
-                    math.inf,
-                    (),
-                ) if current is None else (
-                    current[0],
-                    tuple((row[0], row[1]) for row in current[1]),
-                )
-                if candidate_key < current_key:
-                    updated[new_mask] = candidate_value
-        states = updated
-
-    _, assignments = min(
-        states.values(),
-        key=lambda value: (
-            -len(value[1]),
-            value[0],
-            tuple((row[0], row[1]) for row in value[1]),
-        ),
-    )
-    return {
-        actor_id: (distance, visual_id, obj, visual)
-        for actor_id, visual_id, obj, visual, distance in assignments
-    }
-
-
-def _copy_location(location: Any, carla_module: Any) -> Any:
-    return carla_module.Location(
-        x=float(location.x), y=float(location.y), z=float(location.z)
-    )
-
-
-def _stop_trigger_location(actor: Any, carla_module: Any) -> Any:
-    """Return the world-space center of a stop actor's lane trigger."""
-    actor_location = actor.get_location()
-    volume_location = getattr(getattr(actor, "trigger_volume", None), "location", None)
-    transform = getattr(actor, "get_transform", lambda: None)()
-    if volume_location is None or transform is None:
-        return actor_location
-    route = _copy_location(volume_location, carla_module)
-    try:
-        transformed = transform.transform(route)
-        return route if transformed is None else transformed
-    except Exception:
-        return actor_location
-
-
-def _stop_waypoints(world_map: Any, actor: Any, route: Any) -> List[Any]:
-    waypoints: List[Any] = []
-    affected = getattr(actor, "get_affected_lane_waypoints", None)
-    if callable(affected):
-        try:
-            waypoints.extend(list(affected() or []))
-        except Exception:
-            pass
-    try:
-        projected = world_map.get_waypoint(route, project_to_road=True)
-    except Exception:
-        projected = None
-    if projected is not None:
-        waypoints.append(projected)
-    unique: Dict[Tuple[Any, ...], Any] = {}
-    for waypoint in waypoints:
-        transform = getattr(waypoint, "transform", None)
-        location = getattr(transform, "location", None)
-        if location is None:
-            continue
-        key = (
-            getattr(waypoint, "road_id", None),
-            getattr(waypoint, "section_id", None),
-            getattr(waypoint, "lane_id", None),
-            round(float(location.x), 2),
-            round(float(location.y), 2),
-        )
-        unique[key] = waypoint
-    return list(unique.values())
-
-
-def _find_stop_approach(
-    world_map: Any,
-    actor: Any,
-    route: Any,
-    requested_distance_m: float,
-) -> Tuple[Any, float, float, Optional[int], bool, Any]:
-    """Find an upstream start outside junctions, preferring the stop sign's road."""
-    waypoints = _stop_waypoints(world_map, actor, route)
-    if not waypoints:
-        return None, 0.0, 0.0, None, False, None
-    route_waypoint = min(
-        waypoints,
-        key=lambda waypoint: _distance(waypoint.transform.location, route),
-    )
-    road_id = getattr(route_waypoint, "road_id", None)
-    is_junction = bool(getattr(route_waypoint, "is_junction", False))
-    distances: List[float] = []
-    distance = float(requested_distance_m)
-    while distance >= 5.0:
-        distances.append(distance)
-        distance -= 5.0
-    if not distances or not math.isclose(distances[-1], 5.0):
-        distances.append(5.0)
-
-    options: List[Tuple[bool, bool, float, float, float, Any, Any]] = []
-    same_road_distance = 0.0
-    for waypoint in waypoints:
-        for requested in distances:
-            try:
-                previous = list(waypoint.previous(requested) or [])
-            except Exception:
-                previous = []
-            for upstream in previous:
-                transform = getattr(upstream, "transform", None)
-                location = getattr(transform, "location", None)
-                if location is None:
-                    continue
-                actual = _distance(route, location)
-                same_road = (
-                    actual if getattr(upstream, "road_id", None) == road_id else 0.0
-                )
-                same_road_distance = max(same_road_distance, same_road)
-                outside_junction = not bool(getattr(upstream, "is_junction", False))
-                options.append((
-                    outside_junction,
-                    outside_junction and same_road > 0.0,
-                    requested,
-                    same_road,
-                    actual,
-                    transform,
-                    waypoint,
-                ))
-    if not options:
-        return None, 0.0, same_road_distance, road_id, is_junction, route_waypoint
-    # Starting midway through a junction can make PCLA's route planner lose
-    # the ongoing turn command. Prefer a nonjunction start on this road even
-    # when reaching the requested lead-in would place the ego inside a turn.
-    # Keep other upstream candidates as a fallback for short approach roads.
-    _, _, _, _, actual, transform, route_waypoint = max(
-        options,
-        key=lambda option: option[:5],
-    )
-    return transform, actual, same_road_distance, road_id, is_junction, route_waypoint
-
-
-def discover_stop_signs(
-    world: Any,
-    carla_module: Any,
-    approach_distance_m: float = 35.0,
-) -> List[StopSignCandidate]:
-    try:
-        actors = list(world.get_actors().filter("traffic.stop*"))
-    except Exception:
-        actors = []
-    unique = {
-        str(getattr(actor, "id", id(actor))): actor
-        for actor in actors
-        if actor is not None
-    }
-
-    sign_objects: List[Any] = []
-    label = getattr(getattr(carla_module, "CityObjectLabel", None), "TrafficSigns", None)
-    if label is not None and callable(getattr(world, "get_environment_objects", None)):
-        try:
-            sign_objects = list(world.get_environment_objects(label))
-        except Exception:
-            pass
-    upright_stops = [obj for obj in sign_objects if _is_upright_stop_sign(obj)]
-
-    world_map = world.get_map()
-    raw: List[Dict[str, Any]] = []
-    actor_routes = {
-        actor_id: _stop_trigger_location(actor, carla_module)
-        for actor_id, actor in unique.items()
-    }
-    matches = _match_stop_actors_to_signs(actor_routes, upright_stops)
-
-    for actor_id, actor in unique.items():
-        match = matches.get(actor_id)
-        if match is None:
-            # A traffic.stop actor without a nearby physical mesh often
-            # represents only Stencil_STOP road paint. Such a target cannot
-            # support a camera-space color attack and must not be fabricated.
-            continue
-        distance, visual_id, obj, visual = match
-        route = _stop_trigger_location(actor, carla_module)
-        visual_name = str(getattr(obj, "name", ""))
-        extent = _environment_extent(obj)
-        source = f"traffic.stop + upright {visual_name} ({distance:.1f} m XY)"
-        (
-            approach,
-            approach_distance,
-            same_road_distance,
-            road_id,
-            is_junction,
-            route_waypoint,
-        ) = (
-            _find_stop_approach(world_map, actor, route, approach_distance_m)
-        )
-        raw.append(
-            {
-                "actor_id": actor_id,
-                "route": route,
-                "visual": visual,
-                "extent": extent,
-                "source": source,
-                "approach": approach,
-                "approach_distance": approach_distance,
-                "same_road_distance": same_road_distance,
-                "road_id": road_id,
-                "is_junction": is_junction,
-                "route_waypoint": route_waypoint,
-                "visual_id": visual_id,
-                "visual_name": visual_name,
-            }
-        )
-
-    if not raw and not unique:
-        for obj in upright_stops:
-            location = _environment_location(obj)
-            if location is None:
-                continue
-            (
-                approach,
-                approach_distance,
-                same_road_distance,
-                road_id,
-                is_junction,
-                route_waypoint,
-            ) = (
-                _find_stop_approach(world_map, obj, location, approach_distance_m)
-            )
-            visual_id = str(getattr(obj, "id", len(raw)))
-            visual_name = str(getattr(obj, "name", ""))
-            raw.append(
-                {
-                    "actor_id": visual_id,
-                    "route": location,
-                    "visual": location,
-                    "extent": _environment_extent(obj),
-                    "source": f"upright CARLA environment stop sign {visual_name}",
-                    "approach": approach,
-                    "approach_distance": approach_distance,
-                    "same_road_distance": same_road_distance,
-                    "road_id": road_id,
-                    "is_junction": is_junction,
-                    "route_waypoint": route_waypoint,
-                    "visual_id": visual_id,
-                    "visual_name": visual_name,
-                }
-            )
-    raw.sort(
-        key=lambda row: (
-            float(row["route"].x),
-            float(row["route"].y),
-            row["actor_id"],
-        )
-    )
-    return [
-        StopSignCandidate(
-            index=index,
-            actor_id=row["actor_id"],
-            route_location=row["route"],
-            visual_location=row["visual"],
-            visual_extent_m=row["extent"],
-            source=row["source"],
-            approach_transform=row["approach"],
-            approach_distance_m=row["approach_distance"],
-            same_road_distance_m=row["same_road_distance"],
-            road_id=row["road_id"],
-            route_is_junction=row["is_junction"],
-            route_waypoint=row["route_waypoint"],
-            visual_id=row["visual_id"],
-            visual_name=row["visual_name"],
-        )
-        for index, row in enumerate(raw)
-    ]
-
-
-def select_candidates(
-    candidates: Sequence[StopSignCandidate],
-    indices_text: str,
-    offset: int,
-    limit: int,
-) -> List[StopSignCandidate]:
-    if not candidates:
-        raise RuntimeError("The CARLA map exposed no modeled stop signs")
-    if indices_text.strip():
-        try:
-            indices = [int(value.strip()) for value in indices_text.split(",") if value.strip()]
-        except ValueError as exc:
-            raise ValueError("--stop-sign-indices must be comma-separated integers") from exc
-        invalid = [index for index in indices if index < 0 or index >= len(candidates)]
-        if not indices or invalid:
-            raise ValueError(
-                f"invalid stop-sign indices {invalid or indices}; valid range is "
-                f"[0, {len(candidates) - 1}]"
-            )
-        selected = [candidates[index] for index in indices]
-    else:
-        ranked = sorted(
-            candidates,
-            key=lambda candidate: (
-                candidate.approach_transform is None,
-                candidate.route_is_junction,
-                -candidate.same_road_distance_m,
-                -candidate.approach_distance_m,
-                candidate.index,
-            ),
-        )
-        selected = list(ranked[offset : offset + limit])
-    if not selected:
-        raise ValueError("the candidate offset/limit selected no stop signs")
-    missing = [
-        candidate.index
-        for candidate in selected
-        if candidate.approach_transform is None
-    ]
-    if missing:
-        raise RuntimeError(
-            f"Could not find an upstream driving waypoint for stop signs {missing}"
-        )
-    return selected
-
-
-def _rotation_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    roll, pitch, yaw = np.radians([roll, pitch, yaw])
-    cr, sr = math.cos(roll), math.sin(roll)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    return np.array(
-        [
-            [cp * cy, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr],
-            [cp * sy, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr],
-            [sp, -cp * sr, cp * cr],
-        ],
-        dtype=float,
-    )
-
-
-def _transform_matrix(x: float, y: float, z: float, roll: float, pitch: float, yaw: float) -> np.ndarray:
-    matrix = np.eye(4, dtype=float)
-    matrix[:3, :3] = _rotation_matrix(roll, pitch, yaw)
-    matrix[:3, 3] = [x, y, z]
-    return matrix
-
-
-def _actor_transform_matrix(actor: Any) -> np.ndarray:
-    transform = actor.get_transform()
-    loc, rot = transform.location, transform.rotation
-    return _transform_matrix(
-        float(loc.x), float(loc.y), float(loc.z),
-        float(rot.roll), float(rot.pitch), float(rot.yaw),
-    )
-
-
-def annotate_overhead_target(
-    rgb: np.ndarray,
-    camera_actor: Any,
-    target: Any,
-    fov: float = 80.0,
-) -> np.ndarray:
-    """Draw a cyan ring over the selected stop in the dashboard camera only."""
-    marked = np.array(rgb, copy=True)
-    if marked.ndim != 3 or marked.shape[2] < 3 or camera_actor is None:
-        return marked
-    try:
-        camera_from_world = np.linalg.inv(_actor_transform_matrix(camera_actor))
-        local = camera_from_world @ np.array(
-            [float(target.x), float(target.y), float(target.z), 1.0]
-        )
-    except Exception:
-        return marked
-    depth = float(local[0])
-    if depth <= 0.1:
-        return marked
-    height, width = marked.shape[:2]
-    focal = width / (2.0 * math.tan(math.radians(float(fov)) / 2.0))
-    center_x = int(round(width / 2.0 + focal * float(local[1]) / depth))
-    center_y = int(round(height / 2.0 - focal * float(local[2]) / depth))
-    if not (0 <= center_x < width and 0 <= center_y < height):
-        return marked
-
-    radius = 14
-    yy, xx = np.ogrid[:height, :width]
-    distance_sq = (xx - center_x) ** 2 + (yy - center_y) ** 2
-    ring = (distance_sq >= (radius - 2) ** 2) & (
-        distance_sq <= (radius + 2) ** 2
-    )
-    marked[ring, :3] = (0, 255, 255)
-    x0, x1 = max(0, center_x - radius - 6), min(width, center_x + radius + 7)
-    y0, y1 = max(0, center_y - radius - 6), min(height, center_y + radius + 7)
-    marked[max(0, center_y - 1) : min(height, center_y + 2), x0:x1, :3] = (
-        0,
-        255,
-        255,
-    )
-    marked[y0:y1, max(0, center_x - 1) : min(width, center_x + 2), :3] = (
-        0,
-        255,
-        255,
-    )
-    return marked
-
-
-def project_stop_sign(
-    ego_actor: Any,
-    spec: Mapping[str, Any],
-    target: Any,
-    image_shape: Sequence[int],
-    extent_m: float,
-    roi_scale: float,
-) -> Optional[Tuple[int, int, int, int, float]]:
-    height, width = int(image_shape[0]), int(image_shape[1])
-    relative = _transform_matrix(
-        *(float(spec.get(key, 0.0) or 0.0) for key in ("x", "y", "z", "roll", "pitch", "yaw"))
-    )
-    camera_from_world = np.linalg.inv(_actor_transform_matrix(ego_actor) @ relative)
-    local = camera_from_world @ np.array(
-        [float(target.x), float(target.y), float(target.z), 1.0]
-    )
-    depth = float(local[0])
-    if depth <= 0.1:
-        return None
-    fov = float(spec.get("fov", 90.0) or 90.0)
-    focal = width / (2.0 * math.tan(math.radians(fov) / 2.0))
-    u = width / 2.0 + focal * float(local[1]) / depth
-    v = height / 2.0 - focal * float(local[2]) / depth
-    radius = max(5, int(round(focal * extent_m * roi_scale / depth)))
-    x0, x1 = max(0, round(u) - radius), min(width, round(u) + radius + 1)
-    y0, y1 = max(0, round(v) - radius), min(height, round(v) + radius + 1)
-    if x0 >= x1 or y0 >= y1:
-        return None
-    return x0, y0, x1, y1, depth
-
-
-class StopSignColorPatchTap:
-    """Patch one projected stop sign before PCLA consumes CARLA BGRA frames."""
-
-    def __init__(
-        self,
-        pcla: Any,
-        ego_actor: Any,
-        candidate: StopSignCandidate,
-        enabled: bool,
-        args: argparse.Namespace,
-    ) -> None:
-        agent = getattr(pcla, "agent_instance", None)
-        interface = getattr(agent, "sensor_interface", None)
-        if interface is None or not callable(getattr(interface, "update_sensor", None)):
-            raise RuntimeError("PCLA agent did not expose sensor_interface.update_sensor")
-        specs = [
-            dict(spec) for spec in agent.sensors()
-            if str(spec.get("type", "")).startswith("sensor.camera.rgb")
-        ]
-        specs.sort(key=lambda spec: str(spec.get("id", "")))
-        self.camera_specs = specs
-        self._specs = {str(spec.get("id")): spec for spec in specs}
-        phase = "ATTACKED red->blue" if enabled else "BASELINE unmodified"
-        self._labels = {
-            sensor_id: f"{phase} | {pcla_demo._camera_label(spec, index)}"
-            for index, (sensor_id, spec) in enumerate(self._specs.items())
-        }
-        if enabled:
-            for index, (sensor_id, spec) in enumerate(self._specs.items()):
-                self._labels[f"{sensor_id}__reference"] = (
-                    f"REFERENCE red original | {pcla_demo._camera_label(spec, index)}"
-                )
-        self._interface = interface
-        self._original_update = interface.update_sensor
-        self._ego_actor = ego_actor
-        self._candidate = candidate
-        self._enabled = enabled
-        self._args = args
-        self._lock = threading.Lock()
-        self._latest: Dict[str, Tuple[Any, np.ndarray]] = {}
-        self._png_cache: Dict[str, Tuple[Any, bytes]] = {}
-        self.frames_patched = 0
-        self.pixels_patched = 0
-        self.projected_frames = 0
-        self.meaningful_patched_frames = 0
-        self.max_pixels_patched_per_frame = 0
-        self.closest_patched_distance_m: Optional[float] = None
-        self.last_target_distance_m: Optional[float] = None
-        self.minimum_target_distance_m: Optional[float] = None
-        original_update = self._original_update
-
-        def update_sensor(tag: Any, data: Any, timestamp: Any) -> Any:
-            sensor_id = str(tag)
-            delivered = data
-            if sensor_id in self._specs:
-                array = np.asarray(data)
-                if array.ndim == 3 and array.shape[2] >= 3:
-                    original_rgb = array[:, :, :3][:, :, ::-1].copy()
-                    distance = _distance(ego_actor.get_location(), candidate.route_location)
-                    self.last_target_distance_m = distance
-                    self.minimum_target_distance_m = min(
-                        distance,
-                        self.minimum_target_distance_m
-                        if self.minimum_target_distance_m is not None else distance,
-                    )
-                    if enabled and distance <= args.attack_max_distance_m:
-                        projection = project_stop_sign(
-                            ego_actor, self._specs[sensor_id], candidate.visual_location,
-                            array.shape, candidate.visual_extent_m, args.attack_roi_scale,
-                        )
-                        if projection is not None:
-                            self.projected_frames += 1
-                            x0, y0, x1, y1, _ = projection
-                            working = np.array(array, copy=True)
-                            count = self.recolor_red_bgra(
-                                working[y0:y1, x0:x1],
-                                args.attack_min_red,
-                                args.attack_red_dominance,
-                            )
-                            if count:
-                                delivered = working
-                                self.frames_patched += 1
-                                self.pixels_patched += count
-                                self.max_pixels_patched_per_frame = max(
-                                    self.max_pixels_patched_per_frame, count
-                                )
-                                self.closest_patched_distance_m = min(
-                                    distance,
-                                    self.closest_patched_distance_m
-                                    if self.closest_patched_distance_m is not None
-                                    else distance,
-                                )
-                                if count >= args.attack_min_patch_pixels:
-                                    self.meaningful_patched_frames += 1
-                    shown = np.asarray(delivered)
-                    rgb = shown[:, :, :3][:, :, ::-1].copy()
-                    with self._lock:
-                        if enabled:
-                            self._latest[f"{sensor_id}__reference"] = (timestamp, original_rgb)
-                        self._latest[sensor_id] = (timestamp, rgb)
-            return original_update(tag, delivered, timestamp)
-
-        self._wrapped_update = update_sensor
-        interface.update_sensor = update_sensor
-
-    @staticmethod
-    def recolor_red_bgra(region: np.ndarray, minimum_red: int = 90, dominance: float = 1.25) -> int:
-        if region.ndim != 3 or region.shape[2] < 3 or region.size == 0:
-            return 0
-        blue = region[:, :, 0].astype(np.float32)
-        green = region[:, :, 1].astype(np.float32)
-        red = region[:, :, 2].astype(np.float32)
-        mask = (
-            (red >= minimum_red)
-            & (red >= green * dominance)
-            & (red >= blue * dominance)
-        )
-        count = int(np.count_nonzero(mask))
-        if count:
-            old_red = region[:, :, 2][mask].copy()
-            old_blue = region[:, :, 0][mask].copy()
-            region[:, :, 0][mask] = np.maximum(old_red, 128)
-            region[:, :, 2][mask] = np.minimum(old_blue, 48)
-        return count
-
-    @property
-    def pixels_per_patched_frame(self) -> float:
-        return (
-            0.0
-            if self.frames_patched <= 0
-            else self.pixels_patched / self.frames_patched
-        )
-
-    def snapshots(self) -> Dict[str, Tuple[str, bytes, Any]]:
-        result: Dict[str, Tuple[str, bytes, Any]] = {}
-        with self._lock:
-            latest = dict(self._latest)
-        for sensor_id, (frame, rgb) in latest.items():
-            cached = self._png_cache.get(sensor_id)
-            if cached is None or cached[0] != frame:
-                cached = (frame, image_array_to_png(rgb))
-                self._png_cache[sensor_id] = cached
-            result[sensor_id] = (self._labels.get(sensor_id, sensor_id), cached[1], frame)
-        return result
-
-    def close(self) -> None:
-        if getattr(self._interface, "update_sensor", None) is self._wrapped_update:
-            self._interface.update_sensor = self._original_update
 
 
 class Demo4Dashboard(pcla_demo.PCLADashboard):
@@ -994,34 +298,28 @@ class Demo4Dashboard(pcla_demo.PCLADashboard):
         )
         self._run_rows: List[Dict[str, Any]] = []
 
-    @staticmethod
-    def _run_value(key: str, value: Any) -> str:
-        if value in (None, ""):
-            return "n/a"
-        if key in {"congestion_score_s", "attack_delta_s"}:
-            try:
-                return f"{float(value):.1f}"
-            except (TypeError, ValueError):
-                pass
-        return str(value)
-
     def _runs_table_html_locked(self) -> str:
         if not self._run_rows:
             return "<div class='runs-empty'>Waiting for Scenic run definitions...</div>"
         header = "".join(
             f"<th>{escape(label)}</th>" for _, label in self._RUN_COLUMNS
         )
-        body = "".join(
-            "<tr class='scenic-run scenic-run--"
-            + re.sub(r"[^a-z0-9_-]", "-", str(row.get("status", "queued")).lower())
-            + "'>"
-            + "".join(
-                f"<td>{escape(self._run_value(key, row.get(key)))}</td>"
-                for key, _ in self._RUN_COLUMNS
-            )
-            + "</tr>"
-            for row in self._run_rows
-        )
+        rows = []
+        for row in self._run_rows:
+            status = re.sub(r"[^a-z0-9_-]", "-", str(row.get("status", "queued")).lower())
+            cells = []
+            for key, _ in self._RUN_COLUMNS:
+                value = row.get(key)
+                if value in (None, ""):
+                    value = "n/a"
+                elif key in {"congestion_score_s", "attack_delta_s"}:
+                    try:
+                        value = f"{float(value):.1f}"
+                    except (TypeError, ValueError):
+                        pass
+                cells.append(f"<td>{escape(str(value))}</td>")
+            rows.append(f"<tr class='scenic-run scenic-run--{status}'>" + "".join(cells) + "</tr>")
+        body = "".join(rows)
         return (
             "<table class='scenic-runs-table'><thead><tr>"
             f"{header}</tr></thead><tbody>{body}</tbody></table>"
@@ -1185,177 +483,6 @@ class Demo4Dashboard(pcla_demo.PCLADashboard):
         return state
 
 
-def _call_route_maker(pcla_module: Any, waypoints: Sequence[Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        pcla_module.route_maker(waypoints, str(path))
-    except TypeError:
-        pcla_module.route_maker(waypoints, savePath=str(path))
-    if not path.exists():
-        raise RuntimeError(f"PCLA route_maker did not create {path}")
-
-
-def _waypoint_location(waypoint: Any) -> Optional[Any]:
-    return getattr(getattr(waypoint, "transform", None), "location", None)
-
-
-def _route_distance(waypoints: Sequence[Any], start_index: int = 0) -> float:
-    locations = [
-        location
-        for waypoint in waypoints[start_index:]
-        if (location := _waypoint_location(waypoint)) is not None
-    ]
-    return sum(_distance(first, second) for first, second in zip(locations, locations[1:]))
-
-
-def _route_through_stop_quality(
-    waypoints: Sequence[Any],
-    candidate: StopSignCandidate,
-    minimum_downstream_m: float,
-) -> Optional[Tuple[int, float]]:
-    """Validate one continuous route through the selected stop-sign lane."""
-    target_waypoint = candidate.route_waypoint
-    target_location = (
-        _waypoint_location(target_waypoint)
-        if target_waypoint is not None
-        else candidate.route_location
-    )
-    if target_location is None or len(waypoints) <= 1:
-        return None
-
-    target_road = getattr(target_waypoint, "road_id", candidate.road_id)
-    target_lane = getattr(target_waypoint, "lane_id", None)
-    matches: List[Tuple[float, int]] = []
-    for index, waypoint in enumerate(waypoints):
-        location = _waypoint_location(waypoint)
-        if location is None:
-            continue
-        same_lane = (
-            target_lane is None
-            or (
-                getattr(waypoint, "road_id", None) == target_road
-                and getattr(waypoint, "lane_id", None) == target_lane
-            )
-        )
-        if same_lane:
-            matches.append((_horizontal_distance(location, target_location), index))
-    if not matches:
-        return None
-    target_distance, target_index = min(matches)
-    if target_distance > 5.0:
-        return None
-
-    # Detect the exact failure reproduced in the original route: immediately
-    # after the stop, the stitched route moved 3.5 m sideways and then backward.
-    window_start = max(0, target_index - 5)
-    window_end = min(len(waypoints), target_index + 9)
-    for first, second in zip(
-        waypoints[window_start:window_end],
-        waypoints[window_start + 1:window_end],
-    ):
-        first_location = _waypoint_location(first)
-        second_location = _waypoint_location(second)
-        rotation = getattr(getattr(first, "transform", None), "rotation", None)
-        if first_location is None or second_location is None or rotation is None:
-            continue
-        yaw = math.radians(float(getattr(rotation, "yaw", 0.0)))
-        dx = float(second_location.x) - float(first_location.x)
-        dy = float(second_location.y) - float(first_location.y)
-        longitudinal = dx * math.cos(yaw) + dy * math.sin(yaw)
-        lateral = -dx * math.sin(yaw) + dy * math.cos(yaw)
-        if longitudinal < -0.25:
-            return None
-        if longitudinal < 0.25 and abs(lateral) > 0.5:
-            return None
-
-    downstream_m = _route_distance(waypoints, target_index)
-    if downstream_m < minimum_downstream_m:
-        return None
-    return target_index, downstream_m
-
-
-def generate_route_via_stop(
-    pcla_module: Any,
-    client: Any,
-    ego_actor: Any,
-    candidate: StopSignCandidate,
-    output_path: Path,
-    min_distance_m: float,
-) -> Path:
-    world_map = client.get_world().get_map()
-    start = ego_actor.get_location()
-    target_waypoint = candidate.route_waypoint or world_map.get_waypoint(
-        candidate.route_location, project_to_road=True
-    )
-    if target_waypoint is None:
-        raise RuntimeError(f"Could not project {candidate.label} onto a driving lane")
-    target = target_waypoint.transform.location
-
-    # Prefer destinations reached by following the selected stop lane forward.
-    # Each candidate is planned once from start to destination; independently
-    # planned legs are never concatenated at the ambiguous stop trigger.
-    desired = max(10.0, float(min_distance_m))
-    requested_distances: List[float] = []
-    for value in (desired, desired * 0.8, desired * 0.6, desired * 0.4, 50.0, 25.0):
-        value = max(10.0, value)
-        if not any(math.isclose(value, seen, abs_tol=0.1) for seen in requested_distances):
-            requested_distances.append(value)
-    options: List[Tuple[Any, float, str]] = []
-    for requested in requested_distances:
-        try:
-            downstream = list(target_waypoint.next(requested) or [])
-        except Exception:
-            downstream = []
-        for waypoint in downstream:
-            location = _waypoint_location(waypoint)
-            if location is not None:
-                options.append((location, max(10.0, requested * 0.8), "forward lane"))
-
-    spawn_points = sorted(
-        world_map.get_spawn_points(),
-        key=lambda transform: _horizontal_distance(target, transform.location),
-        reverse=True,
-    )
-    options.extend(
-        (transform.location, 10.0, "map spawn")
-        for transform in spawn_points
-        if _horizontal_distance(target, transform.location) >= 10.0
-    )
-
-    deduplicated: List[Tuple[Any, float, str]] = []
-    seen_destinations: set[Tuple[float, float]] = set()
-    for location, required_downstream, source in options:
-        key = (round(float(location.x), 1), round(float(location.y), 1))
-        if key not in seen_destinations:
-            deduplicated.append((location, required_downstream, source))
-            seen_destinations.add(key)
-
-    last_error: Optional[BaseException] = None
-    for destination, required_downstream, source in deduplicated:
-        try:
-            waypoints = list(
-                pcla_module.location_to_waypoint(client, start, destination)
-            )
-            quality = _route_through_stop_quality(
-                waypoints, candidate, required_downstream
-            )
-            if quality is None:
-                continue
-            target_index, downstream_m = quality
-            _call_route_maker(pcla_module, waypoints, output_path)
-            print(
-                f"Continuous PCLA route via {candidate.label}: "
-                f"{len(waypoints)} waypoints, stop waypoint {target_index}, "
-                f"{downstream_m:.1f} m downstream ({source})."
-            )
-            return output_path
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(
-        f"Could not generate a continuous PCLA route through {candidate.label}"
-    ) from last_error
-
-
 @dataclass
 class RunStats:
     steps: int = 0
@@ -1388,260 +515,40 @@ class RunStats:
         return self.network_delay_s + self.queue_vehicle_s
 
 
-class RunRuntime:
+class RunRuntime(StopSignControllerRuntime):
     def __init__(
         self,
         args: argparse.Namespace,
         spec: RunSpec,
         dashboard: Demo4Dashboard,
         best_provider: Callable[[], str],
+        *,
+        test_parameters=None,
     ) -> None:
-        self.args = args
-        self.spec = spec
+        super().__init__(args, spec, test_parameters=test_parameters)
         self.dashboard = dashboard
         self.best_provider = best_provider
-        self.simulation: Any = None
-        self.controller: Optional[pcla_demo.PCLAController] = None
-        self.tap: Optional[StopSignColorPatchTap] = None
         self.panel: Optional[CarlaSensorPanel] = None
         self.stats = RunStats()
-        self.last_control: Any = None
         self.render_error = ""
         self.overhead_png: Optional[bytes] = None
         self.camera_views: Dict[str, Tuple[str, bytes, Any]] = {}
-        self.route_path: Optional[Path] = None
         self.ego_vehicle_id: Optional[Any] = None
-        self.closed = False
         self.summary: Optional[Dict[str, Any]] = None
 
-    def attach(self, simulation: Any) -> None:
-        self.simulation = simulation
-        # Stop dashboard/PCLA callbacks while their parent actors still exist.
-        simulation.add_pre_actor_teardown_callback(self.close)
-
-    def _ego(self) -> Tuple[Any, Any]:
-        ego = getattr(self.simulation, "ego", None)
-        if ego is None:
-            objects = list(getattr(self.simulation, "objects", []) or [])
-            ego = objects[0] if objects else None
-        actor = getattr(ego, "carlaActor", None)
-        if ego is None or actor is None:
-            raise RuntimeError("Scenic did not expose the CARLA ego actor for PCLA")
-        return ego, actor
-
-    @staticmethod
-    def _carla_module() -> Any:
-        try:
-            import carla
-        except ImportError as exc:
-            raise RuntimeError("The matching CARLA Python API is required") from exc
-        return carla
-
     def _ensure_controller(self) -> None:
-        if self.controller is not None:
+        ready = self.controller is not None
+        super()._ensure_controller()
+        if ready:
             return
-        ego, actor = self._ego()
-        # METS-R ownership transitions can leave a zero constant-velocity
-        # constraint behind. Releasing it does not command motion; PCLA remains
-        # the sole source of throttle, brake, and steering.
-        disable_constant_velocity = getattr(actor, "disable_constant_velocity", None)
-        if callable(disable_constant_velocity):
-            try:
-                disable_constant_velocity()
-            except Exception:
-                pass
-        if self.args.pcla_route:
-            route_path = Path(self.args.pcla_route)
-        else:
-            pcla_module = pcla_demo._import_pcla(self.args.pcla_dir)
-            route_path = (
-                Path(self.args.route_output_dir)
-                / f"run_{self.spec.run_number:02d}_stop_{self.spec.candidate.index}_{self.spec.phase}.xml"
-            )
-            route_path = generate_route_via_stop(
-                pcla_module,
-                self.simulation.carla_client,
-                actor,
-                self.spec.candidate,
-                route_path,
-                self.args.route_min_distance_m,
-            )
-        self.route_path = route_path
-        controller_args = types.SimpleNamespace(
-            pcla_dir=self.args.pcla_dir,
-            pcla_agent=self.args.pcla_agent,
-            pcla_route=str(route_path),
-            route_output=str(route_path),
-            route_end_spawn_index=None,
-            route_min_distance_m=self.args.route_min_distance_m,
-        )
-        self.controller = pcla_demo.PCLAController(
-            controller_args,
-            self._carla_module(),
-            self.simulation.carla_client,
-            actor,
-        )
-        if self.controller.tap is not None:
-            self.controller.tap.close()
-        self.tap = StopSignColorPatchTap(
-            self.controller.pcla,
-            actor,
-            self.spec.candidate,
-            self.spec.attack_enabled,
-            self.args,
-        )
-        self.controller.tap = self.tap
+        ego, _ = self._ego()
         self.dashboard.configure_camera_views(self.tap.camera_specs)
         try:
             self.ego_vehicle_id = self.simulation.getMetsrPrivateVehId(ego)
         except Exception:
             self.ego_vehicle_id = getattr(ego, "name", 0)
         self.dashboard.ego_vehicle_id = self.ego_vehicle_id
-        print(f"PCLA route for {self.spec.phase}: {route_path}")
-
-    def before_step(self) -> None:
-        self._ensure_controller()
-
-    def apply_control(self) -> None:
-        self._ensure_controller()
-        assert self.controller is not None
-        _, actor = self._ego()
-        disable_constant_velocity = getattr(actor, "disable_constant_velocity", None)
-        if callable(disable_constant_velocity):
-            try:
-                disable_constant_velocity()
-            except Exception:
-                pass
-        self.last_control = self.controller.step()
-
-    def _world_vehicle_speeds(self) -> List[float]:
-        speeds: List[float] = []
-        try:
-            actors = self.simulation.carla_world.get_actors().filter("vehicle.*")
-        except Exception:
-            actors = []
-        for actor in actors:
-            try:
-                velocity = actor.get_velocity()
-                speeds.append(
-                    math.sqrt(
-                        float(velocity.x) ** 2
-                        + float(velocity.y) ** 2
-                        + float(velocity.z) ** 2
-                    )
-                )
-            except Exception:
-                pass
-        return speeds
-
-    def _metsr_vehicle_speeds(self) -> List[float]:
-        query = getattr(
-            self.simulation.metsr_client,
-            "_query_viz_stream_vehicle_records",
-            None,
-        )
-        if not callable(query):
-            return []
-        try:
-            records = query(
-                transform_coords=False,
-                include_public=True,
-                include_private=True,
-                batch_size=1000,
-            )
-        except Exception:
-            return []
-        speeds: List[float] = []
-        for record in records or []:
-            if not isinstance(record, Mapping):
-                continue
-            value = scenic_demo.first_float(
-                record.get("speed"),
-                record.get("speed_mps"),
-                record.get("velocity"),
-            )
-            if value is not None and value >= 0:
-                speeds.append(float(value))
-        return speeds
-
-    def _sample_congestion(self) -> None:
-        interval_s = self.args.timestep * self.args.dashboard_every
-        speeds = self._metsr_vehicle_speeds() or self._world_vehicle_speeds()
-        if not speeds:
-            return
-        free_flow = self.args.free_flow_speed_mps
-        self.stats.network_delay_s += sum(
-            max(0.0, 1.0 - speed / free_flow) * interval_s
-            for speed in speeds
-        )
-        self.stats.speed_sum_mps += sum(speeds)
-        self.stats.speed_samples += len(speeds)
-
-    def _update_step_stats(self, actor: Any) -> None:
-        self.stats.steps += 1
-        queue = len(getattr(self.simulation, "bubble_spawn_queue", []) or [])
-        actors = len(getattr(self.simulation, "carla_actors", []) or [])
-        self.stats.max_bubble_queue = max(self.stats.max_bubble_queue, queue)
-        self.stats.max_carla_actors = max(self.stats.max_carla_actors, actors)
-        self.stats.queue_vehicle_s += queue * self.args.timestep
-        speed_kmh = pcla_demo._speed_kmh(actor)
-        if speed_kmh < 1.0:
-            self.stats.ego_stopped_s += self.args.timestep
-        actor_location = actor.get_location()
-        target_waypoint = self.spec.candidate.route_waypoint
-        target_transform = getattr(target_waypoint, "transform", None)
-        target_location = getattr(target_transform, "location", None)
-        if target_location is None:
-            target_location = self.spec.candidate.route_location
-        target_distance = _horizontal_distance(actor_location, target_location)
-        if target_distance <= 8.0:
-            self.stats.target_seen = True
-            if speed_kmh < 1.0:
-                self.stats.stopped_at_target = True
-                self.stats.stop_zone_stopped_s += self.args.timestep
-                self.stats.current_stop_dwell_s += self.args.timestep
-                self.stats.max_stop_dwell_s = max(
-                    self.stats.max_stop_dwell_s,
-                    self.stats.current_stop_dwell_s,
-                )
-            else:
-                self.stats.current_stop_dwell_s = 0.0
-        else:
-            self.stats.current_stop_dwell_s = 0.0
-        if self.stats.stopped_at_target and speed_kmh >= 3.6:
-            self.stats.resumed_after_stop = True
-
-        rotation = getattr(target_transform, "rotation", None)
-        if rotation is not None:
-            yaw = math.radians(float(getattr(rotation, "yaw", 0.0)))
-            dx = float(actor_location.x) - float(target_location.x)
-            dy = float(actor_location.y) - float(target_location.y)
-            progress = dx * math.cos(yaw) + dy * math.sin(yaw)
-            lateral = -dx * math.sin(yaw) + dy * math.cos(yaw)
-            previous_progress = self.stats.signed_stop_progress_m
-            self.stats.signed_stop_progress_m = progress
-            self.stats.stop_lateral_m = lateral
-            lane_width = float(getattr(target_waypoint, "lane_width", 3.5) or 3.5)
-            if (
-                self.stats.target_seen
-                and abs(lateral) <= max(4.0, lane_width)
-                and previous_progress is not None
-                and previous_progress < 0.0 <= progress
-            ):
-                self.stats.crossed_stop = True
-        if self.stats.steps % self.args.dashboard_every == 0:
-            self._sample_congestion()
-
-    def _render_metsr(self) -> None:
-        try:
-            render = self.simulation.metsr_client.render
-            try:
-                render(client_wait_timeout=0.0)
-            except TypeError:
-                render()
-            self.render_error = ""
-        except Exception as exc:
-            self.render_error = str(exc).splitlines()[0]
+        print(f"PCLA route for {self.spec.phase}: {self.route_path}")
 
     def _update_camera(self, actor: Any) -> None:
         if self.panel is None:
@@ -1770,9 +677,114 @@ class RunRuntime:
 
     def after_step(self) -> None:
         _, actor = self._ego()
-        self._update_step_stats(actor)
+        self.stats.steps += 1
+        queue = len(getattr(self.simulation, "bubble_spawn_queue", []) or [])
+        actors = len(getattr(self.simulation, "carla_actors", []) or [])
+        self.stats.max_bubble_queue = max(self.stats.max_bubble_queue, queue)
+        self.stats.max_carla_actors = max(self.stats.max_carla_actors, actors)
+        self.stats.queue_vehicle_s += queue * self.args.timestep
+        speed_kmh = pcla_demo._speed_kmh(actor)
+        if speed_kmh < 1.0:
+            self.stats.ego_stopped_s += self.args.timestep
+        actor_location = actor.get_location()
+        target_waypoint = self.spec.candidate.route_waypoint
+        target_transform = getattr(target_waypoint, "transform", None)
+        target_location = getattr(target_transform, "location", None)
+        if target_location is None:
+            target_location = self.spec.candidate.route_location
+        target_distance = _horizontal_distance(actor_location, target_location)
+        if target_distance <= 8.0:
+            self.stats.target_seen = True
+            if speed_kmh < 1.0:
+                self.stats.stopped_at_target = True
+                self.stats.stop_zone_stopped_s += self.args.timestep
+                self.stats.current_stop_dwell_s += self.args.timestep
+                self.stats.max_stop_dwell_s = max(
+                    self.stats.max_stop_dwell_s,
+                    self.stats.current_stop_dwell_s,
+                )
+            else:
+                self.stats.current_stop_dwell_s = 0.0
+        else:
+            self.stats.current_stop_dwell_s = 0.0
+        if self.stats.stopped_at_target and speed_kmh >= 3.6:
+            self.stats.resumed_after_stop = True
+
+        rotation = getattr(target_transform, "rotation", None)
+        if rotation is not None:
+            yaw = math.radians(float(getattr(rotation, "yaw", 0.0)))
+            dx = float(actor_location.x) - float(target_location.x)
+            dy = float(actor_location.y) - float(target_location.y)
+            progress = dx * math.cos(yaw) + dy * math.sin(yaw)
+            lateral = -dx * math.sin(yaw) + dy * math.cos(yaw)
+            previous_progress = self.stats.signed_stop_progress_m
+            self.stats.signed_stop_progress_m = progress
+            self.stats.stop_lateral_m = lateral
+            lane_width = float(getattr(target_waypoint, "lane_width", 3.5) or 3.5)
+            if (
+                self.stats.target_seen
+                and abs(lateral) <= max(4.0, lane_width)
+                and previous_progress is not None
+                and previous_progress < 0.0 <= progress
+            ):
+                self.stats.crossed_stop = True
+
+        if self.stats.steps % self.args.dashboard_every == 0:
+            # Prefer the complete METS-R population; fall back to CARLA actors.
+            client = self.simulation.metsr_client
+            query = getattr(client, "query_visualization_vehicles", None)
+            if not callable(query):
+                # Independently installed Scenic clients still use the older name.
+                query = getattr(client, "_query_viz_stream_vehicle_records", None)
+            records = []
+            if callable(query):
+                try:
+                    records = query(
+                        transform_coords=False, include_public=True,
+                        include_private=True, batch_size=1000,
+                    )
+                except Exception:
+                    pass
+            speeds = []
+            for record in records or []:
+                if not isinstance(record, Mapping):
+                    continue
+                value = scenic_demo.first_float(
+                    record.get("speed"), record.get("speed_mps"), record.get("velocity"),
+                )
+                if value is not None and value >= 0:
+                    speeds.append(float(value))
+            if not speeds:
+                try:
+                    actors = self.simulation.carla_world.get_actors().filter("vehicle.*")
+                except Exception:
+                    actors = []
+                for vehicle in actors:
+                    try:
+                        velocity = vehicle.get_velocity()
+                        speeds.append(math.sqrt(
+                            float(velocity.x) ** 2 + float(velocity.y) ** 2 + float(velocity.z) ** 2
+                        ))
+                    except Exception:
+                        pass
+            if speeds:
+                interval_s = self.args.timestep * self.args.dashboard_every
+                self.stats.network_delay_s += sum(
+                    max(0.0, 1.0 - speed / self.args.free_flow_speed_mps) * interval_s
+                    for speed in speeds
+                )
+                self.stats.speed_sum_mps += sum(speeds)
+                self.stats.speed_samples += len(speeds)
         if self.stats.steps % self.args.render_every == 0:
-            self._render_metsr()
+            try:
+                render = self.simulation.metsr_client.render
+                try:
+                    render(client_wait_timeout=0.0)
+                except TypeError:
+                    render()
+                self.render_error = ""
+            except Exception as exc:
+                self.render_error = str(exc).splitlines()[0]
         if self.stats.steps % self.args.camera_every == 0:
             self._update_camera(actor)
         if self.stats.steps % self.args.dashboard_every == 0:
@@ -1869,93 +881,18 @@ class RunRuntime:
     def close(self) -> None:
         if self.closed:
             return
-        self.closed = True
         if self.panel is not None:
             try:
                 self.panel.close()
             except Exception:
                 pass
             self.panel = None
-        if self.controller is not None:
-            self.controller.close(destroy_vehicle=False)
-            self.controller = None
+        super().close()
 
 
 class RuntimeHolder:
     def __init__(self) -> None:
         self.current: Optional[RunRuntime] = None
-
-
-def install_runtime_hook(simulator: Any, holder: RuntimeHolder) -> None:
-    """Install demo4 hooks before Scenic constructs and runs CosimSimulation."""
-    try:
-        from scenic.simulators.cosim import simulator as cosim_module
-        simulation_cls = getattr(cosim_module, "CosimSimulation", None)
-    except Exception:
-        simulation_cls = None
-    if simulation_cls is None:
-        raise RuntimeError("Could not find Scenic CosimSimulation for demo4 hooks")
-
-    patch_version = 2
-    if getattr(simulation_cls, "_tracr_demo4_patch_version", 0) < patch_version:
-        original_step = getattr(
-            simulation_cls, "_tracr_demo4_original_step", simulation_cls.step
-        )
-        original_destroy = getattr(
-            simulation_cls, "_tracr_demo4_original_destroy", simulation_cls.destroy
-        )
-        simulation_cls._tracr_demo4_original_step = original_step
-        simulation_cls._tracr_demo4_original_destroy = original_destroy
-
-        def runtime_for(simulation: Any) -> Optional[RunRuntime]:
-            return getattr(simulation, "_tracr_demo4_runtime", None) or getattr(
-                type(simulation), "_tracr_demo4_pending_runtime", None
-            )
-
-        def step_with_demo4(self: Any, *args: Any, **kwargs: Any) -> Any:
-            runtime = runtime_for(self)
-            if runtime is None:
-                return original_step(self, *args, **kwargs)
-            if runtime.simulation is None:
-                runtime.attach(self)
-            runtime.before_step()
-            result = original_step(self, *args, **kwargs)
-            # Apply PCLA after Scenic/METS-R has advanced and transferred
-            # actors, making PCLA the final control writer for the next tick.
-            runtime.apply_control()
-            runtime.after_step()
-            return result
-
-        def destroy_with_demo4(self: Any, *args: Any, **kwargs: Any) -> Any:
-            runtime = runtime_for(self)
-            try:
-                return original_destroy(self, *args, **kwargs)
-            finally:
-                if runtime is not None:
-                    runtime.close()
-
-        simulation_cls.step = step_with_demo4
-        simulation_cls.destroy = destroy_with_demo4
-        simulation_cls._tracr_demo4_patch_version = patch_version
-
-    original_create = simulator.createSimulation
-
-    def create_with_demo4(scene: Any, *args: Any, **kwargs: Any) -> Any:
-        runtime = holder.current
-        if runtime is None:
-            raise RuntimeError("demo4 runtime was not configured before Scenic simulation")
-        simulation_cls._tracr_demo4_pending_runtime = runtime
-        try:
-            simulation = original_create(scene, *args, **kwargs)
-            simulation._tracr_demo4_runtime = runtime
-            if runtime.simulation is None:
-                runtime.attach(simulation)
-            return simulation
-        finally:
-            if getattr(simulation_cls, "_tracr_demo4_pending_runtime", None) is runtime:
-                simulation_cls._tracr_demo4_pending_runtime = None
-
-    simulator.createSimulation = create_with_demo4
 
 
 _RESULT_FIELDS = [
@@ -2190,6 +1127,11 @@ def _compile_scenario(
     }
     if run_params:
         params.update(dict(run_params))
+    params["ego_controller"] = "external"
+    params["security_scenario"] = "stop_sign_patch"
+    params["test_parameters"] = stop_sign_test_parameters(
+        args, index=params["attack_stop_index"], enabled=params["attack_enabled"],
+    )
     return scenic.scenarioFromFile(
         path=args.scenic_file,
         model=args.scenic_model,
@@ -2283,6 +1225,7 @@ def run(args: argparse.Namespace) -> int:
     rows: List[Dict[str, Any]] = []
     holder = RuntimeHolder()
     simulator: Any = None
+    uninstall_runtime = None
     dashboard: Optional[Demo4Dashboard] = None
     exit_code = 0
     try:
@@ -2316,7 +1259,7 @@ def run(args: argparse.Namespace) -> int:
         )
         dashboard.configure_runs(specs)
         print(f"TRACR Scenic + PCLA stop-sign dashboard: {dashboard.start()}")
-        install_runtime_hook(simulator, holder)
+        uninstall_runtime = install_runtime_hook(simulator, holder)
 
         def best_provider() -> str:
             return best_result_text(rows, paired)
@@ -2356,7 +1299,8 @@ def run(args: argparse.Namespace) -> int:
             setSeed(spec.seed)
             scene, _ = scenario.generate()
             simulator.run_name = str(run_base)
-            runtime = RunRuntime(args, spec, dashboard, best_provider)
+            runtime = RunRuntime(args, spec, dashboard, best_provider,
+                                 test_parameters=scenario.params["test_parameters"])
             holder.current = runtime
             print(
                 f"Starting run {spec.run_number}/{len(specs)}: {spec.phase}, "
@@ -2476,6 +1420,8 @@ def run(args: argparse.Namespace) -> int:
     finally:
         if holder.current is not None:
             holder.current.close()
+        if uninstall_runtime is not None:
+            uninstall_runtime()
         if simulator is not None:
             try:
                 simulator.destroy()

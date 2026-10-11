@@ -31,11 +31,6 @@ long longPar(cMessage* message, const char* name, long fallback = 0)
     return message->hasPar(name) ? message->par(name).longValue() : fallback;
 }
 
-double doublePar(cMessage* message, const char* name, double fallback = 0.0)
-{
-    return message->hasPar(name) ? message->par(name).doubleValue() : fallback;
-}
-
 bool receiverIsExpected(const std::string& csv, int receiverId)
 {
     if (csv.empty()) {
@@ -81,20 +76,6 @@ int base64DecodedBytes(const std::string& encoded)
     return static_cast<int>((encoded.size() / 4) * 3 - padding);
 }
 
-double injectionDelayS(const std::string& transmissionId, double spreadS)
-{
-    if (spreadS <= 0.0) {
-        return 0.0;
-    }
-    std::uint32_t hash = 2166136261u;
-    for (const unsigned char value : transmissionId) {
-        hash ^= value;
-        hash *= 16777619u;
-    }
-    constexpr double denominator = 4294967296.0;
-    return spreadS * (static_cast<double>(hash) + 0.5) / denominator;
-}
-
 } // namespace
 
 Define_Module(MetsrVeinsApp);
@@ -107,21 +88,16 @@ void MetsrVeinsApp::initialize(int stage)
     }
 }
 
-void MetsrVeinsApp::handleMessage(cMessage* message)
+void MetsrVeinsApp::handleMessage(cMessage* request)
 {
-    if (!message->isSelfMessage() && message->getArrivalGate() == gate("bridgeIn")) {
-        if (message->getKind() != KIND_VEINS_BSM_REQUEST) {
-            delete message;
-            throw cRuntimeError("MetsrVeinsApp received an unknown bridge request");
-        }
-        injectBsm(message);
+    if (request->isSelfMessage() || request->getArrivalGate() != gate("bridgeIn")) {
+        veins::DemoBaseApplLayer::handleMessage(request);
         return;
     }
-    veins::DemoBaseApplLayer::handleMessage(message);
-}
-
-void MetsrVeinsApp::injectBsm(cMessage* request)
-{
+    if (request->getKind() != KIND_VEINS_BSM_REQUEST) {
+        delete request;
+        throw cRuntimeError("MetsrVeinsApp received an unknown bridge request");
+    }
     std::unique_ptr<cMessage> cleanup(request);
     auto* bsm = new MetsrBsmMessage("METS-R J2735 BSM");
     const auto recipientMac = static_cast<veins::LAddress::L2Type>(
@@ -154,10 +130,22 @@ void MetsrVeinsApp::injectBsm(cMessage* request)
     bsm->setPayloadBytes(payloadBytes);
     bsm->setPayloadBitLength(payloadBitLength);
     bsm->setAttacked(longPar(request, "attacked") != 0);
-    bsm->setRequestTxTimeS(doublePar(request, "tx_time_s", simTime().dbl()));
-    const double delayS = injectionDelayS(
-        transmissionId,
-        par("bridgeInjectionSpread").doubleValue());
+    bsm->setRequestTxTimeS(request->hasPar("tx_time_s")
+        ? request->par("tx_time_s").doubleValue()
+        : simTime().dbl());
+    double delayS = 0.0;
+    const double spreadS = par("bridgeInjectionSpread").doubleValue();
+    if (spreadS <= 0.0) {
+        delayS = 0.0;
+    }
+    else {
+        std::uint32_t hash = 2166136261u;
+        for (const unsigned char value : transmissionId) {
+            hash ^= value;
+            hash *= 16777619u;
+        }
+        delayS = spreadS * (static_cast<double>(hash) + 0.5) / 4294967296.0;
+    }
     bsm->setBridgeTxTimeS(simTime().dbl() + delayS);
 
     bsm->setBitLength(static_cast<int64_t>(headerLength) + payloadBitLength);
@@ -215,28 +203,21 @@ void MetsrVeinsApp::onBSM(veins::DemoSafetyMessage* frame)
         report->addPar("bitrate_bps") = result->getBitrate();
     }
 
-    cModule* bridgeModule = resolveBridge();
-    if (bridgeModule == nullptr || !bridgeModule->hasGate(VEINS_REPORT_GATE)) {
+    if (bridge == nullptr) {
+        const char* configuredPath = par("bridgeModulePath").stringValue();
+        if (configuredPath != nullptr && configuredPath[0] != '\0') {
+            bridge = getModuleByPath(configuredPath);
+        }
+        if (bridge == nullptr && getParentModule() != nullptr &&
+            getParentModule()->getParentModule() != nullptr) {
+            bridge = getParentModule()->getParentModule()->getSubmodule("bridge");
+        }
+    }
+    if (bridge == nullptr || !bridge->hasGate(VEINS_REPORT_GATE)) {
         delete report;
         throw cRuntimeError("Could not resolve the METS-R bridge report gate");
     }
-    sendDirect(report, bridgeModule, VEINS_REPORT_GATE);
-}
-
-cModule* MetsrVeinsApp::resolveBridge()
-{
-    if (bridge != nullptr) {
-        return bridge;
-    }
-    const char* configuredPath = par("bridgeModulePath").stringValue();
-    if (configuredPath != nullptr && configuredPath[0] != '\0') {
-        bridge = getModuleByPath(configuredPath);
-    }
-    if (bridge == nullptr && getParentModule() != nullptr &&
-        getParentModule()->getParentModule() != nullptr) {
-        bridge = getParentModule()->getParentModule()->getSubmodule("bridge");
-    }
-    return bridge;
+    sendDirect(report, bridge, VEINS_REPORT_GATE);
 }
 
 } // namespace metsr::veinsbridge

@@ -1,0 +1,17 @@
+{
+  "safety_scenario": "sudden_braking",
+  "security_scenario": "none",
+  "test_parameters": {
+    "trigger": {
+      "mode": "distance",
+      "start_s": 1,
+      "distance_m": 20
+    },
+    "event": {
+      "duration_s": 2
+    },
+    "hazard": {
+      "speed_mps": 6
+    }
+  }
+}

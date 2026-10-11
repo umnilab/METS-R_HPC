@@ -20,30 +20,7 @@ if [ "$NUM_VEHICLES" -lt 1 ]; then
     exit 2
 fi
 
-mkdir -p "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g"
-mkdir -p "$GENERATED_NED_ROOT/sim5g"
-cp MetsrVeinsBridge.ned "$GENERATED_NED_ROOT/MetsrVeinsBridge.ned"
-sed 's/\.template$//' sim5g/Sim5gCellularUuBridgeNetwork.ned.template > \
-    "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned"
-sed 's/\.template$//' sim5g/MetsrBsmUuApp.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmUuApp.ned"
-sed 's/\.template$//' sim5g/MetsrBsmPc5App.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmPc5App.ned"
-sed 's/\.template$//' sim5g/MetsrExternalMobility.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrExternalMobility.ned"
-sed 's/\.template$//' sim5g/omnetpp-sim5g-uu.ini.template > \
-    "$GENERATED_NED_ROOT/omnetpp-sim5g-uu.ini"
-cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
-
-if [ ! -f "$GENERATED_NED_ROOT/Sim5gCellularUuBridgeNetwork.ned" ]; then
-    echo "Generated NED files are missing. Run bash ./build_sim5g.sh first." >&2
-    exit 1
-fi
-if [ ! -f "$GENERATED_NED_ROOT/sim5g/demo.xml" ]; then
-    mkdir -p "$GENERATED_NED_ROOT/sim5g"
-    cp sim5g/demo.xml "$GENERATED_NED_ROOT/sim5g/demo.xml"
-    echo "Copied missing Simu5G routing XML to $GENERATED_NED_ROOT/sim5g/demo.xml"
-fi
+bash ./generate_sim5g_files.sh "$GENERATED_NED_ROOT" uu
 
 LIB_SO="$(find out -name 'libmetsr_veins_bridge_simu5g.so' | head -n 1)"
 if [ -z "$LIB_SO" ]; then

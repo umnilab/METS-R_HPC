@@ -201,17 +201,6 @@ const json* nestedValue(const json& record, std::initializer_list<const char*> p
     return current;
 }
 
-std::string stringFromJsonValue(const json& value, const std::string& fallback = "")
-{
-    if (value.is_null()) {
-        return fallback;
-    }
-    if (value.is_string()) {
-        return value.get<std::string>();
-    }
-    return value.dump();
-}
-
 int intFromJsonValue(const json& value, int fallback = 0)
 {
     if (value.is_null()) {
@@ -234,53 +223,22 @@ int intFromJsonValue(const json& value, int fallback = 0)
     return fallback;
 }
 
-double numberFromJsonValue(const json& value, double fallback = 0.0)
-{
-    if (value.is_null()) {
-        return fallback;
-    }
-    if (value.is_number()) {
-        return value.get<double>();
-    }
-    if (value.is_string()) {
-        try {
-            return std::stod(value.get<std::string>());
-        }
-        catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
 std::string nestedStringValue(
     const json& record,
     std::initializer_list<const char*> path,
     const std::string& fallback = "")
 {
     const json* value = nestedValue(record, path);
-    return value == nullptr ? fallback : stringFromJsonValue(*value, fallback);
+    if (value == nullptr) {
+        return fallback;
+    }
+    return value->is_string() ? value->get<std::string>() : value->dump();
 }
 
 int nestedIntValue(const json& record, std::initializer_list<const char*> path, int fallback = 0)
 {
     const json* value = nestedValue(record, path);
     return value == nullptr ? fallback : intFromJsonValue(*value, fallback);
-}
-
-double nestedNumberValue(
-    const json& record,
-    std::initializer_list<const char*> path,
-    double fallback = 0.0)
-{
-    const json* value = nestedValue(record, path);
-    return value == nullptr ? fallback : numberFromJsonValue(*value, fallback);
-}
-
-json nestedJsonValue(const json& record, std::initializer_list<const char*> path, const json& fallback)
-{
-    const json* value = nestedValue(record, path);
-    return value == nullptr ? fallback : *value;
 }
 
 int entityId(const json& record, const char* primary, int fallback);
@@ -323,7 +281,8 @@ double bsmTxTimeS(const json& message, double fallback)
     if (hasKey(message, "tx_time_s")) {
         return numberValue(message, "tx_time_s", fallback);
     }
-    return nestedNumberValue(message, {"transport", "txTimeS"}, fallback);
+    const json* transport = nestedValue(message, {"transport"});
+    return transport == nullptr ? fallback : numberValue(*transport, "txTimeS", fallback);
 }
 
 int bsmMessageCount(const json& message)
@@ -394,7 +353,8 @@ json bsmAttackValue(const json& message, const char* flatKey, const char* nested
     if (hasKey(message, flatKey)) {
         return message.at(flatKey);
     }
-    return nestedJsonValue(message, {"operationalData", "attack", nestedKey}, fallback);
+    const json* value = nestedValue(message, {"operationalData", "attack", nestedKey});
+    return value == nullptr ? fallback : *value;
 }
 
 std::string bsmAttackString(const json& message, const char* flatKey, const char* nestedKey)
@@ -801,7 +761,6 @@ class MetsrVeinsBridge : public omnetpp::cSimpleModule {
         const std::string& status = "ok",
         const std::string& message = "");
     void closeServerSocket();
-    json bridgeMetadata(bool includeNote = false) const;
     void addBridgeMetadata(json& record, bool includeNote = false) const;
     double scheduledLatencyMs(int receiverLoad, int queuePosition, int payloadBytes, double distanceM);
     double packetErrorRate(int receiverLoad, double distanceM) const;
@@ -1015,21 +974,6 @@ void MetsrVeinsBridge::closeServerSocket()
         ::shutdown(clientToClose, SHUT_RDWR);
         ::close(clientToClose);
     }
-}
-
-json MetsrVeinsBridge::bridgeMetadata(bool includeNote) const
-{
-    json metadata = {
-        {"bridge_backend", bridgeBackend},
-        {"backend_implementation", backendImplementation},
-        {"bridge_model", networkModel},
-        {"network_model", networkModel},
-        {"radio_access", radioAccess},
-    };
-    if (includeNote && !backendNote.empty()) {
-        metadata["backend_note"] = backendNote;
-    }
-    return metadata;
 }
 
 void MetsrVeinsBridge::addBridgeMetadata(json& record, bool includeNote) const
@@ -3406,10 +3350,7 @@ void MetsrVeinsBridge::completeSyncWork(
         {"tick_start_time_s", work->tickStartTime.dbl()},
         {"tick_end_time_s", work->tickEndTime.dbl()},
     };
-    const json metadata = bridgeMetadata(true);
-    for (const auto& item : metadata.items()) {
-        data[item.key()] = item.value();
-    }
+    addBridgeMetadata(data, true);
     json response = {
         {"type", "sync_tick_result"},
         {"request_id", work->requestId},

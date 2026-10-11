@@ -314,28 +314,16 @@ def normalize_vehicle_state(
       pose = msg.get("pose", {})
       pose_position = pose.get("position", {}) if isinstance(pose, dict) else {}
 
-      x = first_number(
-            msg.get("x"),
-            position.get("x") if isinstance(position, dict) else None,
-            pose_position.get("x") if isinstance(pose_position, dict) else None,
-            nested_get(msg, "msg", "pose", "pose", "position", "x"),
-            nested_get(msg, "msg", "pose", "position", "x"),
-      )
-      y = first_number(
-            msg.get("y"),
-            position.get("y") if isinstance(position, dict) else None,
-            pose_position.get("y") if isinstance(pose_position, dict) else None,
-            nested_get(msg, "msg", "pose", "pose", "position", "y"),
-            nested_get(msg, "msg", "pose", "position", "y"),
-      )
-      z = first_number(
-            msg.get("z"),
-            position.get("z") if isinstance(position, dict) else None,
-            pose_position.get("z") if isinstance(pose_position, dict) else None,
-            nested_get(msg, "msg", "pose", "pose", "position", "z"),
-            nested_get(msg, "msg", "pose", "position", "z"),
-            0.0,
-      )
+      coordinates = {}
+      for axis in ("x", "y", "z"):
+            coordinates[axis] = first_number(
+                  msg.get(axis),
+                  position.get(axis) if isinstance(position, dict) else None,
+                  pose_position.get(axis) if isinstance(pose_position, dict) else None,
+                  nested_get(msg, "msg", "pose", "pose", "position", axis),
+                  nested_get(msg, "msg", "pose", "position", axis),
+                  0.0 if axis == "z" else None,
+            )
 
       yaw = first_number(
             msg.get("yaw"),
@@ -358,9 +346,9 @@ def normalize_vehicle_state(
       )
 
       x, y, z = duckie_to_metsr_coords(
-            x,
-            y,
-            z,
+            coordinates["x"],
+            coordinates["y"],
+            coordinates["z"],
             coord_scale=coord_scale,
             coord_offset=coord_offset,
             invert_y=invert_y,
@@ -538,11 +526,7 @@ def build_duckie_vehicle_map(vehicle_map=None, tag_vehicle_map=None):
 def sync_duckietown_to_metsr(metsr, states, vehicle_map=None, robot_id=None):
       if states is None:
             return []
-      if isinstance(states, dict) and "robot_id" in states:
-            states = [states]
-      else:
-            states = as_list(states)
-
+      states = as_list(states)
       vehicle_map = vehicle_map or {}
       results = []
       for state in states:
@@ -597,26 +581,24 @@ def list_duckietown_functions():
 
 
 def duckietown_function_info(function_name=None):
+      functions = DUCKIETOWN_FUNCTIONS
       if function_name is not None:
             if function_name not in DUCKIETOWN_FUNCTIONS:
                   known = ", ".join(list_duckietown_functions())
                   raise ValueError(f"Unknown Duckietown function '{function_name}'. Known functions: {known}")
-            return _duckietown_function_info(function_name, DUCKIETOWN_FUNCTIONS[function_name])
-      return {
-            name: _duckietown_function_info(name, spec)
-            for name, spec in DUCKIETOWN_FUNCTIONS.items()
+            functions = {function_name: DUCKIETOWN_FUNCTIONS[function_name]}
+      info = {
+            name: {
+                  "function_name": name,
+                  "launcher": spec["launcher"],
+                  "package": spec["package"],
+                  "launch_file": spec["launch_file"],
+                  "detail": spec["description"],
+                  "how_to_call": f"roslaunch {spec['package']} {spec['launch_file']} veh:=XXXX",
+            }
+            for name, spec in functions.items()
       }
-
-
-def _duckietown_function_info(name, spec):
-      return {
-            "function_name": name,
-            "launcher": spec["launcher"],
-            "package": spec["package"],
-            "launch_file": spec["launch_file"],
-            "detail": spec["description"],
-            "how_to_call": f"roslaunch {spec['package']} {spec['launch_file']} veh:=XXXX",
-      }
+      return info if function_name is None else info[function_name]
 
 
 def format_ros_args(extra_args=None):

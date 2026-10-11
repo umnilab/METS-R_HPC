@@ -133,103 +133,31 @@ def _download_or_cached_text(url, cache_path, timeout_s=10):
         raise
 
 
-def _download_bytes(url, timeout_s=10):
-    import urllib.request
-
-    request = urllib.request.Request(url, headers={"User-Agent": "TRACR demo"})
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
-        return response.read()
-
-
-def _read_cached_bytes(path):
-    with open(path, "rb") as input_file:
-        return input_file.read()
-
-
-def _write_bytes(path, data):
-    with open(path, "wb") as output_file:
-        output_file.write(data)
-
-
-def _download_or_cached_bytes(url, cache_path, timeout_s=10):
-    try:
-        data = _download_bytes(url, timeout_s=timeout_s)
-        _write_bytes(cache_path, data)
-        return data
-    except Exception:
-        if os.path.exists(cache_path):
-            return _read_cached_bytes(cache_path)
-        raise
-
-
-def _metsr_vis_chunk_filenames(script):
-    import re
-
-    chunk_ids = set(re.findall(r"\.e\((\d+)\)", script or ""))
-    return [f"{chunk_id}.bundle.js" for chunk_id in sorted(chunk_ids, key=lambda value: int(value))]
-
-
-def _metsr_vis_asset_filenames(*texts):
-    import re
-
-    filenames = set()
-    asset_pattern = re.compile(
-        r"(?<![A-Za-z0-9_./-])([0-9a-f]{32}\.(?:png|jpg|jpeg|gif|svg|wasm|json))(?![A-Za-z0-9_./-])",
-        re.IGNORECASE,
-    )
-    for text in texts:
-        if text:
-            filenames.update(match.group(1) for match in asset_pattern.finditer(text))
-    return sorted(filenames)
-
-
 def _mirror_metsr_vis_file(local_dir, base_url, filename, timeout_s=10):
     import urllib.parse
+    import urllib.request
 
     target_path = os.path.join(local_dir, filename)
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     url = urllib.parse.urljoin(base_url, filename)
     try:
-        _download_or_cached_bytes(url, target_path, timeout_s=timeout_s)
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "TRACR demo"})
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                data = response.read()
+            with open(target_path, "wb") as output_file:
+                output_file.write(data)
+        except Exception:
+            if not os.path.exists(target_path):
+                raise
+            with open(target_path, "rb") as input_file:
+                input_file.read()  # A cached resource must still be readable.
         return True, ""
     except Exception as exc:
         if os.path.exists(target_path):
             return True, str(exc).splitlines()[0]
         return False, str(exc).splitlines()[0]
 
-
-def _mirror_metsr_vis_resources(local_dir, base_url, script, style="", timeout_s=10):
-    chunk_names = _metsr_vis_chunk_filenames(script)
-    mirrored = 0
-    missing = []
-    chunk_texts = []
-
-    for filename in chunk_names:
-        ok, error = _mirror_metsr_vis_file(local_dir, base_url, filename, timeout_s=timeout_s)
-        if ok:
-            mirrored += 1
-            try:
-                chunk_texts.append(_read_cached_text(os.path.join(local_dir, filename)))
-            except Exception:
-                pass
-        else:
-            missing.append({"file": filename, "error": error})
-
-    asset_names = _metsr_vis_asset_filenames(script, style, *chunk_texts)
-    for filename in asset_names:
-        ok, error = _mirror_metsr_vis_file(local_dir, base_url, filename, timeout_s=timeout_s)
-        if ok:
-            mirrored += 1
-        else:
-            missing.append({"file": filename, "error": error})
-
-    return {
-        "chunks": len(chunk_names),
-        "assets": len(asset_names),
-        "total": len(chunk_names) + len(asset_names),
-        "mirrored": mirrored,
-        "missing": missing,
-    }
 
 def _patch_metsr_vis_script_for_tracr(script, stream_url):
     patched = script.replace("ws://localhost:8765", stream_url)
@@ -288,7 +216,43 @@ def prepare_local_metsr_vis(directory, viz_url, stream_url, timeout_s=10):
         _write_text(os.path.join(local_dir, "style.css"), style)
         html = html.replace(style_src, "style.css")
 
-    resource_info = _mirror_metsr_vis_resources(local_dir, base_url, script, style, timeout_s=timeout_s)
+    # Mirror lazy-loaded script chunks before scanning all text for assets.
+    chunk_ids = set(re.findall(r"\.e\((\d+)\)", script or ""))
+    chunk_names = [f"{chunk_id}.bundle.js" for chunk_id in sorted(chunk_ids, key=int)]
+    mirrored = 0
+    missing = []
+    chunk_texts = []
+    for filename in chunk_names:
+        ok, error = _mirror_metsr_vis_file(local_dir, base_url, filename, timeout_s=timeout_s)
+        if ok:
+            mirrored += 1
+            try:
+                chunk_texts.append(_read_cached_text(os.path.join(local_dir, filename)))
+            except Exception:
+                pass
+        else:
+            missing.append({"file": filename, "error": error})
+
+    filenames = set()
+    asset_pattern = re.compile(
+        r"(?<![A-Za-z0-9_./-])([0-9a-f]{32}\.(?:png|jpg|jpeg|gif|svg|wasm|json))(?![A-Za-z0-9_./-])",
+        re.IGNORECASE,
+    )
+    for text in (script, style, *chunk_texts):
+        if text:
+            filenames.update(match.group(1) for match in asset_pattern.finditer(text))
+    asset_names = sorted(filenames)
+    for filename in asset_names:
+        ok, error = _mirror_metsr_vis_file(local_dir, base_url, filename, timeout_s=timeout_s)
+        if ok:
+            mirrored += 1
+        else:
+            missing.append({"file": filename, "error": error})
+    resource_info = {
+        "chunks": len(chunk_names), "assets": len(asset_names),
+        "total": len(chunk_names) + len(asset_names),
+        "mirrored": mirrored, "missing": missing,
+    }
 
     license_url = urllib.parse.urljoin(base_url, "index.js.LICENSE.txt")
     try:
@@ -1123,15 +1087,6 @@ def _as_mapping(value):
     return value if isinstance(value, Mapping) else {}
 
 
-def _bsm_core_payload(value):
-    payload = _as_mapping(value)
-    for key in ("coreData", "BSMcoreData", "core_data"):
-        core = payload.get(key)
-        if isinstance(core, Mapping):
-            return core
-    return {}
-
-
 def _bsm_core_data(record):
     core = _kafka_get_bsm_core_data(record)
     if core:
@@ -1156,9 +1111,13 @@ def _bsm_core_data(record):
         value.get("basicSafetyMessage"),
     ]
     for candidate in candidates:
-        core = _bsm_core_payload(candidate)
-        if core:
-            return core
+        payload = _as_mapping(candidate)
+        for key in ("coreData", "BSMcoreData", "core_data"):
+            core = payload.get(key)
+            if isinstance(core, Mapping):
+                if core:
+                    return core
+                break
     return {}
 
 
@@ -1644,45 +1603,6 @@ def bsm_unique_sender_count(records):
     return len(senders)
 
 
-def _bsm_plot_position(record):
-    x = _bsm_long_deg(record)
-    y = _bsm_lat_deg(record)
-    coord_kind = "latlon"
-    if x is None or y is None:
-        x = first_present(record, "local_x", "x_m", "origin_x", "tx_x", "payload_x", "x")
-        y = first_present(record, "local_y", "y_m", "origin_y", "tx_y", "payload_y", "y")
-        coord_kind = "local"
-    if x is None or y is None:
-        return None
-    try:
-        return float(x), float(y), coord_kind
-    except (TypeError, ValueError):
-        return None
-
-
-def _bsm_point_matches_extent(point, expected_coord_kind):
-    if point is None:
-        return False
-    x, y, coord_kind = point
-    if expected_coord_kind is None or coord_kind != expected_coord_kind:
-        return False
-    if coord_kind == "latlon":
-        return abs(x) <= 180.0 and abs(y) <= 90.0
-    return True
-
-
-def _bsm_ego_point_from_records(records, ego_vehicle_id, expected_coord_kind):
-    if ego_vehicle_id is None:
-        return None
-    for record in reversed(list(records or [])):
-        if not _same_vehicle_id(bsm_sender_id(record), ego_vehicle_id):
-            continue
-        point = _bsm_plot_position(record)
-        if _bsm_point_matches_extent(point, expected_coord_kind):
-            return point
-    return None
-
-
 def _short_bsm_node_label(value, limit=10):
     text = "broadcast" if value is None or value == "" else str(value)
     if len(text) <= limit:
@@ -1988,24 +1908,19 @@ def _tracr_bridge_vehicle_record(vehicle_id, private_flag, vehicle_state):
     return record
 
 
-def _tracr_message_lookup(messages):
-    by_id = {}
-    by_link = {}
+def _tracr_simu5g_records_from_result(result, vehicles, messages):
+    vehicles_by_id = {str(_tracr_bridge_vehicle_id(vehicle)): vehicle for vehicle in vehicles or []}
+    messages_by_id = {}
+    messages_by_link = {}
     for message in messages or []:
         message_id = message.get("message_id")
         if message_id is not None:
-            by_id[str(message_id)] = message
+            messages_by_id[str(message_id)] = message
         sender_id = first_present(message, "sender_id", "vehicle_id", "vid")
         receiver_id = first_present(message, "receiver_id", "target_vehicle_id")
         message_count = first_present(message, "message_count", "msg_count", "msgCnt")
-        by_link[(str(sender_id), str(receiver_id), str(message_count))] = message
-        by_link[(str(sender_id), str(receiver_id), "")] = message
-    return by_id, by_link
-
-
-def _tracr_simu5g_records_from_result(result, vehicles, messages):
-    vehicles_by_id = {str(_tracr_bridge_vehicle_id(vehicle)): vehicle for vehicle in vehicles or []}
-    messages_by_id, messages_by_link = _tracr_message_lookup(messages)
+        messages_by_link[(str(sender_id), str(receiver_id), str(message_count))] = message
+        messages_by_link[(str(sender_id), str(receiver_id), "")] = message
     rows = result.get("received_bsms") or []
     if not rows:
         rows = [row for row in result.get("link_metrics", []) or [] if row.get("delivered", True)]
@@ -2363,28 +2278,6 @@ class TRACRDashboard:
         self._refresh_external_state(force=True)
         return self
 
-    def _prepare_external_viz_frame(self):
-        self.viz_frame_url = self._metsr_vis_frame_url()
-        self.viz_frame_status = ""
-        if not self.local_viz_patch:
-            return
-        if not self.external_directory or not self.stream_url:
-            return
-        try:
-            info = prepare_local_metsr_vis(
-                self.external_directory,
-                self.viz_url,
-                self.stream_url,
-            )
-            self.viz_frame_url = info.get("url") or self.viz_url
-            self.viz_frame_status = info.get("status") or ""
-        except Exception as exc:
-            self.viz_frame_url = self._metsr_vis_frame_url()
-            self.viz_frame_status = (
-                "Embedded METS-R Vis is using the remote page; "
-                f"local stream patch failed: {str(exc).splitlines()[0]}"
-            )
-
     def display_external(self, directory="output/tracr_dashboard", port=8899, open_browser=False, speedy_mode=False):
         from IPython.display import HTML, display
         from utils.util import run_visualization_server
@@ -2393,8 +2286,23 @@ class TRACRDashboard:
         self.external_port = int(port)
         self.external_speedy_mode = bool(speedy_mode)
         os.makedirs(self.external_directory, exist_ok=True)
-        self._prepare_external_viz_frame()
-        self._write_external_page()
+        self.viz_frame_url = self._metsr_vis_frame_url()
+        self.viz_frame_status = ""
+        if self.local_viz_patch and self.stream_url:
+            try:
+                info = prepare_local_metsr_vis(
+                    self.external_directory, self.viz_url, self.stream_url,
+                )
+                self.viz_frame_url = info.get("url") or self.viz_url
+                self.viz_frame_status = info.get("status") or ""
+            except Exception as exc:
+                self.viz_frame_url = self._metsr_vis_frame_url()
+                self.viz_frame_status = (
+                    "Embedded METS-R Vis is using the remote page; "
+                    f"local stream patch failed: {str(exc).splitlines()[0]}"
+                )
+        with open(os.path.join(self.external_directory, "index.html"), "w", encoding="utf-8") as output:
+            output.write(self._external_page_html())
         self.probe_stream()
 
         if self.external_server_thread is None:
@@ -2455,12 +2363,6 @@ class TRACRDashboard:
         self.external_stop_event = None
         self.external_server_thread = None
 
-    def _shell_class(self):
-        classes = ["tracr-wrap"]
-        if self.fullscreen:
-            classes.append("tracr-fullscreen")
-        return " ".join(classes)
-
     def _stream_probe_note_html(self):
         probe = self.stream_probe
         if not probe:
@@ -2478,9 +2380,6 @@ class TRACRDashboard:
 
     def _bsm_panel_show_map(self):
         return bool(getattr(self, "bsm_show_map", True))
-
-    def _external_speedy_mode_enabled(self):
-        return bool(getattr(self, "external_speedy_mode", False))
 
     def _viz_html(self, viz_url, stream_url):
         stream = escape(stream_url or "not started yet")
@@ -2617,9 +2516,10 @@ class TRACRDashboard:
         return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
     def _plain_html(self):
+        shell_class = "tracr-wrap tracr-fullscreen" if self.fullscreen else "tracr-wrap"
         return f"""
         {self._styles()}
-        <div class="{self._shell_class()}">
+        <div class="{shell_class}">
           <h2>TRACR Purdue Data Collection Demo</h2>
           <div class="tracr-note">{escape(str(self._status_text))}</div>
           <div class="tracr-grid">
@@ -2860,7 +2760,7 @@ class TRACRDashboard:
         bsm_show_map = self._bsm_panel_show_map()
         bsm_layout_class = "bsm-layout" if bsm_show_map else "bsm-layout bsm-layout--table-only"
         bsm_map_hidden = "" if bsm_show_map else " hidden"
-        speedy_mode = self._external_speedy_mode_enabled()
+        speedy_mode = bool(getattr(self, "external_speedy_mode", False))
         speedy_hidden = " hidden" if speedy_mode else ""
         return f"""<!doctype html>
 <html>
@@ -2955,7 +2855,7 @@ class TRACRDashboard:
 """
 
     def _external_state(self):
-        speedy_mode = self._external_speedy_mode_enabled()
+        speedy_mode = bool(getattr(self, "external_speedy_mode", False))
         return {
             "status": str(self._status_text),
             "speedy_mode": speedy_mode,
@@ -2978,12 +2878,6 @@ class TRACRDashboard:
             "bsm_show_map": self._bsm_panel_show_map(),
             "bsm_ego_only": self.bsm_ego_only,
         }
-
-    def _write_external_page(self):
-        if not self.external_directory:
-            return
-        with open(os.path.join(self.external_directory, "index.html"), "w", encoding="utf-8") as output:
-            output.write(self._external_page_html())
 
     def _refresh_external_state(self, force=False):
         if not self.external_directory:
@@ -3060,7 +2954,7 @@ class TRACRDashboard:
         self._refresh_external_state(force=force_external)
     def update(self, runtime, step_result, bsm_records, render_info=None, render_error=None):
         bsm_records = _annotate_attack_bsm_records(bsm_records, runtime)
-        speedy_mode = self._external_speedy_mode_enabled()
+        speedy_mode = bool(getattr(self, "external_speedy_mode", False))
         target_vehicle_id = None
         target_actor_id = None
         if runtime.sensor_panel is not None:
@@ -3304,31 +3198,6 @@ def _is_address_in_use_error(exc):
     return _is_address_in_use_error(getattr(exc, "__cause__", None))
 
 
-def _resolve_tracr_random_seed(random_seed):
-    if random_seed is None or random_seed is False:
-        return None
-    if random_seed is True:
-        return int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
-    if isinstance(random_seed, str):
-        normalized = random_seed.strip().lower()
-        if normalized in {"", "none", "default", "config", "false"}:
-            return None
-        if normalized in {"auto", "random", "fresh", "new"}:
-            return int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
-    return int(random_seed)
-
-
-def _apply_tracr_random_seed(config, random_seed):
-    seed = _resolve_tracr_random_seed(random_seed)
-    if seed is None:
-        return None
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed % (2 ** 32))
-    num_simulations = max(1, int(getattr(config, "num_simulations", 1) or 1))
-    config.random_seeds = [seed + offset for offset in range(num_simulations)]
-    return seed
-
 def _start_viz_with_port_fallback(metsr, viz_kwargs, max_extra_ports=20):
     from utils.util import stop_all_metsr_client_servers
 
@@ -3397,7 +3266,22 @@ def launch_tracr_demo(
 ):
     deps = _deps()
     config = deps["read_run_config"](run_config)
-    resolved_random_seed = _apply_tracr_random_seed(config, random_seed)
+    if isinstance(random_seed, str):
+        normalized_seed = random_seed.strip().lower()
+        if normalized_seed in {"", "none", "default", "config", "false"}:
+            random_seed = None
+        elif normalized_seed in {"auto", "random", "fresh", "new"}:
+            random_seed = True
+    resolved_random_seed = None
+    if random_seed is not None and random_seed is not False:
+        resolved_random_seed = (
+            int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
+            if random_seed is True else int(random_seed)
+        )
+        random.seed(resolved_random_seed)
+        np.random.seed(resolved_random_seed % (2 ** 32))
+        num_simulations = max(1, int(getattr(config, "num_simulations", 1) or 1))
+        config.random_seeds = [resolved_random_seed + offset for offset in range(num_simulations)]
     config.display_all = False
     config.verbose = False
     config.v2x = True
@@ -3554,37 +3438,13 @@ def _road_id_from_vehicle_record(record):
     return None if value is None else str(value)
 
 
-def _road_id_from_road_record(record):
-    if not isinstance(record, dict):
-        return None
-    value = record.get("segmentId")
-    return None if value is None else str(value)
-
-
-def _tracr_record_road_id(record, *keys):
-    if not isinstance(record, dict):
-        return None
-    for key in keys:
-        value = record.get(key)
-        if value is not None and str(value).strip():
-            return str(value)
-    return None
-
-
 def _tracr_connector_endpoints(record):
-    return (
-        _tracr_record_road_id(record, "sourceRoadId"),
-        _tracr_record_road_id(record, "targetRoadId"),
-    )
-
-
-def _tracr_is_connector_record(record):
     if not isinstance(record, dict):
-        return False
-    if str(record.get("segmentType", "")).lower() == "connector":
-        return True
-    source_road, target_road = _tracr_connector_endpoints(record)
-    return source_road is not None and target_road is not None
+        return None, None
+    return tuple(
+        str(value) if value is not None and str(value).strip() else None
+        for value in (record.get("sourceRoadId"), record.get("targetRoadId"))
+    )
 
 
 def _vehicle_is_live(vehicle_state):
@@ -3619,14 +3479,16 @@ def _query_tracr_road_graph(runtime, batch_size=500):
             response = runtime.metsr.query_road(id=batch)
             records = response.get("data", [])
             for record in records or []:
-                road_id = _road_id_from_road_record(record)
-                if road_id is None:
+                if not isinstance(record, dict) or record.get("segmentId") is None:
                     continue
+                road_id = str(record["segmentId"])
                 graph["records"][road_id] = record
                 raw_downstream[road_id] = _unique_ordered(_as_road_ids(
                     record.get("downstreamIds")
                 ))
-                if _tracr_is_connector_record(record):
+                source_road, target_road = _tracr_connector_endpoints(record)
+                if (str(record.get("segmentType", "")).lower() == "connector"
+                        or (source_road is not None and target_road is not None)):
                     graph["connector_ids"].add(road_id)
 
         connector_ids_by_source = {}
@@ -3687,47 +3549,27 @@ def _expand_tracr_road_context(runtime, focus_road, upstream_depth=3, downstream
         return [], ""
 
     graph = _query_tracr_road_graph(runtime)
-    roads = []
-    seen = set()
-
-    def add(road_id):
-        if road_id is None:
-            return
-        road_key = str(road_id)
-        if road_key in seen:
-            return
-        seen.add(road_key)
-        roads.append(road_key)
-
-    add(focus_road)
+    roads = {focus_road: None}
     connector_ids = set(graph.get("connector_ids", set()))
-
-    def expand_one_road_hop(frontier, adjacency):
-        next_frontier = []
-        for road_id in frontier:
-            for adjacent_road in adjacency.get(str(road_id), []) or []:
-                adjacent_road = str(adjacent_road)
-                add(adjacent_road)
-                if adjacent_road not in connector_ids:
-                    next_frontier.append(adjacent_road)
-                    continue
-                # A source -> connector -> target traversal is one physical
-                # road hop, but the connector remains part of the query set.
-                for far_road in adjacency.get(adjacent_road, []) or []:
-                    far_road = str(far_road)
-                    add(far_road)
-                    next_frontier.append(far_road)
-        return _unique_ordered(next_frontier)
-
-    frontier = [focus_road]
-    for _ in range(max(0, int(downstream_depth))):
-        frontier = expand_one_road_hop(frontier, graph.get("downstream", {}))
-
-    frontier = [focus_road]
-    for _ in range(max(0, int(upstream_depth))):
-        frontier = expand_one_road_hop(frontier, graph.get("upstream", {}))
-
-    return roads, graph.get("error", "")
+    for direction, depth in (("downstream", downstream_depth), ("upstream", upstream_depth)):
+        adjacency = graph.get(direction, {})
+        frontier = [focus_road]
+        for _ in range(max(0, int(depth))):
+            next_frontier = []
+            for road_id in frontier:
+                for adjacent_road in adjacency.get(str(road_id), []) or []:
+                    adjacent_road = str(adjacent_road)
+                    roads[adjacent_road] = None
+                    # Crossing a connector counts as one physical road hop;
+                    # retain both the connector and its far road in the query.
+                    far_roads = (adjacency.get(adjacent_road, []) or []
+                                 if adjacent_road in connector_ids else [adjacent_road])
+                    for far_road in far_roads:
+                        far_road = str(far_road)
+                        roads[far_road] = None
+                        next_frontier.append(far_road)
+            frontier = _unique_ordered(next_frontier)
+    return list(roads), graph.get("error", "")
 
 
 def _query_tracr_focus_vehicle(runtime):
@@ -3834,16 +3676,13 @@ def _query_tracr_vehicle_records(runtime, vehicle_ids, private_flag, batch_size=
     return records, ""
 
 
-def _angle_delta_degrees(target, current):
-    return (float(target) - float(current) + 180.0) % 360.0 - 180.0
-
-
 def _smooth_yaw_degrees(previous, target, alpha=0.35):
     target = float(target) % 360.0
     if previous is None:
         return target
     alpha = max(0.0, min(1.0, float(alpha)))
-    return (float(previous) + _angle_delta_degrees(target, previous) * alpha) % 360.0
+    delta = (float(target) - float(previous) + 180.0) % 360.0 - 180.0
+    return (float(previous) + delta * alpha) % 360.0
 
 
 def _zero_projection_actor_motion(actor, carla_module):

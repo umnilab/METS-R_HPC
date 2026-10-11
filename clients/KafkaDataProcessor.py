@@ -5,6 +5,8 @@ import json
 import math
 from collections.abc import Mapping
 
+from utils.configuration import config_value
+
 
 DEFAULT_BOOTSTRAP_SERVERS = "localhost:29092"
 DEFAULT_TOPICS = (
@@ -75,14 +77,6 @@ TOPIC_ALIASES = {
     "link_energy": "link_energy",
     "energy": "link_energy",
 }
-
-
-def _config_get(config, name, default=None):
-    if config is None:
-        return default
-    if isinstance(config, Mapping):
-        return config.get(name, default)
-    return getattr(config, name, default)
 
 
 def _as_topics(topics):
@@ -292,48 +286,6 @@ def _size_centimeters(record, size, field, fallback):
     return max(0, min(maximum, int(round(number))))
 
 
-def _bsm_size(record, core_data):
-    size = _as_mapping(_first_present(core_data.get("size"), record.get("size")))
-    return {
-        "width": _size_centimeters(
-            record,
-            size,
-            "width",
-            TESLA_MODEL_Y_FALLBACK_SIZE_CM["width"],
-        ),
-        "length": _size_centimeters(
-            record,
-            size,
-            "length",
-            TESLA_MODEL_Y_FALLBACK_SIZE_CM["length"],
-        ),
-    }
-
-
-def _bsm_accuracy(record, core_data):
-    accuracy = _as_mapping(_first_present(core_data.get("accuracy"), record.get("accuracy")))
-    return {
-        "semiMajor": _clamp_int(
-            _first_present(accuracy.get("semiMajor"), accuracy.get("semi_major")),
-            0,
-            255,
-            DEFAULT_BSM_POSITIONAL_ACCURACY["semiMajor"],
-        ),
-        "semiMinor": _clamp_int(
-            _first_present(accuracy.get("semiMinor"), accuracy.get("semi_minor")),
-            0,
-            255,
-            DEFAULT_BSM_POSITIONAL_ACCURACY["semiMinor"],
-        ),
-        "orientation": _clamp_int(
-            accuracy.get("orientation"),
-            0,
-            65535,
-            DEFAULT_BSM_POSITIONAL_ACCURACY["orientation"],
-        ),
-    }
-
-
 def _bsm_accel_set(record, core_data):
     accel_set = _as_mapping(_first_present(core_data.get("accelSet"), record.get("accelSet")))
     return {
@@ -382,14 +334,6 @@ def _bsm_accel_set(record, core_data):
     }
 
 
-def _bsm_brakes(record, core_data):
-    brakes = _as_mapping(_first_present(core_data.get("brakes"), record.get("brakes")))
-    return {
-        key: brakes.get(key, DEFAULT_BSM_BRAKES[key])
-        for key in DEFAULT_BSM_BRAKES
-    }
-
-
 def _bsm_transmission(record, core_data):
     transmission = _first_present(core_data.get("transmission"), record.get("transmission"))
     if transmission is not None:
@@ -411,7 +355,10 @@ def _bsm_transmission(record, core_data):
     return "forwardGears" if speed > 0.05 else "park"
 
 
-def _bsm_core_source(record):
+def get_bsm_core_data(record):
+    """Return BSM core fields from a flat or layered sensor record."""
+    if not isinstance(record, Mapping):
+        return {}
     messaging = _as_mapping(record.get("messaging_layer"))
     return _as_mapping(
         _first_present(
@@ -425,12 +372,6 @@ def _bsm_core_source(record):
     )
 
 
-def get_bsm_core_data(record):
-    if not isinstance(record, Mapping):
-        return {}
-    return _bsm_core_source(record)
-
-
 def _sec_mark(value):
     number = _to_float(value)
     if number is None:
@@ -440,8 +381,15 @@ def _sec_mark(value):
     return max(0, min(65535, int(round(number))))
 
 
-def _build_bsm_core_data(record):
-    core_data = _bsm_core_source(record)
+def build_bsm_core_data(record):
+    """Return a canonical SAE J2735 ``BSMCoreData`` semantic value.
+
+    Integer units and unavailable sentinels follow J2735. An ASN.1 codec is
+    still required before this becomes a standards-conformant wire payload.
+    """
+    if not isinstance(record, Mapping):
+        raise TypeError("A BSM record must be a mapping.")
+    core_data = get_bsm_core_data(record)
     message_count = _first_present(
         core_data.get("msgCnt"),
         core_data.get("msg_count"),
@@ -503,6 +451,9 @@ def _build_bsm_core_data(record):
         record.get("heading"),
         record.get("bearing"),
     )
+    accuracy = _as_mapping(_first_present(core_data.get("accuracy"), record.get("accuracy")))
+    brakes = _as_mapping(_first_present(core_data.get("brakes"), record.get("brakes")))
+    size = _as_mapping(_first_present(core_data.get("size"), record.get("size")))
 
     return {
         "msgCnt": _clamp_int(message_count, 0, 127, 0),
@@ -525,7 +476,20 @@ def _build_bsm_core_data(record):
             61439,
             _elevation_to_dm(_first_present(record.get("elevation"), record.get("z"))),
         ),
-        "accuracy": _bsm_accuracy(record, core_data),
+        "accuracy": {
+            "semiMajor": _clamp_int(
+                _first_present(accuracy.get("semiMajor"), accuracy.get("semi_major")),
+                0, 255, DEFAULT_BSM_POSITIONAL_ACCURACY["semiMajor"],
+            ),
+            "semiMinor": _clamp_int(
+                _first_present(accuracy.get("semiMinor"), accuracy.get("semi_minor")),
+                0, 255, DEFAULT_BSM_POSITIONAL_ACCURACY["semiMinor"],
+            ),
+            "orientation": _clamp_int(
+                accuracy.get("orientation"),
+                0, 65535, DEFAULT_BSM_POSITIONAL_ACCURACY["orientation"],
+            ),
+        },
         "transmission": _bsm_transmission(record, core_data),
         "speed": _clamp_int(
             speed,
@@ -546,67 +510,12 @@ def _build_bsm_core_data(record):
             BSM_STEERING_ANGLE_UNAVAILABLE,
         ),
         "accelSet": _bsm_accel_set(record, core_data),
-        "brakes": _bsm_brakes(record, core_data),
-        "size": _bsm_size(record, core_data),
+        "brakes": {key: brakes.get(key, default) for key, default in DEFAULT_BSM_BRAKES.items()},
+        "size": {
+            field: _size_centimeters(record, size, field, TESLA_MODEL_Y_FALLBACK_SIZE_CM[field])
+            for field in ("width", "length")
+        },
     }
-
-
-def build_bsm_core_data(record):
-    """Return a canonical SAE J2735 ``BSMCoreData`` semantic value.
-
-    Integer units and unavailable sentinels follow J2735. An ASN.1 codec is
-    still required before this becomes a standards-conformant wire payload.
-    """
-    if not isinstance(record, Mapping):
-        raise TypeError("A BSM record must be a mapping.")
-    return _build_bsm_core_data(record)
-
-
-def _sensor_type_name(sensor_type):
-    if isinstance(sensor_type, str):
-        try:
-            sensor_type = int(sensor_type)
-        except ValueError:
-            return sensor_type
-    return SENSOR_TYPE_NAMES.get(sensor_type)
-
-
-def _looks_like_bsm(data):
-    return (
-        "coreData" in data
-        or "BSMcoreData" in data
-        or "core_data" in data
-        or _nested_get(data, "messaging_layer", "coreData") is not None
-        or _nested_get(data, "messaging_layer", "core_data") is not None
-        or ("latitude" in data and "longitude" in data and (
-        "velocity" in data or "heading" in data
-        ))
-    )
-
-
-def _looks_like_link_tt(data):
-    return "travel_time" in data or _nested_get(
-        data, "messaging_layer", "probe_data", "travel_time_s"
-    ) is not None
-
-
-def _looks_like_link_energy(data):
-    return "link_energy" in data or _nested_get(
-        data, "messaging_layer", "probe_data", "link_energy"
-    ) is not None
-
-
-def _looks_like_v2x_link_metrics(data):
-    return (
-        "sender_id" in data
-        and "receiver_id" in data
-        and (
-            "latency_ms" in data
-            or "packet_error_rate" in data
-            or "delivery_probability" in data
-            or "rssi_dbm" in data
-        )
-    )
 
 
 def normalize_sensor_record(value, topic=None):
@@ -620,22 +529,57 @@ def normalize_sensor_record(value, topic=None):
         record.setdefault("_topic", canonical_topic)
 
     if canonical_topic in {"v2x_tx_bsm", "v2x_rx_bsm"}:
-        _normalize_v2x_bsm(record)
-    elif canonical_topic == "v2x_link_metrics" or _looks_like_v2x_link_metrics(record):
-        _normalize_v2x_link_metrics(record)
+        _normalize_bsm(record, v2x=True)
+    elif canonical_topic == "v2x_link_metrics" or (
+        "sender_id" in record and "receiver_id" in record
+        and any(key in record for key in (
+            "latency_ms", "packet_error_rate", "delivery_probability", "rssi_dbm",
+        ))
+    ):
+        _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+        _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+        _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
+        _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+        _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
+        _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
+        _setdefault_if_present(record, "radio_access", record.get("access_technology"))
+        _setdefault_if_present(record, "packet_delivery_ratio", record.get("delivery_probability"))
+        _setdefault_if_present(record, "packet_error_rate", record.get("per"))
+        _setdefault_if_present(record, "latency_ms", record.get("delay_ms"))
+        _setdefault_if_present(record, "rssi_dbm", record.get("rssi"))
+        _setdefault_if_present(record, "sinr_db", record.get("sinr"))
+        _setdefault_if_present(record, "channel_busy_ratio", record.get("cbr"))
     elif canonical_topic == "v2x_attack_events":
-        _normalize_v2x_attack_event(record)
-    elif canonical_topic == "bsm" or _looks_like_bsm(record):
+        _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+        _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+        _setdefault_if_present(record, "vehicle_id", record.get("sender_id", record.get("attacker_id")))
+        _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+        _setdefault_if_present(record, "attack_type", record.get("type"))
+        _setdefault_if_present(record, "effect", record.get("result"))
+        _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
+    elif canonical_topic == "bsm" or (
+        any(key in record for key in ("coreData", "BSMcoreData", "core_data"))
+        or _nested_get(record, "messaging_layer", "coreData") is not None
+        or _nested_get(record, "messaging_layer", "core_data") is not None
+        or ("latitude" in record and "longitude" in record
+            and ("velocity" in record or "heading" in record))
+    ):
         _normalize_bsm(record)
-    elif canonical_topic == "link_tt" or _looks_like_link_tt(record):
-        _normalize_link_tt(record)
-    elif canonical_topic == "link_energy" or _looks_like_link_energy(record):
-        _normalize_link_energy(record)
+    elif canonical_topic == "link_tt" or (
+        "travel_time" in record
+        or _nested_get(record, "messaging_layer", "probe_data", "travel_time_s") is not None
+    ):
+        _normalize_probe(record, travel_time=True)
+    elif canonical_topic == "link_energy" or (
+        "link_energy" in record
+        or _nested_get(record, "messaging_layer", "probe_data", "link_energy") is not None
+    ):
+        _normalize_probe(record, travel_time=False)
 
     return record
 
 
-def _normalize_common_probe_fields(record):
+def _normalize_probe(record, travel_time):
     probe = _nested_get(record, "messaging_layer", "probe_data") or {}
     quality = _nested_get(record, "messaging_layer", "quality") or {}
     communication = record.get("communication_layer") or {}
@@ -659,38 +603,35 @@ def _normalize_common_probe_fields(record):
     _setdefault_if_present(record, "confidence", top_quality.get("confidence"))
     _setdefault_if_present(record, "latency_ms", top_quality.get("estimated_end_to_end_latency_ms"))
 
-
-def _normalize_link_tt(record):
-    probe = _nested_get(record, "messaging_layer", "probe_data") or {}
-    _normalize_common_probe_fields(record)
-
-    _setdefault_if_present(record, "travel_time", probe.get("travel_time_s"))
-    _setdefault_if_present(record, "travel_time_s", record.get("travel_time"))
-    _setdefault_if_present(record, "link_travel_time", record.get("travel_time"))
-    _setdefault_if_present(record, "length", probe.get("length_m"))
-    _setdefault_if_present(record, "length_m", record.get("length"))
-    _setdefault_if_present(record, "average_speed", probe.get("average_speed_mps"))
-    _setdefault_if_present(record, "average_speed_mps", record.get("average_speed"))
-    _setdefault_if_present(record, "average_speed_mph", probe.get("average_speed_mph"))
-    _setdefault_if_present(record, "delay_ratio", probe.get("delay_ratio_vs_30mph"))
-    _setdefault_if_present(record, "delay_ratio_vs_30mph", record.get("delay_ratio"))
+    if travel_time:
+        _setdefault_if_present(record, "travel_time", probe.get("travel_time_s"))
+        _setdefault_if_present(record, "travel_time_s", record.get("travel_time"))
+        _setdefault_if_present(record, "link_travel_time", record.get("travel_time"))
+        _setdefault_if_present(record, "length", probe.get("length_m"))
+        _setdefault_if_present(record, "length_m", record.get("length"))
+        _setdefault_if_present(record, "average_speed", probe.get("average_speed_mps"))
+        _setdefault_if_present(record, "average_speed_mps", record.get("average_speed"))
+        _setdefault_if_present(record, "average_speed_mph", probe.get("average_speed_mph"))
+        _setdefault_if_present(record, "delay_ratio", probe.get("delay_ratio_vs_30mph"))
+        _setdefault_if_present(record, "delay_ratio_vs_30mph", record.get("delay_ratio"))
+    else:
+        _setdefault_if_present(record, "link_energy", probe.get("link_energy"))
+        _setdefault_if_present(record, "energy_consumed", record.get("link_energy"))
     _setdefault_if_present(record, "timestamp", record.get("utc_time"))
 
-
-def _normalize_link_energy(record):
-    probe = _nested_get(record, "messaging_layer", "probe_data") or {}
-    _normalize_common_probe_fields(record)
-
-    _setdefault_if_present(record, "link_energy", probe.get("link_energy"))
-    _setdefault_if_present(record, "energy_consumed", record.get("link_energy"))
-    _setdefault_if_present(record, "timestamp", record.get("utc_time"))
-
-
-def _normalize_bsm(record):
+def _normalize_bsm(record, v2x=False):
+    if v2x:
+        _setdefault_if_present(record, "sender_id", record.get("vehicle_id", record.get("vid")))
+        _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
+        _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
+        _setdefault_if_present(record, "vid", record.get("vehicle_id"))
+        _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
+        _setdefault_if_present(record, "message_name", "BasicSafetyMessage")
+        _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
     messaging = record.get("messaging_layer") or {}
     communication = record.get("communication_layer") or {}
     quality = record.get("quality_layer") or {}
-    core_data = _build_bsm_core_data(record)
+    core_data = build_bsm_core_data(record)
     record["coreData"] = core_data
     if isinstance(messaging, Mapping):
         messaging = dict(messaging)
@@ -705,7 +646,14 @@ def _normalize_bsm(record):
     _setdefault_if_present(record, "velocity", record.get("speed"))
     _setdefault_if_present(record, "timestamp", record.get("utc_time"))
     _setdefault_if_present(record, "sensor_type", record.get("type"))
-    _setdefault_if_present(record, "sensor_type_name", _sensor_type_name(record.get("sensor_type")))
+    sensor_type = record.get("sensor_type")
+    if isinstance(sensor_type, str):
+        try:
+            sensor_type = int(sensor_type)
+        except ValueError:
+            pass
+    sensor_name = sensor_type if isinstance(sensor_type, str) else SENSOR_TYPE_NAMES.get(sensor_type)
+    _setdefault_if_present(record, "sensor_type_name", sensor_name)
 
     _setdefault_if_present(record, "message_name", messaging.get("message_name"))
     _setdefault_if_present(record, "message_standard", messaging.get("standard"))
@@ -733,57 +681,18 @@ def _normalize_bsm(record):
     _setdefault_if_present(record, "latency_ms", quality.get("estimated_end_to_end_latency_ms"))
 
 
-def _normalize_v2x_bsm(record):
-    _setdefault_if_present(record, "sender_id", record.get("vehicle_id", record.get("vid")))
-    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
-    _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
-    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
-    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
-    _setdefault_if_present(record, "message_name", "BasicSafetyMessage")
-    _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
-    _normalize_bsm(record)
-    _setdefault_if_present(record, "speed", record.get("speed_mps"))
-    _setdefault_if_present(record, "heading", record.get("heading_deg"))
-
-
-def _normalize_v2x_link_metrics(record):
-    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
-    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
-    _setdefault_if_present(record, "vehicle_id", record.get("sender_id"))
-    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
-    _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
-    _setdefault_if_present(record, "message_standard", "SAE J2735-aligned")
-    _setdefault_if_present(record, "radio_access", record.get("access_technology"))
-    _setdefault_if_present(record, "packet_delivery_ratio", record.get("delivery_probability"))
-    _setdefault_if_present(record, "packet_error_rate", record.get("per"))
-    _setdefault_if_present(record, "latency_ms", record.get("delay_ms"))
-    _setdefault_if_present(record, "rssi_dbm", record.get("rssi"))
-    _setdefault_if_present(record, "sinr_db", record.get("sinr"))
-    _setdefault_if_present(record, "channel_busy_ratio", record.get("cbr"))
-
-
-def _normalize_v2x_attack_event(record):
-    _setdefault_if_present(record, "source_vehicle_id", record.get("sender_id"))
-    _setdefault_if_present(record, "target_vehicle_id", record.get("receiver_id"))
-    _setdefault_if_present(record, "vehicle_id", record.get("sender_id", record.get("attacker_id")))
-    _setdefault_if_present(record, "vid", record.get("vehicle_id"))
-    _setdefault_if_present(record, "attack_type", record.get("type"))
-    _setdefault_if_present(record, "effect", record.get("result"))
-    _setdefault_if_present(record, "message_name", record.get("message", "BasicSafetyMessage"))
-
-
 class KafkaDataProcessor:
     def __init__(self, config=None, topics=None, bootstrap_servers=None):
         self.config = config
-        configured_topics = _config_get(
+        configured_topics = config_value(
             config,
             "kafka_topics",
-            _config_get(config, "kafka_topic", DEFAULT_TOPICS),
+            config_value(config, "kafka_topic", DEFAULT_TOPICS),
         )
-        configured_bootstrap = _config_get(
+        configured_bootstrap = config_value(
             config,
             "kafka_bootstrap_servers",
-            _config_get(config, "kafka_bootstrap_server", DEFAULT_BOOTSTRAP_SERVERS),
+            config_value(config, "kafka_bootstrap_server", DEFAULT_BOOTSTRAP_SERVERS),
         )
         self.topics = _as_topics(
             topics
@@ -794,9 +703,9 @@ class KafkaDataProcessor:
             bootstrap_servers
             or configured_bootstrap
         )
-        self.poll_timeout_ms = int(_config_get(config, "kafka_poll_timeout_ms", 5))
-        self.normalize = bool(_config_get(config, "kafka_normalize_records", True))
-        self.include_metadata = bool(_config_get(config, "kafka_include_metadata", False))
+        self.poll_timeout_ms = int(config_value(config, "kafka_poll_timeout_ms", 5))
+        self.normalize = bool(config_value(config, "kafka_normalize_records", True))
+        self.include_metadata = bool(config_value(config, "kafka_include_metadata", False))
 
         try:
             from kafka import KafkaConsumer
@@ -810,9 +719,9 @@ class KafkaDataProcessor:
         try:
             self.consumer = KafkaConsumer(
                 bootstrap_servers=self.bootstrap_servers,
-                auto_offset_reset=_config_get(config, "kafka_auto_offset_reset", "earliest"),
-                enable_auto_commit=bool(_config_get(config, "kafka_enable_auto_commit", True)),
-                group_id=_config_get(config, "kafka_group_id", None),
+                auto_offset_reset=config_value(config, "kafka_auto_offset_reset", "earliest"),
+                enable_auto_commit=bool(config_value(config, "kafka_enable_auto_commit", True)),
+                group_id=config_value(config, "kafka_group_id", None),
                 value_deserializer=_json_deserialize,
             )
         except NoBrokersAvailable as exc:
@@ -857,7 +766,15 @@ class KafkaDataProcessor:
                 if normalize:
                     value = normalize_sensor_record(value, topic=record.topic)
                 if include_metadata:
-                    value = self._with_kafka_metadata(value, record)
+                    value = dict(value) if isinstance(value, Mapping) else {"value": value}
+                    value.setdefault("_topic", _canonical_topic(record.topic))
+                    value["_partition"] = record.partition
+                    value["_offset"] = record.offset
+                    value["_timestamp"] = record.timestamp
+                    if record.key is not None:
+                        value["_key"] = (
+                            record.key.decode("utf-8") if isinstance(record.key, bytes) else record.key
+                        )
                 records.append(value)
 
         return records or None
@@ -898,21 +815,4 @@ class KafkaDataProcessor:
     def close(self):
         self.consumer.close()
 
-    @staticmethod
-    def normalize_record(value, topic=None):
-        return normalize_sensor_record(value, topic=topic)
-
-    @staticmethod
-    def _with_kafka_metadata(value, record):
-        if not isinstance(value, Mapping):
-            value = {"value": value}
-        else:
-            value = dict(value)
-
-        value.setdefault("_topic", _canonical_topic(record.topic))
-        value["_partition"] = record.partition
-        value["_offset"] = record.offset
-        value["_timestamp"] = record.timestamp
-        if record.key is not None:
-            value["_key"] = record.key.decode("utf-8") if isinstance(record.key, bytes) else record.key
-        return value
+    normalize_record = staticmethod(normalize_sensor_record)

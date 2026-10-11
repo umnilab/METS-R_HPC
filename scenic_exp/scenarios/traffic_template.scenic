@@ -55,9 +55,11 @@ param pcla_route = globalParameters.get("pcla_route", None)  # Derive from the a
 # "sensor_spoofing": bias one speedometer, GNSS, or IMU feed delivered to PCLA.
 # "traffic_control_spoofing": force one CARLA light's state during the event.
 # "adversarial_perception": overlay a camera patch or black out its RGB channels.
+# "stop_sign_patch": recolor one world-projected stop sign in incoming camera frames.
 # "adversarial_driving": corrupt ego's executed steering/throttle/brake commands.
 # All except traffic-control spoofing require ego_controller="pcla". Choose one
 # effect per run; combine it with any safety encounter above for a compound test.
+# The external stop-sign runner also supports stop_sign_patch without a safety profile.
 # These are controlled synthetic perturbations, not optimized adversarial attacks.
 
 # 6. OPTIONAL TEST PARAMETERS (uncomment only the groups you need) ------------
@@ -73,7 +75,10 @@ param pcla_route = globalParameters.get("pcla_route", None)  # Derive from the a
 #                    "color_rgb": [255, 0, 0]},
 #     "traffic_control": {"actor_id": None, "state": "Green", "radius_m": 80.0},
 #     "driving": {"mode": "weave", "steer_bias": 0.15, "weave_amplitude": 0.3,
-#                 "weave_period_s": 2.0, "throttle": 0.75}
+#                 "weave_period_s": 2.0, "throttle": 0.75},
+#     "stop_sign": {"index": 0, "enabled": True, "max_distance_m": 90.0,
+#                   "minimum_red": 90, "red_dominance": 1.25, "roi_scale": 1.7,
+#                   "min_patch_pixels": 25}
 # }
 # Trigger: time, distance, or ttc; start_s is always the earliest allowed onset.
 # Distance/TTC use ego/hazard centers, so select a safety encounter for these.
@@ -92,7 +97,6 @@ param pcla_route = globalParameters.get("pcla_route", None)  # Derive from the a
 
 # 7. COMMON CONFIGURATION AND FLOW ------------------------------------------
 import math
-import os
 
 if globalParameters.backend not in ("cosim", "carla", "metsr"):
     raise ValueError("backend must be 'cosim', 'carla', or 'metsr'")
@@ -146,11 +150,15 @@ scenario ConstantFlow(spawn_one):
         while True:
             wait
 
-from utils.scenic_testing import (
+from scenic_exp.runtime.config import (
     SAFETY_SCENARIOS, SECURITY_SCENARIOS, resolve_test_parameters,
-    validate_test_modes, safety_sites, merge_path, path_control,
-    trigger_reached, event_active, ScenarioRuntime, scenario_test_records
+    validate_test_modes
 )
+from scenic_exp.runtime.safety import safety_sites, merge_path, path_control
+from scenic_exp.runtime.timing import trigger_reached, event_active
+from scenic_exp.runtime.scenario import ScenarioRuntime, scenario_test_records
+from scenic_exp.runtime.integration import require_external_runtime
+from scenic_exp.runtime.controllers import create_scenic_pcla
 
 param safety_scenario = globalParameters.get("safety_scenario", "none")
 param security_scenario = globalParameters.get("security_scenario", "none")
@@ -212,7 +220,8 @@ if globalParameters.backend == "cosim":
 
 
     behavior AwaitExternalPCLA():
-        """demo4 owns PCLA creation, sensor processing, control and cleanup."""
+        """Attach the registered shared runtime before the first simulator step."""
+        require_external_runtime(simulation())
         take SetAutoPilotAction(False)
         while True:
             wait
@@ -237,35 +246,11 @@ if globalParameters.backend == "cosim":
             do FollowSingleTrajectoryBehavior()
 
 
-    def load_pcla_dependencies():
-        # Keep imports in a Python function: this Scenic fork does not bind imports
-        # inside a behavior's persistent local namespace. Load only when PCLA starts.
-        import os
-        import sys
-        pcla_home = os.environ.get("PCLA_HOME")
-        if pcla_home and pcla_home not in sys.path:
-            sys.path.append(pcla_home)
-        from PCLA import PCLA
-        from pcla_functions.route_maker import route_maker
-        return PCLA, route_maker
-
-
     behavior PCLAAgent(agentType=globalParameters.pcla_agent, route=globalParameters.pcla_route):
         """Initialize once, keep the METS-R route, and customize the control hook below."""
-        PCLA, route_maker = load_pcla_dependencies()
-        assert self.carlaActor, "PCLA requires the ego's CARLA actor"
-        if route is None:
-            assert hasattr(self, "route") and self.route, "Missing authoritative METS-R ego route"
-            route_locations = simulation().generate_carla_trajectory(route=self.route, obj=self)
-            waypoints = [simulation().map.get_waypoint(location) for location in route_locations]
-            waypoints = [waypoint for waypoint in waypoints if waypoint is not None]
-            assert len(waypoints) > 1, "PCLA route needs at least two road waypoints"
-            route = localPath("../helpers/routes/ego_route.xml")
-            os.makedirs(os.path.dirname(route), exist_ok=True)
-            route_maker(waypoints, savePath=route)
-
         # Keep this property: the runner uses obj.pcla for profiling and sensor cleanup.
-        self.pcla = PCLA(agentType, self.carlaActor, route, simulation().carla_client)
+        self.pcla = create_scenic_pcla(simulation(), self, agentType, route,
+                                      localPath("../helpers/routes/ego_route.xml"))
         self.test_runtime.bind_pcla(self.pcla)
         while True:
             self.test_runtime.before_step()
@@ -289,18 +274,19 @@ if globalParameters.backend == "cosim":
 
 
     behavior EgoController():
-        runtime = ScenarioRuntime(simulation(), self, globalParameters.safety_scenario,
-                                  globalParameters.security_scenario, test_config)
-        self.test_runtime = runtime
-        try:
-            if globalParameters.ego_controller == "pcla":
-                do PCLAAgent()
-            elif globalParameters.ego_controller == "external":
-                do AwaitExternalPCLA()
-            else:
-                do AutopilotEgo()
-        finally:
-            runtime.close()
+        if globalParameters.ego_controller == "external":
+            do AwaitExternalPCLA()
+        else:
+            runtime = ScenarioRuntime(simulation(), self, globalParameters.safety_scenario,
+                                      globalParameters.security_scenario, test_config)
+            self.test_runtime = runtime
+            try:
+                if globalParameters.ego_controller == "pcla":
+                    do PCLAAgent()
+                else:
+                    do AutopilotEgo()
+            finally:
+                runtime.close()
 
 
     behavior SafetyHazard():

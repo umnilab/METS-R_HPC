@@ -164,30 +164,6 @@ std::string encodeBase64(const std::vector<uint8_t>& bytes)
     return encoded;
 }
 
-std::string packetPayloadMode(Packet* packet)
-{
-    const std::string name = packet->getName();
-    const std::string prefix = "MetsrPc5|";
-    if (name.rfind(prefix, 0) != 0) {
-        return "unknown";
-    }
-    const std::string remainder = name.substr(prefix.size());
-    const size_t separator = remainder.find('|');
-    return separator == std::string::npos ? "unknown" : remainder.substr(0, separator);
-}
-
-std::string packetMessageId(Packet* packet)
-{
-    const std::string name = packet->getName();
-    const std::string prefix = "MetsrPc5|";
-    if (name.rfind(prefix, 0) == 0) {
-        const std::string remainder = name.substr(prefix.size());
-        const size_t separator = remainder.find('|');
-        return separator == std::string::npos ? remainder : remainder.substr(separator + 1);
-    }
-    return name;
-}
-
 } // namespace
 
 /**
@@ -215,11 +191,6 @@ class MetsrBsmPc5App : public cSimpleModule, public UdpSocket::ICallback {
     void handleMessage(cMessage* message) override;
     void refreshDisplay() const override;
 
-    void validateD2dConfiguration() const;
-    void sendBsm(cMessage* request);
-    void reportReceived(Packet* packet);
-    cModule* resolveBridgeModule();
-
     void socketDataArrived(UdpSocket* socket, Packet* packet) override;
     void socketErrorArrived(UdpSocket* socket, Indication* indication) override;
     void socketClosed(UdpSocket* socket) override;
@@ -239,7 +210,15 @@ void MetsrBsmPc5App::initialize(int stage)
     multicastAddress = par("multicastAddress").stringValue();
     bridgeModulePath = par("bridgeModule").stringValue();
 
-    validateD2dConfiguration();
+    if (par("requireD2dInitialMode").boolValue()) {
+        cModule* ue = getParentModule();
+        cModule* nic = ue != nullptr ? ue->getSubmodule("cellularNic") : nullptr;
+        if (nic == nullptr || !nic->hasPar("d2dInitialMode") || !nic->par("d2dInitialMode").boolValue()) {
+            throw cRuntimeError(
+                "MetsrBsmPc5App requires a D2D-capable Simu5G UE with "
+                "cellularNic.d2dInitialMode=true; refusing to route PC5 traffic over Uu");
+        }
+    }
 
     socket.setOutputGate(gate("socketOut"));
     socket.bind(localPort);
@@ -272,34 +251,13 @@ void MetsrBsmPc5App::initialize(int stage)
     }
 }
 
-void MetsrBsmPc5App::validateD2dConfiguration() const
+void MetsrBsmPc5App::handleMessage(cMessage* request)
 {
-    if (!par("requireD2dInitialMode").boolValue()) {
+    if (request->getKind() != metsr::veinsbridge::KIND_SIMU5G_BSM_REQUEST) {
+        socket.processMessage(request);
         return;
     }
-
-    cModule* ue = getParentModule();
-    cModule* nic = ue != nullptr ? ue->getSubmodule("cellularNic") : nullptr;
-    if (nic == nullptr || !nic->hasPar("d2dInitialMode") || !nic->par("d2dInitialMode").boolValue()) {
-        throw cRuntimeError(
-            "MetsrBsmPc5App requires a D2D-capable Simu5G UE with "
-            "cellularNic.d2dInitialMode=true; refusing to route PC5 traffic over Uu");
-    }
-}
-
-void MetsrBsmPc5App::handleMessage(cMessage* message)
-{
-    if (message->getKind() == metsr::veinsbridge::KIND_SIMU5G_BSM_REQUEST) {
-        std::unique_ptr<cMessage> cleanup(message);
-        sendBsm(message);
-        return;
-    }
-
-    socket.processMessage(message);
-}
-
-void MetsrBsmPc5App::sendBsm(cMessage* request)
-{
+    std::unique_ptr<cMessage> cleanup(request);
     const std::string messageId = parString(request, "message_id");
     const bool hasPayloadBase64 = request->hasPar("wire_payload_b64") || request->hasPar("payload_b64");
     const std::string payloadBase64 = request->hasPar("wire_payload_b64")
@@ -369,20 +327,31 @@ void MetsrBsmPc5App::sendBsm(cMessage* request)
 void MetsrBsmPc5App::socketDataArrived(UdpSocket*, Packet* packet)
 {
     std::unique_ptr<Packet> cleanup(packet);
-    reportReceived(packet);
-    receivedCount += 1;
-}
-
-void MetsrBsmPc5App::reportReceived(Packet* packet)
-{
-    cModule* bridge = resolveBridgeModule();
-    if (bridge == nullptr || !bridge->hasGate(metsr::veinsbridge::SIMU5G_REPORT_GATE)) {
+    if (bridgeModule == nullptr) {
+        bridgeModule = getModuleByPath(bridgeModulePath.c_str());
+        if (bridgeModule == nullptr && getSimulation() != nullptr) {
+            bridgeModule = getSimulation()->getModuleByPath(bridgeModulePath.c_str());
+        }
+    }
+    if (bridgeModule == nullptr || !bridgeModule->hasGate(metsr::veinsbridge::SIMU5G_REPORT_GATE)) {
         EV_WARN << "MetsrBsmPc5App cannot report receive event; bridge module/gate not found\n";
+        receivedCount += 1;
         return;
     }
 
+    const std::string name = packet->getName();
+    const std::string prefix = "MetsrPc5|";
+    std::string messageId = name;
+    bool hasWirePayload = false;
+    if (name.rfind(prefix, 0) == 0) {
+        const size_t separator = name.find('|', prefix.size());
+        messageId = name.substr(separator == std::string::npos ? prefix.size() : separator + 1);
+        hasWirePayload = separator != std::string::npos &&
+            name.substr(prefix.size(), separator - prefix.size()) == "wire";
+    }
+
     auto* report = new cMessage("simu5gPc5BsmRxReport", metsr::veinsbridge::KIND_SIMU5G_RX_REPORT);
-    report->addPar("message_id") = packetMessageId(packet).c_str();
+    report->addPar("message_id") = messageId.c_str();
     report->addPar("packet_name") = packet->getName();
     report->addPar("receiver_module") = getParentModule()->getFullPath().c_str();
     report->addPar("receiver_app") = getFullPath().c_str();
@@ -391,7 +360,6 @@ void MetsrBsmPc5App::reportReceived(Packet* packet)
     report->addPar("delivery_path") = "simu5g_lte_d2d_pc5_multicast";
     report->addPar("pc5_resource_control") = "network_scheduled";
     report->addPar("payload_bytes") = static_cast<long>(packet->getByteLength());
-    const bool hasWirePayload = packetPayloadMode(packet) == "wire";
     report->addPar("wire_payload_present") = hasWirePayload;
     report->addPar("wire_payload_encoding") = hasWirePayload ? "base64" : "";
     if (hasWirePayload) {
@@ -401,19 +369,8 @@ void MetsrBsmPc5App::reportReceived(Packet* packet)
     else {
         report->addPar("wire_payload_b64") = "";
     }
-    sendDirect(report, bridge, metsr::veinsbridge::SIMU5G_REPORT_GATE);
-}
-
-cModule* MetsrBsmPc5App::resolveBridgeModule()
-{
-    if (bridgeModule != nullptr) {
-        return bridgeModule;
-    }
-    bridgeModule = getModuleByPath(bridgeModulePath.c_str());
-    if (bridgeModule == nullptr && getSimulation() != nullptr) {
-        bridgeModule = getSimulation()->getModuleByPath(bridgeModulePath.c_str());
-    }
-    return bridgeModule;
+    sendDirect(report, bridgeModule, metsr::veinsbridge::SIMU5G_REPORT_GATE);
+    receivedCount += 1;
 }
 
 void MetsrBsmPc5App::socketErrorArrived(UdpSocket*, Indication* indication)

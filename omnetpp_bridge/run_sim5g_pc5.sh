@@ -31,29 +31,7 @@ if [ "$NUM_VEHICLES" -lt 1 ]; then
     exit 2
 fi
 
-mkdir -p "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g"
-mkdir -p "$GENERATED_NED_ROOT/sim5g"
-cp MetsrVeinsBridge.ned "$GENERATED_NED_ROOT/MetsrVeinsBridge.ned"
-sed 's/\.template$//' sim5g/Sim5gCv2xPc5BridgeNetwork.ned.template > \
-    "$GENERATED_NED_ROOT/Sim5gCv2xPc5BridgeNetwork.ned"
-sed 's/\.template$//' sim5g/MetsrBsmPc5App.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmPc5App.ned"
-sed 's/\.template$//' sim5g/MetsrBsmUuApp.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrBsmUuApp.ned"
-sed 's/\.template$//' sim5g/MetsrExternalMobility.ned.template > \
-    "$GENERATED_NED_ROOT/metsr/veinsbridge/sim5g/MetsrExternalMobility.ned"
-sed 's/\.template$//' sim5g/omnetpp-sim5g-pc5.ini.template > \
-    "$GENERATED_NED_ROOT/omnetpp-sim5g-pc5.ini"
-cp sim5g/pc5.xml "$GENERATED_NED_ROOT/sim5g/pc5.xml"
-
-if [ ! -f "$GENERATED_NED_ROOT/Sim5gCv2xPc5BridgeNetwork.ned" ]; then
-    echo "Generated PC5 NED files are missing. Run bash ./build_sim5g.sh first." >&2
-    exit 1
-fi
-if [ ! -f "$GENERATED_NED_ROOT/sim5g/pc5.xml" ]; then
-    echo "Generated PC5 multicast configuration is missing." >&2
-    exit 1
-fi
+bash ./generate_sim5g_files.sh "$GENERATED_NED_ROOT" pc5
 
 LIB_SO="$(find out -name 'libmetsr_veins_bridge_simu5g.so' | head -n 1)"
 if [ -z "$LIB_SO" ]; then

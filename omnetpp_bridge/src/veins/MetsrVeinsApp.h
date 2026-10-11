@@ -15,10 +15,6 @@ class MetsrVeinsApp : public veins::DemoBaseApplLayer {
     void initialize(int stage) override;
     void handleMessage(omnetpp::cMessage* message) override;
     void onBSM(veins::DemoSafetyMessage* bsm) override;
-
-  private:
-    void injectBsm(omnetpp::cMessage* request);
-    omnetpp::cModule* resolveBridge();
 };
 
 } // namespace metsr::veinsbridge

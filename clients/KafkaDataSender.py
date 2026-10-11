@@ -2,7 +2,7 @@
 
 from kafka import KafkaProducer
 import json
-from collections.abc import Mapping
+from utils.configuration import config_value
 
 
 DEFAULT_BOOTSTRAP_SERVERS = "localhost:29092"
@@ -17,23 +17,15 @@ ALLOWED_TOPICS = {
 }
 
 
-def _config_get(config, name, default=None):
-    if config is None:
-        return default
-    if isinstance(config, Mapping):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
 class KafkaDataSender:
     def __init__(self, config=None, bootstrap_servers=None):
         self.config = config
         self.bootstrap_servers = (
             bootstrap_servers
-            or _config_get(
+            or config_value(
                 config,
                 "kafka_bootstrap_servers",
-                _config_get(config, "kafka_bootstrap_server", DEFAULT_BOOTSTRAP_SERVERS),
+                config_value(config, "kafka_bootstrap_server", DEFAULT_BOOTSTRAP_SERVERS),
             )
         )
         
@@ -47,11 +39,9 @@ class KafkaDataSender:
             raise ValueError(
                 "Invalid topic. Choose from: " + ", ".join(sorted(ALLOWED_TOPICS))
             )
-        if isinstance(data, list):
-            for record in data:
-                self.producer.send(topic, record)
-        else:
-            self.producer.send(topic, data)
+        records = data if isinstance(data, list) else [data]
+        for record in records:
+            self.producer.send(topic, record)
         if flush:
             self.producer.flush()
 

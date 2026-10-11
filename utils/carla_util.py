@@ -174,15 +174,6 @@ def _observed_route_segment_id(
 _pending_observed_road_id = _observed_route_segment_id
 
 
-def _first_response_record(response):
-      if not isinstance(response, dict):
-            return {}
-      records = response.get("data", [])
-      if not isinstance(records, list) or not records:
-            return {}
-      return records[0] if isinstance(records[0], dict) else {}
-
-
 def _transition_result(veh_id, status, record=None):
       result = {"vehID": veh_id, "STATUS": status}
       if isinstance(record, dict):
@@ -441,22 +432,6 @@ def configure_metsr_cosim_roads(metsr, metsr_roads):
             metsr.set_cosim_road(road)
 
 
-def _queued_vehicle_id(entry):
-      return entry.get("vehicleId")
-
-
-def _queued_vehicle_private_flag(entry):
-      return entry.get("isPrivate")
-
-
-def _queued_vehicle_internal_id(entry):
-      return entry.get("internalVehicleId")
-
-
-def _queued_vehicle_ready(entry):
-      return entry.get("ready", True)
-
-
 def release_ready_cosim_vehicles_from_queue(metsr, verbose=False):
       if not hasattr(metsr, "query_cosim_entering_vehicle_queue"):
             return []
@@ -468,12 +443,12 @@ def release_ready_cosim_vehicles_from_queue(metsr, verbose=False):
             road_id = road_queue.get("segmentId")
             entries = road_queue.get("queue", [])
             for entry in entries:
-                  if not _queued_vehicle_ready(entry):
+                  if not entry.get("ready", True):
                         continue
                   request = {}
-                  veh_id = _queued_vehicle_id(entry)
-                  internal_id = _queued_vehicle_internal_id(entry)
-                  private_veh = _queued_vehicle_private_flag(entry)
+                  veh_id = entry.get("vehicleId")
+                  internal_id = entry.get("internalVehicleId")
+                  private_veh = entry.get("isPrivate")
 
                   if veh_id is not None:
                         request["vehicleId"] = veh_id
@@ -563,7 +538,15 @@ def _sync_active_carla_vehicle(
             transform_coords=transform_coords,
             segment_id=segment_id,
       )
-      teleport_record = _first_response_record(teleport_response)
+      teleport_records = (
+            teleport_response.get("data", [])
+            if isinstance(teleport_response, dict) else []
+      )
+      teleport_record = (
+            teleport_records[0]
+            if isinstance(teleport_records, list) and teleport_records
+            and isinstance(teleport_records[0], dict) else {}
+      )
       if not teleport_record:
             teleport_record = {
                   "status": "error",

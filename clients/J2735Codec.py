@@ -35,17 +35,9 @@ class J2735CodecUnavailable(J2735CodecError):
     """Raised when strict UPER mode cannot be initialized."""
 
 
-def _config_get(config, name, default=None):
-    if config is None:
-        return default
-    if isinstance(config, Mapping):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
 def _first_config(config, names, default=None):
     for name in names:
-        value = _config_get(config, name)
+        value = config.get(name) if isinstance(config, Mapping) else getattr(config, name, None)
         if value is not None:
             return value
     return default
@@ -106,38 +98,19 @@ def _split_schema_files(value):
     return files
 
 
-def _schema_digest(paths):
-    file_digests = sorted(hashlib.sha256(path.read_bytes()).digest() for path in paths)
-    digest = hashlib.sha256()
-    for file_digest in file_digests:
-        digest.update(file_digest)
-    return digest.hexdigest()
-
-
-def _message_name(record):
-    name = record.get("message_name")
-    if name:
-        return str(name)
-    frame = record.get("messageFrame")
-    if isinstance(frame, Mapping):
-        frame_id = frame.get("messageId")
-        if frame_id in (
-            "basicSafetyMessage",
-            "BasicSafetyMessage",
-            DEFAULT_MESSAGE_FRAME_ID,
-        ):
-            return "BasicSafetyMessage"
-    if "BasicSafetyMessage" in record or "coreData" in record:
-        return "BasicSafetyMessage"
-    return ""
-
-
 def is_bsm_record(record):
     """Return whether *record* represents a Basic Safety Message."""
-    return (
-        isinstance(record, Mapping)
-        and _message_name(record).lower() == "basicsafetymessage"
-    )
+    if not isinstance(record, Mapping):
+        return False
+    name = record.get("message_name")
+    if name:
+        return str(name).lower() == "basicsafetymessage"
+    frame = record.get("messageFrame")
+    if isinstance(frame, Mapping) and frame.get("messageId") in (
+        "basicSafetyMessage", "BasicSafetyMessage", DEFAULT_MESSAGE_FRAME_ID,
+    ):
+        return True
+    return "BasicSafetyMessage" in record or "coreData" in record
 
 
 def _wheel_brakes_bit_string(value):
@@ -191,7 +164,7 @@ def _finite_number(value):
     return number if math.isfinite(number) else None
 
 
-def _geodetic_source(record, core_source, axis):
+def _normalized_geodetic(record, core_source, axis, required):
     if axis == "latitude":
         candidates = (
             (core_source, "lat", True),
@@ -209,14 +182,10 @@ def _geodetic_source(record, core_source, axis):
             (record, "lon", False),
             (record, "long", False),
         )
-    for source, key, encoded in candidates:
-        if key in source:
-            return key, source.get(key), encoded
-    return None, None, False
-
-
-def _normalized_geodetic(record, core_source, axis, required):
-    field, raw_value, encoded = _geodetic_source(record, core_source, axis)
+    field, raw_value, encoded = next(
+        ((key, source[key], encoded) for source, key, encoded in candidates if key in source),
+        (None, None, False),
+    )
     unavailable = 900000001 if axis == "latitude" else 1800000001
     encoded_minimum = -900000000 if axis == "latitude" else -1799999999
     encoded_maximum = unavailable
@@ -253,26 +222,23 @@ def _normalized_geodetic(record, core_source, axis, required):
     return encoded_value
 
 
-def _vehicle_dimension_source(record, core_source, dimension):
-    size = core_source.get("size")
-    if isinstance(size, Mapping) and dimension in size:
-        return f"coreData.size.{dimension}", size.get(dimension), "cm"
-    record_size = record.get("size")
-    if isinstance(record_size, Mapping) and dimension in record_size:
-        return f"size.{dimension}", record_size.get(dimension), "cm"
-    for key in (f"vehicle_{dimension}_cm", f"{dimension}_cm"):
-        if key in record:
-            return key, record.get(key), "cm"
-    for key in (f"vehicle_{dimension}_m", f"{dimension}_m"):
-        if key in record:
-            return key, record.get(key), "m"
-    if dimension in record:
-        return dimension, record.get(dimension), "auto"
-    return None, None, "cm"
-
-
 def _normalized_vehicle_dimension(record, core_source, dimension, required):
-    field, raw_value, unit = _vehicle_dimension_source(record, core_source, dimension)
+    core_size = core_source.get("size")
+    record_size = record.get("size")
+    candidates = (
+        (core_size, dimension, f"coreData.size.{dimension}", "cm"),
+        (record_size, dimension, f"size.{dimension}", "cm"),
+        (record, f"vehicle_{dimension}_cm", f"vehicle_{dimension}_cm", "cm"),
+        (record, f"{dimension}_cm", f"{dimension}_cm", "cm"),
+        (record, f"vehicle_{dimension}_m", f"vehicle_{dimension}_m", "m"),
+        (record, f"{dimension}_m", f"{dimension}_m", "m"),
+        (record, dimension, dimension, "auto"),
+    )
+    field, raw_value, unit = next(
+        ((label, source[key], unit) for source, key, label, unit in candidates
+         if isinstance(source, Mapping) and key in source),
+        (None, None, "cm"),
+    )
     number = _finite_number(raw_value)
     maximum = 1023 if dimension == "width" else 4095
     invalid_reason = None
@@ -298,11 +264,25 @@ def _normalized_vehicle_dimension(record, core_source, dimension, required):
     return encoded
 
 
-def _core_data_for_asn1(
+def build_basic_safety_message_value(
     record,
     require_geodetic=False,
     require_vehicle_size=False,
 ):
+    """Map bridge semantics into an ASN.1 ``BasicSafetyMessage`` value.
+
+    Cartesian ``x``/``y`` fields are intentionally not converted to latitude
+    and longitude. Callers must provide geodetic fields; otherwise the valid
+    J2735 unavailable sentinels are encoded.
+    """
+    explicit = record.get("j2735_asn1_value", record.get("asn1_value"))
+    if explicit is not None:
+        if not isinstance(explicit, Mapping):
+            raise J2735CodecError(
+                "j2735_asn1_value/asn1_value must be a mapping for BasicSafetyMessage."
+            )
+        return dict(explicit)
+
     source = dict(record)
     core_source = next(
         (
@@ -360,34 +340,7 @@ def _core_data_for_asn1(
     accel_source = accel_source if isinstance(accel_source, Mapping) else {}
     if accel_source.get("yaw") is None and source.get("yaw_rate_deg_s") is None:
         core["accelSet"]["yaw"] = 32767
-    return core
-
-
-def build_basic_safety_message_value(
-    record,
-    require_geodetic=False,
-    require_vehicle_size=False,
-):
-    """Map bridge semantics into an ASN.1 ``BasicSafetyMessage`` value.
-
-    Cartesian ``x``/``y`` fields are intentionally not converted to latitude
-    and longitude. Callers must provide geodetic fields; otherwise the valid
-    J2735 unavailable sentinels are encoded.
-    """
-    explicit = record.get("j2735_asn1_value", record.get("asn1_value"))
-    if explicit is not None:
-        if not isinstance(explicit, Mapping):
-            raise J2735CodecError(
-                "j2735_asn1_value/asn1_value must be a mapping for BasicSafetyMessage."
-            )
-        return dict(explicit)
-    return {
-        "coreData": _core_data_for_asn1(
-            record,
-            require_geodetic=require_geodetic,
-            require_vehicle_size=require_vehicle_size,
-        )
-    }
+    return {"coreData": core}
 
 
 def _json_safe(value):
@@ -510,7 +463,8 @@ class Asn1ToolsJ2735UperCodec:
             raise J2735CodecUnavailable(
                 "J2735 ASN.1 file(s) do not exist: " + ", ".join(missing)
             )
-        self.schema_sha256 = _schema_digest(self.schema_files)
+        file_digests = sorted(hashlib.sha256(path.read_bytes()).digest() for path in self.schema_files)
+        self.schema_sha256 = hashlib.sha256(b"".join(file_digests)).hexdigest()
 
         if specification is None:
             try:
@@ -554,55 +508,6 @@ class Asn1ToolsJ2735UperCodec:
             result["schema_revision"] = self.schema_revision
         return result
 
-    @staticmethod
-    def _core_source(record):
-        for key in ("coreData", "BSMcoreData", "core_data"):
-            value = record.get(key)
-            if isinstance(value, Mapping):
-                return value
-        return {}
-
-    def _mapped_bsm(self, record):
-        core_source = self._core_source(record)
-        has_id = any(
-            record.get(key) is not None
-            for key in ("temporary_id", "vehicle_id", "vid", "sender_id")
-        ) or core_source.get("id") is not None
-        if not has_id:
-            raise J2735CodecError(
-                "BSM UPER mapping requires temporary_id, vehicle_id, vid, sender_id, "
-                "or coreData.id."
-            )
-
-        return build_basic_safety_message_value(
-            record,
-            require_geodetic=self.require_geodetic,
-            require_vehicle_size=self.require_vehicle_size,
-        )
-
-    def _asn1_value(self, record):
-        explicit = record.get("j2735_asn1_value", record.get("asn1_value"))
-        if self.value_builder is not None:
-            try:
-                return self.value_builder(record)
-            except Exception as exc:
-                raise J2735CodecError(
-                    f"The configured J2735 value builder rejected the BSM: {exc}"
-                ) from exc
-        if explicit is not None:
-            return explicit
-        if self.type_name == "BasicSafetyMessage":
-            return self._mapped_bsm(record)
-        if self.type_name == "MessageFrame":
-            return {
-                "messageId": self.message_frame_id,
-                "value": ("BasicSafetyMessage", self._mapped_bsm(record)),
-            }
-        raise J2735CodecError(
-            "Automatic semantic mapping is only defined for BasicSafetyMessage "
-            f"and MessageFrame, not {self.type_name!r}; provide asn1_value or a value_builder."
-        )
-
     def encode_message(self, record):
         message = dict(record)
         message.pop("j2735_asn1_value", None)
@@ -629,7 +534,47 @@ class Asn1ToolsJ2735UperCodec:
             message["payload_bytes"] = len(encoded)
             message["j2735_codec"] = self.describe()
             return _json_safe(message)
-        value = self._asn1_value(record)
+        # Resolve explicit/custom values first, then map supported BSM schemas.
+        explicit = record.get("j2735_asn1_value", record.get("asn1_value"))
+        if self.value_builder is not None:
+            try:
+                value = self.value_builder(record)
+            except Exception as exc:
+                raise J2735CodecError(
+                    f"The configured J2735 value builder rejected the BSM: {exc}"
+                ) from exc
+        elif explicit is not None:
+            value = explicit
+        elif self.type_name in {"BasicSafetyMessage", "MessageFrame"}:
+            core_source = next(
+                (record[key] for key in ("coreData", "BSMcoreData", "core_data")
+                 if isinstance(record.get(key), Mapping)),
+                {},
+            )
+            has_id = any(
+                record.get(key) is not None
+                for key in ("temporary_id", "vehicle_id", "vid", "sender_id")
+            ) or core_source.get("id") is not None
+            if not has_id:
+                raise J2735CodecError(
+                    "BSM UPER mapping requires temporary_id, vehicle_id, vid, sender_id, "
+                    "or coreData.id."
+                )
+            value = build_basic_safety_message_value(
+                record,
+                require_geodetic=self.require_geodetic,
+                require_vehicle_size=self.require_vehicle_size,
+            )
+            if self.type_name == "MessageFrame":
+                value = {
+                    "messageId": self.message_frame_id,
+                    "value": ("BasicSafetyMessage", value),
+                }
+        else:
+            raise J2735CodecError(
+                "Automatic semantic mapping is only defined for BasicSafetyMessage "
+                f"and MessageFrame, not {self.type_name!r}; provide asn1_value or a value_builder."
+            )
         try:
             encoded = bytes(
                 self.specification.encode(

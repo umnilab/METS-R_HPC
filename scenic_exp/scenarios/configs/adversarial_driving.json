@@ -1,0 +1,19 @@
+{
+  "safety_scenario": "none",
+  "security_scenario": "adversarial_driving",
+  "test_parameters": {
+    "trigger": {
+      "mode": "time",
+      "start_s": 3
+    },
+    "event": {
+      "duration_s": 2,
+      "repeat_s": 5
+    },
+    "driving": {
+      "mode": "weave",
+      "weave_amplitude": 0.3,
+      "weave_period_s": 2
+    }
+  }
+}

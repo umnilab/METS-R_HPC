@@ -21,6 +21,12 @@ METS-R simulates mobility directly, so the Veins backend does not use SUMO or
 TraCI at runtime. A real-backend delivery is reported only after the receiver
 application gets the packet from its network stack.
 
+The build and run scripts keep backend selection and launch arguments explicit.
+`generate_sim5g_files.sh OUTPUT_DIR uu pc5` handles their shared template copying;
+each runner requests only its own network and routing configuration. Radio send
+and receive logic lives directly in the application callbacks under `src/veins`
+and `sim5g/src`.
+
 ## Install the Toolchains in WSL
 
 The commands below assume a fresh Ubuntu WSL shell and keep simulator

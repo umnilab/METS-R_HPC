@@ -18,32 +18,11 @@ from clients.J2735Codec import (
     create_j2735_codec,
     encode_j2735_messages,
 )
+from utils.configuration import config_value
 
 
 PROTOCOL_NAME = "metsr-veins-jsonl"
 PROTOCOL_VERSION = 1
-
-
-def _config_get(config, name, default=None):
-    if config is None:
-        return default
-    if isinstance(config, Mapping):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
-def _as_list(value):
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
-def _is_sequence(value):
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def _clean_record(record):
@@ -68,8 +47,13 @@ class VeinsProtocolError(RuntimeError):
 
 def build_mobility_records(vehicle_records, private_veh=False, sensor_type=None):
     """Convert canonical or normalized vehicle states to bridge mobility records."""
-    vehicles = _as_list(vehicle_records)
-    if _is_sequence(private_veh):
+    if vehicle_records is None:
+        vehicles = []
+    elif isinstance(vehicle_records, (list, tuple)):
+        vehicles = list(vehicle_records)
+    else:
+        vehicles = [vehicle_records]
+    if isinstance(private_veh, Sequence) and not isinstance(private_veh, (str, bytes, bytearray)):
         private_flags = list(private_veh)
     else:
         private_flags = [private_veh] * len(vehicles)
@@ -190,32 +174,32 @@ class VeinsClient:
         decode_j2735=None,
     ):
         self.config = config
-        self.host = host or _config_get(config, "veins_host", "127.0.0.1")
-        self.port = int(port or _config_get(config, "veins_port", 9099))
-        self.command = command or _config_get(config, "veins_command")
-        self.cwd = cwd or _config_get(config, "veins_cwd")
+        self.host = host or config_value(config, "veins_host", "127.0.0.1")
+        self.port = int(port or config_value(config, "veins_port", 9099))
+        self.command = command or config_value(config, "veins_command")
+        self.cwd = cwd or config_value(config, "veins_cwd")
         self.auto_launch = (
-            bool(_config_get(config, "veins_auto_launch", False))
+            bool(config_value(config, "veins_auto_launch", False))
             if auto_launch is None
             else bool(auto_launch)
         )
         self.connect_timeout = float(
             connect_timeout
             if connect_timeout is not None
-            else _config_get(config, "veins_connect_timeout", 20)
+            else config_value(config, "veins_connect_timeout", 20)
         )
         self.request_timeout = float(
             request_timeout
             if request_timeout is not None
-            else _config_get(config, "veins_request_timeout", 10)
+            else config_value(config, "veins_request_timeout", 10)
         )
         self.retry_interval = float(
             retry_interval
             if retry_interval is not None
-            else _config_get(config, "veins_retry_interval", 0.25)
+            else config_value(config, "veins_retry_interval", 0.25)
         )
         self.verbose = bool(
-            _config_get(config, "verbose", False) if verbose is None else verbose
+            config_value(config, "verbose", False) if verbose is None else verbose
         )
         if hasattr(j2735_codec, "encode_message"):
             self.j2735_codec = j2735_codec
@@ -240,7 +224,7 @@ class VeinsClient:
             }
         )
         self.decode_j2735 = (
-            bool(_config_get(config, "veins_j2735_decode_received", True))
+            bool(config_value(config, "veins_j2735_decode_received", True))
             if decode_j2735 is None
             else bool(decode_j2735)
         )
@@ -401,6 +385,7 @@ class VeinsClient:
         }
 
     def request(self, message_type, **fields):
+        """Send one JSON-line request and validate its matching sidecar response."""
         self.connect()
         self.request_id += 1
         message = {
@@ -410,14 +395,6 @@ class VeinsClient:
         }
         if self.verbose:
             print("VEINS SENT:", message)
-        self._write_json(message)
-        response = self._read_json()
-        if self.verbose:
-            print("VEINS RECEIVED:", response)
-        self._validate_response(message, response)
-        return response
-
-    def _write_json(self, message):
         raw = json.dumps(message, separators=(",", ":")) + "\n"
         try:
             self.socket.sendall(raw.encode("utf-8"))
@@ -425,7 +402,6 @@ class VeinsClient:
             self.close(close_process=False)
             raise VeinsConnectionError("Failed to write to VEINS sidecar.") from exc
 
-    def _read_json(self):
         try:
             line = self.reader.readline()
         except OSError as exc:
@@ -435,25 +411,26 @@ class VeinsClient:
             self.close(close_process=False)
             raise VeinsConnectionError("VEINS sidecar closed the connection.")
         try:
-            return json.loads(line)
+            response = json.loads(line)
         except json.JSONDecodeError as exc:
             raise VeinsProtocolError(
                 f"VEINS sidecar returned invalid JSON: {line!r}"
             ) from exc
-
-    def _validate_response(self, request, response):
+        if self.verbose:
+            print("VEINS RECEIVED:", response)
         if not isinstance(response, Mapping):
             raise VeinsProtocolError("VEINS sidecar response must be a JSON object.")
         request_id = response.get("request_id")
-        if request_id is not None and request_id != request.get("request_id"):
+        if request_id is not None and request_id != message.get("request_id"):
             raise VeinsProtocolError(
                 f"VEINS sidecar returned request_id={request_id}, "
-                f"expected {request.get('request_id')}."
+                f"expected {message.get('request_id')}."
             )
         status = response.get("status", "ok")
         if status not in ("ok", "OK", "success"):
-            message = response.get("message", response.get("error", response))
-            raise VeinsProtocolError(f"Veins bridge rejected request: {message}")
+            detail = response.get("message", response.get("error", response))
+            raise VeinsProtocolError(f"Veins bridge rejected request: {detail}")
+        return response
 
     def close(self, close_process=True):
         if self.reader is not None:
@@ -478,7 +455,7 @@ class VeinsClient:
 
 def create_v2x_client(config=None, **overrides):
     """Create the real OMNeT++/VEINS bridge client."""
-    if bool(_config_get(config, "veins_use_local_fallback", False)):
+    if bool(config_value(config, "veins_use_local_fallback", False)):
         raise ValueError(
             "The local V2X fallback has been removed. Start an OMNeT++/VEINS "
             "bridge and connect with VeinsClient instead."

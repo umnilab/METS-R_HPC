@@ -1,0 +1,28 @@
+{
+  "safety_scenario": "collision_avoidance",
+  "security_scenario": "adversarial_perception",
+  "test_parameters": {
+    "trigger": {
+      "mode": "time",
+      "start_s": 1
+    },
+    "event": {
+      "duration_s": 3
+    },
+    "perception": {
+      "camera_id": null,
+      "mode": "patch",
+      "roi": [
+        0.4,
+        0.4,
+        0.2,
+        0.2
+      ],
+      "color_rgb": [
+        255,
+        0,
+        0
+      ]
+    }
+  }
+}

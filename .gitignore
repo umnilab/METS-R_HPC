@@ -9,3 +9,7 @@ output/*
 /scenic_exp/data_logs/
 /eval
 /plant_viz
+/metsr_scenic_runtime.egg-info/
+/scenic_exp/presentations
+/tests
+/pretrained

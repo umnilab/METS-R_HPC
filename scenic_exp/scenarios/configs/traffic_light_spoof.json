@@ -1,0 +1,15 @@
+{
+  "safety_scenario": "none",
+  "security_scenario": "traffic_control_spoofing",
+  "test_parameters": {
+    "trigger": {
+      "mode": "time",
+      "start_s": 3
+    },
+    "traffic_control": {
+      "actor_id": null,
+      "state": "Green",
+      "radius_m": 80
+    }
+  }
+}

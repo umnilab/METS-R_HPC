@@ -239,7 +239,7 @@ class Args:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Args:
-    from utils.scenic_testing import SAFETY_SCENARIOS, SECURITY_SCENARIOS
+    from scenic_exp.runtime.config import SAFETY_SCENARIOS, SECURITY_SCENARIOS
     defaults = Args()
     parser = argparse.ArgumentParser(
         description="Run a Scenic scenario with a TRACR-style live dashboard.",
@@ -376,7 +376,7 @@ def normalize_args(args: Args) -> Args:
         raise ValueError("--total-simulations must be at least one for benchmarking")
     args.scenic_file = str(Path(args.scenic_file).expanduser().resolve())
     if args.test_config:
-        from utils.scenic_testing import load_test_config
+        from scenic_exp.runtime.config import load_test_config
         args.test_config = str(Path(args.test_config).expanduser().resolve())
         load_test_config(args.test_config)  # Fail before starting any simulators.
     if args.pcla_dir:
@@ -432,11 +432,24 @@ def _scenario_uses_pcla(scenic_file: str, ego_controller: Optional[str] = None) 
         return False
     if ego_controller is not None:
         return ego_controller == "pcla"
-    # Template presets declare their controller before importing the shared Main.
-    match = re.search(r"^\s*param\s+ego_controller\s*=\s*(['\"])([^'\"]+)\1", source, re.MULTILINE)
-    if match:
-        return match.group(2) == "pcla"
-    return 'from PCLA import PCLA' in source
+    # Read both preset literals and the template's globalParameters.get defaults.
+    def parameter_default(name: str) -> Optional[str]:
+        match = re.search(
+            rf"^\s*param\s+{name}\s*=\s*"
+            rf"(?:globalParameters\.get\(\s*['\"]{name}['\"]\s*,\s*)?"
+            r"(['\"])([^'\"]+)\1",
+            source, re.MULTILINE,
+        )
+        return match.group(2) if match else None
+
+    if parameter_default("backend") in ("carla", "metsr"):
+        return False
+    controller = parameter_default("ego_controller")
+    if controller is not None:
+        return controller == "pcla"
+    # A preset importing Main without a controller inherits the PCLA default.
+    imports_template = re.search(r"^\s*from\s+traffic_template\s+import\b", source, re.MULTILINE)
+    return bool(imports_template) or 'from PCLA import PCLA' in source
 
 
 def resolve_pcla_root(args: Args) -> Path:
@@ -1106,7 +1119,10 @@ class VizRenderWorker:
         self.dashboard.set_status(f"METS-R Vis stream configured: {stream_url}", run_state="ready")
 
     def wait_for_browser_client(self, timeout_s: float) -> bool:
-        wait_for_client = getattr(self.client, "_wait_for_viz_stream_client", None)
+        wait_for_client = getattr(self.client, "wait_for_visualization_client", None)
+        if not callable(wait_for_client):
+            # Independently installed Scenic clients still use the older name.
+            wait_for_client = getattr(self.client, "_wait_for_viz_stream_client", None)
         if not callable(wait_for_client):
             return False
         try:
@@ -1145,7 +1161,10 @@ class VizRenderWorker:
                 tick = int(client.query_tick())
             except Exception:
                 tick = getattr(client, "current_tick", None)
-            query = getattr(client, "_query_viz_stream_vehicle_records", None)
+            query = getattr(client, "query_visualization_vehicles", None)
+            if not callable(query):
+                # Independently installed Scenic clients still use the older name.
+                query = getattr(client, "_query_viz_stream_vehicle_records", None)
             if callable(query):
                 try:
                     records = query(
@@ -1770,7 +1789,7 @@ def compile_scenario(args: Args, scenic_module: Any, set_debugging_options: Any,
     }
     params.update(pcla_agent=args.pcla_agent, pcla_route=args.pcla_route)
     if args.test_config:
-        from utils.scenic_testing import load_test_config
+        from scenic_exp.runtime.config import load_test_config
         params.update(load_test_config(args.test_config))
     # Forward resolved paths so the Scenic network matches the simulator's maps.
     for name in ("spawn_interval_s", "allow_bubble_spawns", "ego_controller",
@@ -1971,7 +1990,7 @@ def run(args: Args) -> int:
                 csv_path = run_base.with_name(run_base.name + "_trajectory.csv")
                 print(f"Writing Scenic records to: {csv_path}")
                 write_scenic_records(records, csv_path)
-                from utils.scenic_testing import write_test_report
+                from scenic_exp.runtime.reporting import write_test_report
                 write_test_report(result, getattr(scenario, "params", {}), csv_path.with_name(csv_path.stem + "_test_events.json"))
 
                 evlogs = changed_evlogs(before_evlogs, args.output_root, run_start)

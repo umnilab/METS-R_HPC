@@ -11,6 +11,21 @@ Scenic implementation is included in `traffic_template.scenic`; presets import
 `Main` from that file. There are no separate helper `.scenic` modules.
 These scenarios require the [METSRSim Scenic fork](https://github.com/Kv139/Scenic/tree/METSRSim).
 
+Install this repository's shared Python runtime into that same environment:
+
+```bash
+python -m pip install -e .
+```
+
+Run the install command from the repository root. The `metsr-scenic-runtime`
+distribution installs `scenic_exp.runtime`; it does not install Scenic, CARLA,
+PCLA, controller weights, or the simulators. Camera snapshot rendering additionally
+uses Pillow (`python -m pip install -e ".[images]"`). Scenario files and maps remain
+in this checkout. Once installed, runtime imports also work outside the repository
+working directory. Existing `utils.scenic_testing` and `scenic_exp.runtime.testing`
+imports remain compatibility aliases; new code should import the owning runtime
+module listed below.
+
 ## Parameters to change
 
 | Parameter | Meaning |
@@ -24,12 +39,12 @@ These scenarios require the [METSRSim Scenic fork](https://github.com/Kv139/Scen
 | `length`, `timestep` | Duration and control/synchronization step, in simulation seconds. The scenario continues to `length` after the spawn budget is exhausted. |
 | `bubble_size` | METS-R/CARLA bubble radius in meters. In the CARLA hybrid preset it instead means Traffic Manager's full-physics radius. |
 | `allow_bubble_spawns` | Co-simulation only: whether random commuter spawns may occur inside the ego's bubble. |
-| `ego_controller` | Co-simulation: `"pcla"`, `"autopilot"`, or `"external"`. External control needs a Python runner such as demo4. |
+| `ego_controller` | Co-simulation: `"pcla"`, `"autopilot"`, or `"external"`. External control requires a registered shared runtime; a missing provider raises an error before the first step. demo4 registers one. |
 | `pcla_agent` | A single installed PCLA selector, e.g. `"lav_fast"`, `"lbc_lb"`, `"simlingo_simlingo"`. Requires its dependencies and weights. |
 | `pcla_route` | `None` generates PCLA waypoints from the ego's authoritative METS-R route. An explicit route XML should describe the same route/map. |
 | `seed` | Experiment label and seed used by demo2. With the Scenic CLI, also set `-s` to seed actual sampling. |
 | `safety_scenario` | `none`, `vehicle_interception`, `traffic_blockage`, `sudden_braking`, `cut_in`, `merge`, or `collision_avoidance`. |
-| `security_scenario` | `none`, `sensor_spoofing`, `traffic_control_spoofing`, `adversarial_perception`, or `adversarial_driving`. |
+| `security_scenario` | `none`, `sensor_spoofing`, `traffic_control_spoofing`, `adversarial_perception`, `stop_sign_patch`, or `adversarial_driving`. |
 | `test_parameters` | Nested placement, trigger, event, hazard, sensor, perception, traffic-control and driving settings; see below. |
 | `attack_behavior` | `"none"` (default) or `"periodic_brake"`. The latter overrides executed control commands. |
 | `attack_target` | `"ego"` or a commuter name such as `"car_0"`. A commuter can brake only while represented by a CARLA actor. |
@@ -117,7 +132,7 @@ explicitly so demo2 can detect whether PCLA is required before compilation.
 | `constant_flow_n_only_carla.scenic` | CARLA-only, Traffic Manager autopilot; no METS-R or PCLA. |
 | `constant_flow_n_hybrid_carla.scenic` | CARLA-only hybrid physics, 50 m full-physics radius. This is not METS-R/CARLA co-simulation. |
 | `constant_flow_n_all_metsr.scenic` | METS-R-only demand. No physical ego or PCLA; `num_commuters` counts all requested trips. |
-| `town05_stop_sign_patch.scenic` | demo4's Town05 scenario: externally controlled ego, fixed start, paired local traffic and visual stop-sign patch. |
+| `town05_stop_sign_patch.scenic` | Town05 paired-trial preset: shared external PCLA runtime, runner-selected approach and local traffic, visual stop-sign patch. demo4 supplies the sweep/dashboard. |
 
 The old scripts' machine-specific addresses now default to localhost. Missing town
 and duration defaults have been supplied. CARLA-only vehicles explicitly use
@@ -184,6 +199,7 @@ python tutorials/dashboard_demos/demo2.py scenic_exp/scenarios/traffic_template.
 | `sensor_spoofing` | Bias one declared speedometer, GNSS or IMU payload immediately before PCLA inference. Select its kind, optional sensor ID, and offsets. | PCLA |
 | `traffic_control_spoofing` | Set one CARLA traffic light to Red/Yellow/Green/Off each active tick. Explicit actor ID or nearest light within a radius. | PCLA or autopilot |
 | `adversarial_perception` | Overlay an RGB rectangle on one camera input, or black out its RGB channels. Select camera ID, image-relative ROI and color. | PCLA |
+| `stop_sign_patch` | Recolor red pixels blue inside one stop sign's projected region in each RGB camera. Select sign index, range, color thresholds and ROI scale. | PCLA; shared external stop-sign runtime |
 | `adversarial_driving` | Alter ego's executed control after inference: steering bias, sinusoidal weave, full brake, or throttle burst. | PCLA |
 
 Choose one security effect and optionally combine it with a safety encounter.
@@ -219,6 +235,27 @@ Edit the chosen file to customize it, or put the equivalent nested dictionary in
 `param test_parameters`. Setting `--security-scenario none` disables the security
 effect while retaining the JSON safety profile for a baseline trial.
 
+The stop-sign effect is also available through the ordinary template, without
+importing or running demo4:
+
+```bash
+python tutorials/dashboard_demos/demo2.py scenic_exp/scenarios/traffic_template.scenic --town Town05 --length 60 --timestep 0.05 --metsr-tick-seconds 0.05 --pcla-dir /path/to/PCLA --pcla-agent tfv6_visiononly --test-config scenic_exp/scenarios/configs/stop_sign_patch.json
+```
+
+This selects the effect, not an approach route. The ego keeps the template's
+placement and authoritative METS-R route. Choose an `initial_pose` and matching
+route that encounter the configured sign, or combine the effect with a safety
+profile whose placement meets that requirement. A sampled merge need not pass
+the selected stop sign; patch counters report actual exposure. `stop_sign.index`
+uses the same coordinate-sorted upright-sign discovery as demo4. No suitable
+sign or enabled attack without an RGB camera fails explicitly.
+
+For automatic stop-approach selection and paired baseline/attack trials, use
+`python tutorials/dashboard_demos/demo4.py --pcla-dir /path/to/PCLA --candidate-limit 1`.
+Its CLI patch settings are converted to the same validated `test_parameters`
+schema passed to Scenic and the shared runtime. Baselines set
+`stop_sign.enabled=false`, preserving target discovery and camera views.
+
 ## Playable configuration
 
 Unknown keys and invalid ranges fail early. All times are simulation seconds,
@@ -232,6 +269,7 @@ distances are meters, and speeds are m/s.
 | `hazard` | `speed_mps=8`, `merge_distance_m=20`, `lookahead_m=5`. Target speed before/after braking, forward merge length, and path-following lookahead. Vehicles accelerate from rest. |
 | `sensor` | `id=null`, `kind="speedometer"`, `speed_bias_mps=5`; `gnss_offset=[0.0001,0.0001,0]` (latitude degrees, longitude degrees, altitude m); `imu_offset=[0,0,0,0,0,0.1,0]` (accel xyz m/s^2, gyro xyz rad/s, compass rad). Speed is clamped to nonnegative. |
 | `perception` | `camera_id=null`, `mode="patch"` or `"blackout"`; `roi=[0.4,0.4,0.2,0.2]` is normalized left/top/width/height; `color_rgb=[255,0,0]`. Camera payload is BGR/BGRA; conversion preserves alpha. |
+| `stop_sign` | `index=0`, `enabled=true`, `max_distance_m=90`, `minimum_red=90`, `red_dominance=1.25`, `roi_scale=1.7`, `min_patch_pixels=25`. Uses the common trigger/event window. Selected red pixels become blue; alpha and other feeds are preserved. |
 | `traffic_control` | `actor_id=null`, `state="Green"`, `radius_m=80`. Null selects nearest light at each event onset; explicit IDs belong to the current CARLA world. |
 | `driving` | `mode="weave"`, `steer_bias=0.15`, `weave_amplitude=0.3`, `weave_period_s=2`, `throttle=0.75`. Modes: weave, steering_bias, brake_check, throttle_burst. Steer is clamped to [-1,1]. |
 
@@ -271,16 +309,38 @@ Implementation locations:
   Each backend defines `Main`; only the selected backend is loaded.
   `SafetyHazard` controls hazard motion, and `EgoController` owns runtime
   setup/cleanup and invokes `PCLAAgent` or autopilot.
-- [utils/scenic_testing.py](../../utils/scenic_testing.py): `safety_sites` selects
-  geometry; `merge_path` and `path_control` implement hazard motion;
-  `trigger_reached`/`event_active` schedule effects; `ScenarioRuntime` owns the
-  reversible sensor hook and light override; `perturb_sensor_batch` edits copied
-  observations and `modify_control` alters executed commands.
+- [config.py](../runtime/config.py): scenario choices, default parameters,
+  validation, and JSON profile loading.
+- [safety.py](../runtime/safety.py): `safety_sites` selects geometry;
+  `merge_path` and `path_control` implement hazard motion.
+- [timing.py](../runtime/timing.py): encounter distance/TTC, trigger evaluation,
+  and repeating event windows.
+- [sensors.py](../runtime/sensors.py): `perturb_sensor_batch` edits copied
+  observations while preserving timestamps and untouched feeds.
+- [scenario.py](../runtime/scenario.py): `ScenarioRuntime` coordinates scheduling,
+  reversible sensor hooks, traffic-light overrides, control changes, and records.
+- [reporting.py](../runtime/reporting.py): report serialization.
+- [stop_sign/](../runtime/stop_sign/): `targets.py` discovers signs and selects
+  approaches, `geometry.py` projects targets into images, `patch.py` implements
+  the ingress camera tap, and `routing.py` constructs routes through stop lanes.
+  Existing `from scenic_exp.runtime.stop_sign import ...` imports still work.
+- [controllers.py](../runtime/controllers.py): optional PCLA loading, inference,
+  control application and sensor cleanup. Shared controllers preserve the
+  simulator-owned vehicle by default.
+- [external.py](../runtime/external.py): `StopSignControllerRuntime` owns one
+  external trial's controller and effect. demo4 subclasses it only for observations
+  and dashboard updates.
+- [integration.py](../runtime/integration.py) and [lifecycle.py](../runtime/lifecycle.py):
+  instance-scoped runtime attachment, control ordering and pre-actor cleanup.
+- [testing.py](../runtime/testing.py): explicit compatibility exports for older
+  callers; it contains no scenario implementation.
 
 To add a behavior, extend `SAFETY_SCENARIOS` or `SECURITY_SCENARIOS` and the relevant
-config validation in the Python helper (demo2 imports these choices). Add its
-placement in `safety_sites` and its motion in `SafetyHazard`, or add a runtime effect
-with restoration in `ScenarioRuntime.close`. Keep PCLA construction outside the
+validation in `config.py` (demo2 imports these choices). Add its placement in
+`safety.py` and its motion in the template's `SafetyHazard`. Sensor transforms
+belong in `sensors.py`; install/restore their hooks through `ScenarioRuntime` in
+`scenario.py`. Shared triggers and event windows belong in `timing.py`.
+Keep PCLA construction outside the
 step loop and inference once per tick. Keep `self.pcla` for profiling and cleanup.
 Scenic behaviors must yield using `take`, `wait` or `do` each iteration; imports
 needed at runtime belong in regular Python functions in this fork.
@@ -294,15 +354,55 @@ replace the image-editing branch of `perturb_sensor_batch`, keeping frame identi
 shape/channel conventions and untouched feeds intact.
 
 For world-anchored stop-sign patch trials, [demo4.py](../../tutorials/dashboard_demos/demo4.py)
-remains the specialized implementation. It owns its controller/attack through
-`ego_controller="external"`; new profile selectors must stay `none`. Its
+provides candidate sweeps, paired local demand, reports and a dashboard. Controller
+and attack implementations live in the shared runtime. This preset uses
+`ego_controller="external"` and `security_scenario="stop_sign_patch"`; its
+`safety_scenario` must remain `none` because the runner owns placement. Use the
+ordinary PCLA template to combine a safety profile and an input effect. Its
 `local_commuter_poses` tuples `(x,y,z,heading,road_id,lane_id)` override random flow
 placement. Outside safety profiles, `initial_pose=(x,y,heading)` fixes ego. Convert
 CARLA coordinates to Scenic as `(x,-y)` and heading `-radians(carla_yaw+90)`.
 
+Custom runners can register a runtime without importing demos:
+
+```python
+from types import SimpleNamespace
+from scenic_exp.runtime.external import StopSignControllerRuntime
+from scenic_exp.runtime.integration import install_runtime_hook
+
+# args, spec, and scenario are prepared by the runner; spec identifies the
+# selected candidate, phase, run number, and whether this is an attack trial.
+runtime = StopSignControllerRuntime(args, spec, test_parameters=scenario.params["test_parameters"])
+holder = SimpleNamespace(current=runtime)
+uninstall = install_runtime_hook(simulator, holder)
+try:
+    simulator.simulate(scene)
+finally:
+    runtime.close()
+    uninstall()
+```
+
+Each trial needs a fresh runtime. The template's external behavior attaches it
+before the first step, including forks which run inside the simulation constructor.
+The adapter wraps only the simulator factory and simulation instances; it does
+not modify `CosimSimulation` globally. It prepares effects before the co-simulation
+step and applies external PCLA control after actor transfers, once per step.
+Cleanup uses the fork's `add_pre_actor_teardown_callback` when available, with an
+instance `destroy` fallback for older adapters. No Scenic fork modification is
+required for this integration; simulator stepping and actor ownership stay there.
+
+Sensor timing is explicit: speed/GNSS/IMU and rectangular image perturbations
+transform the consumed batch immediately before inference. The stop-sign tap
+preserves demo4's camera-arrival stage and uses the current ego transform when
+that callback runs; it does not claim exact camera-frame/pose synchronization.
+Original and modified snapshots retain the frame timestamp. Avoid stacking
+independent taps on the same interface; one `ScenarioRuntime` binds once and owns
+its cleanup. One security effect per run is supported.
+
 Offline regression tests (no running simulator servers required):
 
 ```bash
+python -m unittest discover -s scenic_exp/tests
 python -m unittest discover -s tests -p 'test_scenic_testing.py'
 python -m unittest discover -s tests -p 'test_scenic_traffic_templates.py'
 ```

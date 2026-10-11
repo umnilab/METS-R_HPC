@@ -1,0 +1,14 @@
+{
+  "safety_scenario": "cut_in",
+  "security_scenario": "sensor_spoofing",
+  "test_parameters": {
+    "trigger": {
+      "mode": "time",
+      "start_s": 3
+    },
+    "sensor": {
+      "kind": "speedometer",
+      "speed_bias_mps": 5
+    }
+  }
+}

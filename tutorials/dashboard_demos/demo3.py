@@ -12,7 +12,6 @@ run this script from the PCLA Conda environment after installing its weights.
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import math
 import os
 import sys
@@ -34,6 +33,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 os.chdir(_REPO_ROOT)
 
+from scenic_exp.runtime.controllers import (  # noqa: E402
+    PCLAController as _SharedPCLAController,
+    _distance,
+    _generate_pcla_route,
+    _import_pcla,
+)
 from utils.cosim_support import (  # noqa: E402
     CarlaSensorPanel,
     TRACRDashboard,
@@ -545,112 +550,9 @@ class PCLACameraTap:
             self._interface.update_sensor = self._original_update
 
 
-def _validate_pcla_antlr_runtime() -> None:
-    """Fail early with the PCLA repair command for incompatible ANTLR installs."""
-    try:
-        runtime_version = importlib.metadata.version("antlr4-python3-runtime")
-    except importlib.metadata.PackageNotFoundError:
-        runtime_version = "not installed"
+class PCLAController(_SharedPCLAController):
+    """Dashboard adapter retaining the demo's camera tap and route defaults."""
 
-    try:
-        # PCLA's Hydra/OmegaConf configuration imports a generated ANTLR parser.
-        # Import it here so a dependency mismatch is diagnosed before agent setup.
-        import omegaconf  # noqa: F401
-    except Exception as exc:
-        detail = str(exc).splitlines()[0]
-        if "Could not deserialize ATN" not in detail:
-            raise
-        repair = (
-            f'"{sys.executable}" -m pip install --force-reinstall '
-            "antlr4-python3-runtime==4.9.3"
-        )
-        raise RuntimeError(
-            "PCLA cannot load OmegaConf because its generated parser is "
-            "incompatible with the installed antlr4-python3-runtime "
-            f"({runtime_version}). PCLA pins version 4.9.3. Repair this "
-            f"Python environment with: {repair}"
-        ) from exc
-
-
-def _import_pcla(pcla_dir: Optional[str]) -> Any:
-    if pcla_dir:
-        root = Path(pcla_dir).expanduser().resolve()
-        if not (root / "PCLA.py").exists():
-            raise RuntimeError(f"--pcla-dir does not contain PCLA.py: {root}")
-        if str(root) not in sys.path:
-            sys.path.append(str(root))
-    _validate_pcla_antlr_runtime()
-    try:
-        import PCLA as pcla_module
-    except ImportError as exc:
-        raise RuntimeError(
-            "Could not import PCLA. Activate the PCLA Conda environment and pass "
-            "--pcla-dir or set PCLA_HOME to the PCLA checkout."
-        ) from exc
-    return pcla_module
-
-
-def _distance(a: Any, b: Any) -> float:
-    return math.sqrt(
-        (float(a.x) - float(b.x)) ** 2
-        + (float(a.y) - float(b.y)) ** 2
-        + (float(a.z) - float(b.z)) ** 2
-    )
-
-
-def _generate_pcla_route(
-    pcla_module: Any,
-    carla_client: Any,
-    ego_actor: Any,
-    output_path: Path,
-    end_spawn_index: Optional[int],
-    min_distance_m: float,
-) -> Path:
-    world = carla_client.get_world()
-    start_location = ego_actor.get_location()
-    spawn_points = list(world.get_map().get_spawn_points())
-    if len(spawn_points) < 2:
-        raise RuntimeError("Town06 did not expose enough spawn points for a PCLA route")
-
-    if end_spawn_index is not None:
-        if not 0 <= int(end_spawn_index) < len(spawn_points):
-            raise ValueError(
-                f"--route-end-spawn-index must be in [0, {len(spawn_points) - 1}]"
-            )
-        candidates = [spawn_points[int(end_spawn_index)]]
-    else:
-        candidates = sorted(
-            spawn_points,
-            key=lambda transform: _distance(start_location, transform.location),
-            reverse=True,
-        )
-        preferred = [
-            transform
-            for transform in candidates
-            if _distance(start_location, transform.location) >= float(min_distance_m)
-        ]
-        candidates = (preferred or candidates)[:20]
-
-    last_error: Optional[BaseException] = None
-    for destination in candidates:
-        try:
-            waypoints = pcla_module.location_to_waypoint(
-                carla_client,
-                start_location,
-                destination.location,
-            )
-            if len(waypoints) <= 1:
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            pcla_module.route_maker(waypoints, str(output_path))
-            if output_path.exists():
-                return output_path
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError("Could not generate a connected Town06 route for PCLA") from last_error
-
-
-class PCLAController:
     def __init__(
         self,
         args: argparse.Namespace,
@@ -658,84 +560,17 @@ class PCLAController:
         carla_client: Any,
         ego_actor: Any,
     ) -> None:
-        self.ego_actor = ego_actor
-        self.last_control: Any = None
-        self.tap: Optional[PCLACameraTap] = None
-        self.pcla: Any = None
-
-        try:
-            ego_actor.set_autopilot(False)
-        except Exception:
-            pass
-        try:
-            ego_actor.set_simulate_physics(True)
-        except Exception:
-            pass
-        ego_actor.apply_control(carla_module.VehicleControl(throttle=0.0, brake=1.0))
-
-        pcla_module = _import_pcla(args.pcla_dir)
-        if args.pcla_route:
-            route_path = _resolve_repo_path(args.pcla_route)
-            if not route_path.exists():
-                raise FileNotFoundError(f"PCLA route does not exist: {route_path}")
-        else:
-            route_path = _generate_pcla_route(
-                pcla_module,
-                carla_client,
-                ego_actor,
-                _resolve_repo_path(args.route_output),
-                args.route_end_spawn_index,
-                args.route_min_distance_m,
-            )
-        self.route_path = route_path
-
-        # PCLA clears a generic top-level "utils" module while loading agents.
-        # Preserve this repository's package so dashboard cleanup remains stable.
-        repo_utils = {
-            name: module
-            for name, module in sys.modules.items()
-            if name == "utils" or name.startswith("utils.")
-        }
-        try:
-            self.pcla = pcla_module.PCLA(
-                args.pcla_agent,
-                ego_actor,
-                str(route_path),
-                carla_client,
-            )
-        finally:
-            for name in list(sys.modules):
-                if name == "utils" or name.startswith("utils."):
-                    sys.modules.pop(name, None)
-            sys.modules.update(repo_utils)
-        self.tap = PCLACameraTap(self.pcla)
-
-    @property
-    def camera_specs(self) -> Sequence[Mapping[str, Any]]:
-        return [] if self.tap is None else self.tap.camera_specs
-
-    def step(self) -> Any:
-        control = self.pcla.get_action()
-        self.ego_actor.apply_control(control)
-        self.last_control = control
-        return control
-
-    def camera_snapshots(self) -> Dict[str, Tuple[str, bytes, Any]]:
-        return {} if self.tap is None else self.tap.snapshots()
+        super().__init__(
+            args,
+            carla_module,
+            carla_client,
+            ego_actor,
+            tap_factory=PCLACameraTap,
+            path_resolver=_resolve_repo_path,
+        )
 
     def close(self, *, destroy_vehicle: bool = True) -> None:
-        if self.tap is not None:
-            self.tap.close()
-            self.tap = None
-        if self.pcla is not None:
-            try:
-                if destroy_vehicle:
-                    self.pcla.cleanup()
-                else:
-                    self.pcla.cleanup(destroy_vehicle=False)
-            except Exception as exc:
-                print(f"PCLA cleanup warning: {str(exc).splitlines()[0]}")
-            self.pcla = None
+        super().close(destroy_vehicle=destroy_vehicle)
 
 
 @dataclass
@@ -805,24 +640,13 @@ def _carla_roads(world: Any) -> List[int]:
         return []
 
 
-def _actor_for_vehicle(state: Any, vehicle_id: Any) -> Optional[Tuple[Any, Any]]:
-    for key, actor in getattr(state, "active_vehicles", {}).items():
-        if str(key) == str(vehicle_id):
-            try:
-                if actor is not None and actor.is_alive:
-                    return key, actor
-            except RuntimeError:
-                continue
-    return None
-
-
 def _select_ego_actor(
     state: Any,
     requested_vehicle_id: Optional[Any],
 ) -> Optional[Tuple[Any, Any]]:
-    if requested_vehicle_id is not None:
-        return _actor_for_vehicle(state, requested_vehicle_id)
     for vehicle_id, actor in getattr(state, "active_vehicles", {}).items():
+        if requested_vehicle_id is not None and str(vehicle_id) != str(requested_vehicle_id):
+            continue
         try:
             if actor is not None and actor.is_alive:
                 return vehicle_id, actor
@@ -1011,7 +835,7 @@ def run(args: argparse.Namespace) -> int:
                     transform_coords=True,
                     speed=speed_mps,
                 )
-                control = controller.step()
+                control = controller.step(tick=loop_index)
 
             final_tick = loop_index == int(args.ticks) - 1
             render_now = final_tick or loop_index % int(args.render_every) == 0

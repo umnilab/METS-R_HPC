@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metsr-scenic-runtime"
+version = "0.1.0"
+description = "Reusable safety and security runtime for METS-R Scenic experiments"
+requires-python = ">=3.10"
+dependencies = ["numpy", "shapely"]
+
+[project.optional-dependencies]
+images = ["Pillow"]
+
+[tool.setuptools.packages.find]
+include = ["scenic_exp", "scenic_exp.runtime*"]
+namespaces = false
